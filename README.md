@@ -57,11 +57,11 @@ Tests use a small redacted rollout fixture under `tests/fixtures/`; they do not 
 
 ## Branching and releases
 
-This repository uses git-flow conventions:
+During initial MVP development, changes are committed directly to `develop`:
 
 - `main` contains released work.
-- `develop` is the integration branch.
-- `feature/*`, `release/*`, and `hotfix/*` branches follow standard git-flow roles.
+- `develop` contains all ongoing MVP work.
+- Feature branches are intentionally deferred until the project needs them.
 
 Record user-visible changes in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`. Releases follow semantic versioning where practical.
 

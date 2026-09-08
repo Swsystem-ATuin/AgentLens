@@ -12,7 +12,7 @@ These instructions apply to the entire repository.
 
 ## Repository hygiene
 
-- Use git-flow branch conventions: `main`, `develop`, `feature/*`, `release/*`, and `hotfix/*`.
+- While the initial MVP is under development, commit all work directly to `develop`; do not create feature branches. Continue to reserve `main` for released work.
 - Push every commit to the canonical remote in the same task; do not leave committed work only in the local repository.
 - Keep `README.md` accurate when commands, architecture, configuration, or user-visible behavior change.
 - Add noteworthy changes to `CHANGELOG.md` under `Unreleased` in the same change that introduces them.
