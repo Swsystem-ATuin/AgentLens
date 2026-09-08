@@ -13,6 +13,7 @@ These instructions apply to the entire repository.
 ## Repository hygiene
 
 - Use git-flow branch conventions: `main`, `develop`, `feature/*`, `release/*`, and `hotfix/*`.
+- Push every commit to the canonical remote in the same task; do not leave committed work only in the local repository.
 - Keep `README.md` accurate when commands, architecture, configuration, or user-visible behavior change.
 - Add noteworthy changes to `CHANGELOG.md` under `Unreleased` in the same change that introduces them.
 - Never commit `data/*`, local SQLite indexes, credentials, build output, or unredacted agent artifacts.
