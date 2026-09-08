@@ -67,6 +67,8 @@ The `AGENT_LENS_DB` environment variable provides the same override.
 
 Planned improvements and architecture follow-ups are tracked in [TODO.md](TODO.md). Update the checklist as work is completed or requirements change.
 
+Multiple application users are a planned requirement. The current shared username/password is interim; individual identities, access permissions, and persistent account storage are tracked in the TODO list and are not implemented yet.
+
 ```bash
 cargo fmt --check
 cargo test

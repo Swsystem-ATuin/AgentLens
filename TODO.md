@@ -20,12 +20,19 @@ The current direction is to retain Rust, SQLite, and server-rendered HTML. Techn
 - [ ] **Separate source adapters from generic application logic.** Move Codex discovery, parsing, and setup-marker recognition into source-specific modules. Keep normalised events, indexing, queries, and presentation generic; preserve existing behavior with tests.
 - [ ] **Separate querying and transcript presentation from route handlers.** Extract focused modules as part of the source-boundary refactor, keeping handlers responsible for request extraction and responses.
 
+## Planned requirement — Multiple application users
+
+Multiple application users are a confirmed future requirement. The current shared Basic authentication credential is an interim implementation. Timing and the visibility policy between users remain to be decided.
+
+- [ ] **Choose the authentication approach before shared deployment.** Support individual identities using an established identity provider or established session authentication. Provide login, logout, session expiry, and account/session revocation. If passwords are managed locally, store password hashes instead of plaintext and define account provisioning and recovery.
+- [ ] **Define and enforce access permissions.** Decide whether users share all indexed data or have access scoped to selected sources, hosts, or sessions, and define any administration roles. Enforce the chosen policy on the server for lists, filters, direct transcript URLs, and future endpoints. Test allowed and denied access with separate synthetic accounts.
+- [ ] **Persist accounts and permissions independently of the index.** Keep application identities distinct from the indexed operating-system users in the existing schema. Ensure rebuilds preserve accounts and permissions; permission mappings must not rely on disposable SQLite row IDs that can change or be reused. Document migrations and backup/restore procedures for persistent application state.
+- [ ] **Review the framework choice before implementing account management.** Compare continued Rust development with Django against the confirmed multi-user requirements and chosen identity integration. Record the decision; multiple users alone do not require a language or database change.
+
 ## Conditional decisions
 
-- [ ] **Revisit authentication before shared deployment.** Choose an established identity provider through a reverse proxy or established session authentication with password hashes. Define requirements for logout, individual accounts, and access control; keep persistent account data separate from the disposable index. Replace the current plaintext credential file if application-managed passwords remain part of the design.
 - [ ] **Evaluate HTMX when adding partial page updates.** Consider it for filtering and transcript section loading while retaining server-rendered HTML. Introduce a separate frontend only if interactive timelines, graphs, or substantial browser state justify it.
 - [ ] **Reassess SQLite if deployment changes.** Evaluate PostgreSQL if multiple application instances or substantial concurrent writing become requirements; retain SQLite for the current local importer and predominantly read-only browsing workload.
-- [ ] **Reassess the backend framework if product scope changes.** If extensive account management and multi-user dashboard workflows become central, compare Django with continued Rust development using concrete feature and deployment requirements. Do not rewrite solely because another language is available.
 
 ## Completion expectations
 
