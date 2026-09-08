@@ -37,6 +37,33 @@ struct MessageRow {
     content: String,
 }
 
+struct TranscriptSegment {
+    sequence: i64,
+    timestamp: Option<String>,
+    role: String,
+    paragraphs: Vec<String>,
+}
+
+fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
+    let mut segments: Vec<TranscriptSegment> = Vec::new();
+    for message in messages {
+        if message.role == "assistant"
+            && let Some(previous) = segments.last_mut()
+            && previous.role == "assistant"
+        {
+            previous.paragraphs.push(message.content);
+            continue;
+        }
+        segments.push(TranscriptSegment {
+            sequence: message.sequence,
+            timestamp: message.timestamp,
+            role: message.role,
+            paragraphs: vec![message.content],
+        });
+    }
+    segments
+}
+
 #[derive(Deserialize, Default)]
 struct Filters {
     host: Option<String>,
@@ -56,7 +83,7 @@ struct SessionsTemplate {
 #[template(path = "session.html")]
 struct SessionTemplate {
     session: SessionRow,
-    messages: Vec<MessageRow>,
+    segments: Vec<TranscriptSegment>,
 }
 
 pub async fn serve(pool: SqlitePool, bind: &str) -> Result<()> {
@@ -115,7 +142,7 @@ async fn session(
     Ok(Html(
         SessionTemplate {
             session: row,
-            messages,
+            segments: group_transcript(messages),
         }
         .render()?,
     ))
@@ -175,7 +202,7 @@ mod tests {
                 os_user: "fixture-user".into(),
                 message_count: 3,
             },
-            messages,
+            segments: group_transcript(messages),
         }
         .render()
         .expect("template should render");
@@ -184,5 +211,41 @@ mod tests {
         assert!(html.contains("<strong>Session environment</strong>"));
         assert_eq!(html.matches("<details class=\"message").count(), 3);
         assert_eq!(html.matches(" open>").count(), 1);
+    }
+
+    #[test]
+    fn consecutive_assistant_replies_share_a_segment_as_paragraphs() {
+        let messages = vec![
+            MessageRow {
+                sequence: 10,
+                timestamp: Some("2026-01-01T00:00:00Z".into()),
+                role: "user".into(),
+                content: "question".into(),
+            },
+            MessageRow {
+                sequence: 11,
+                timestamp: Some("2026-01-01T00:00:01Z".into()),
+                role: "assistant".into(),
+                content: "first reply".into(),
+            },
+            MessageRow {
+                sequence: 12,
+                timestamp: Some("2026-01-01T00:00:02Z".into()),
+                role: "assistant".into(),
+                content: "second reply".into(),
+            },
+            MessageRow {
+                sequence: 13,
+                timestamp: None,
+                role: "user".into(),
+                content: "follow-up".into(),
+            },
+        ];
+
+        let segments = group_transcript(messages);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[1].role, "assistant");
+        assert_eq!(segments[1].paragraphs, ["first reply", "second reply"]);
+        assert_eq!(segments[2].paragraphs, ["follow-up"]);
     }
 }

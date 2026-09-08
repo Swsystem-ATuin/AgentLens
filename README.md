@@ -10,7 +10,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
 - Continues past malformed files and records source-level parsing failures.
-- Provides a filterable sessions list and transcript drill-down UI.
+- Provides a filterable sessions list and collapsible transcript drill-down UI, grouping consecutive agent replies into one block with separate paragraphs.
 
 The observed fixture format is documented in [docs/fixture-format.md](docs/fixture-format.md).
 
