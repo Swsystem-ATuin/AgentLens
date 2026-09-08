@@ -32,10 +32,10 @@ cargo run -- rebuild --data data
 Start the web server:
 
 ```bash
-cargo run -- serve --bind 127.0.0.1:3000
+cargo run -- serve
 ```
 
-Open <http://127.0.0.1:3000/sessions>.
+The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>. Use `--bind` to select another address.
 
 Use a different database path when needed:
 

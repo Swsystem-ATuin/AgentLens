@@ -24,7 +24,7 @@ enum Command {
     },
     /// Serve the local web UI.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:3000")]
+        #[arg(long, default_value = "127.0.0.1:3001")]
         bind: String,
     },
 }

@@ -147,3 +147,42 @@ impl IntoResponse for WebError {
         (self.status, self.source.to_string()).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_defaults_configuration_closed_and_conversation_open() {
+        let messages = (0..3)
+            .map(|sequence| MessageRow {
+                sequence,
+                timestamp: None,
+                role: if sequence == 2 { "user" } else { "developer" }.into(),
+                content: format!("redacted {sequence}"),
+            })
+            .collect();
+        let html = SessionTemplate {
+            session: SessionRow {
+                id: 1,
+                external_id: "redacted-session".into(),
+                started_at: None,
+                ended_at: None,
+                model: None,
+                status: None,
+                cwd: None,
+                hostname: "fixture-host".into(),
+                os_user: "fixture-user".into(),
+                message_count: 3,
+            },
+            messages,
+        }
+        .render()
+        .expect("template should render");
+
+        assert!(html.contains("<strong>Initial agent configuration</strong>"));
+        assert!(html.contains("<strong>Session environment</strong>"));
+        assert_eq!(html.matches("<details class=\"message").count(), 3);
+        assert_eq!(html.matches(" open>").count(), 1);
+    }
+}

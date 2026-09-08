@@ -14,3 +14,8 @@ All notable changes to this project will be documented in this file. The format 
 - Redacted ingestion fixture and automated tests.
 - Fixture format documentation and repository contribution conventions.
 - Agent Lens project identity and canonical repository metadata.
+
+### Changed
+
+- Transcript messages are collapsible; initial configuration and environment sections start collapsed while conversation sections start expanded.
+- The development web server now defaults to port 3001.
