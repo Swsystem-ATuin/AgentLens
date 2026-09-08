@@ -27,6 +27,7 @@ These instructions apply to the entire repository.
 - Avoid panics in production paths. Add context to fallible filesystem, parsing, database, and network operations.
 - Keep route handlers thin and move parsing, querying, and domain logic into focused modules as the application grows.
 - Use parameterized SQL and keep foreign-key enforcement enabled.
+- Review full-rebuild performance whenever import or ingest code changes. Check transaction boundaries, query volume, file I/O, allocations, and memory growth; benchmark representative data before and after changes that could affect throughput or resource use, and report the results without exposing private content.
 
 ## Tests
 
