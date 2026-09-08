@@ -9,6 +9,9 @@ use std::{
 };
 use walkdir::WalkDir;
 
+#[cfg(test)]
+mod regression;
+
 #[derive(Default, Debug)]
 pub struct IngestReport {
     pub sessions: usize,

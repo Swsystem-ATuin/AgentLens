@@ -79,6 +79,8 @@ Run the complete regression checks before each commit with `bash scripts/check.s
 
 Tests use a small redacted rollout fixture under `tests/fixtures/`; they do not depend on private data under `data/`. Transcript display tests cover rendered HTML, initial and resumed setup, and ordinary conversation remaining visible.
 
+The [historical regression audit](docs/regression-audit.md) maps earlier changes to their tests and records remaining coverage limits. The suite also exercises CLI rebuilds, parser resilience, transaction rollback, foreign keys, authentication, and database-backed filtering.
+
 ## Branching and releases
 
 During initial MVP development, changes are committed directly to `develop`:

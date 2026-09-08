@@ -105,6 +105,43 @@ pub async fn require_auth(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn accepted_authorization_is_removed_before_downstream_handler() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+        let app = Router::new()
+            .route(
+                "/",
+                get(|request: Request| async move {
+                    assert!(!request.headers().contains_key(header::AUTHORIZATION));
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                Credentials::load(&path).unwrap(),
+                require_auth,
+            ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Basic {}", STANDARD.encode("synthetic:password")),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
     #[test]
     fn configuration_fails_closed_without_disclosing_values() {
         let dir = tempfile::tempdir().unwrap();

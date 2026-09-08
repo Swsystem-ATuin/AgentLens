@@ -38,3 +38,36 @@ pub async fn rebuild(path: &Path) -> Result<SqlitePool> {
     }
     open(path).await
 }
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn every_pool_connection_enforces_foreign_keys_and_reopen_preserves_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let pool = super::open(&path).await.unwrap();
+        let mut connections = Vec::new();
+        for _ in 0..5 {
+            let mut connection = pool.acquire().await.unwrap();
+            assert!(
+                sqlx::query("INSERT INTO users(host_id,os_user) VALUES(999,'synthetic')")
+                    .execute(&mut *connection)
+                    .await
+                    .is_err()
+            );
+            connections.push(connection);
+        }
+        drop(connections);
+        sqlx::query("INSERT INTO hosts(name) VALUES('synthetic')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let pool = super::open(&path).await.unwrap();
+        let hosts: Vec<String> = sqlx::query_scalar("SELECT name FROM hosts")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(hosts, ["synthetic"]);
+    }
+}

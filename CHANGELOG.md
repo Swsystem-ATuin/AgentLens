@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Historical regression audit and expanded synthetic coverage for ingestion variants and failures, transaction rollback, database integrity, CLI rebuilds, authentication, filtering, and rendered transcripts.
 - A shared `scripts/check.sh` regression check command and mandatory per-change regression verification, including rendered transcript coverage.
 - Prioritised project TODO list tracking architecture-review findings and conditional technology decisions.
 

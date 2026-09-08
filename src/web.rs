@@ -11,6 +11,9 @@ use serde::Deserialize;
 use sqlx::{FromRow, SqlitePool};
 use tower_http::trace::TraceLayer;
 
+#[cfg(test)]
+mod regression;
+
 #[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
