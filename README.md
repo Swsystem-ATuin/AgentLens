@@ -65,6 +65,8 @@ The `AGENT_LENS_DB` environment variable provides the same override.
 
 ## Development
 
+Planned improvements and architecture follow-ups are tracked in [TODO.md](TODO.md). Update the checklist as work is completed or requirements change.
+
 ```bash
 cargo fmt --check
 cargo test

@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Prioritised project TODO list tracking architecture-review findings and conditional technology decisions.
+
 - Mandatory username/password authentication on all web routes, with a Git-ignored local credentials file, an empty example, fail-closed startup, and no-store responses.
 
 - Initial Rust CLI and Axum web application.
