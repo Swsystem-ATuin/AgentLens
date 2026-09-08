@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Sessions · Agent Lens{% endblock %}{% block content %}
+<h1>Sessions</h1>
+<form method="get"><input name="host" placeholder="host" value="{{ filters.host.as_deref().unwrap_or("") }}"><input name="user" placeholder="user" value="{{ filters.user.as_deref().unwrap_or("") }}"><input name="model" placeholder="model" value="{{ filters.model.as_deref().unwrap_or("") }}"><input name="status" placeholder="status" value="{{ filters.status.as_deref().unwrap_or("") }}"><button>Filter</button></form>
+<table><thead><tr><th>Started</th><th>Host / user</th><th>Model</th><th>Status</th><th>Messages</th><th>Working directory</th></tr></thead><tbody>
+{% for s in sessions %}<tr><td><a href="/sessions/{{ s.id }}">{{ s.started_at.as_deref().unwrap_or("unknown") }}</a></td><td>{{ s.hostname }} / {{ s.os_user }}</td><td>{{ s.model.as_deref().unwrap_or("—") }}</td><td>{{ s.status.as_deref().unwrap_or("—") }}</td><td>{{ s.message_count }}</td><td>{{ s.cwd.as_deref().unwrap_or("—") }}</td></tr>{% endfor %}
+</tbody></table>{% if sessions.is_empty() %}<p class="muted">No indexed sessions. Run the rebuild command first.</p>{% endif %}{% endblock %}

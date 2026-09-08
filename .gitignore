@@ -1,0 +1,5 @@
+/target/
+/agent-observer.sqlite*
+/agent-lens.sqlite*
+/data/*
+!/data/.gitkeep
