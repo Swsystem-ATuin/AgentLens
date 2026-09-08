@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+sha2 = "0.10"
+subtle = "2"
 askama = "0.14"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
@@ -18,4 +21,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"

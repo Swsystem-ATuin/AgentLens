@@ -1,3 +1,4 @@
+mod auth;
 mod db;
 mod ingest;
 mod web;
@@ -26,6 +27,8 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:3001")]
         bind: String,
+        #[arg(long, env = "AGENT_LENS_AUTH_FILE", default_value = "auth.local.json")]
+        auth_file: PathBuf,
     },
 }
 
@@ -44,9 +47,10 @@ async fn main() -> Result<()> {
                 report.sessions, report.messages, report.tool_calls, report.errors
             );
         }
-        Command::Serve { bind } => {
+        Command::Serve { bind, auth_file } => {
+            let credentials = auth::Credentials::load(&auth_file)?;
             let pool = db::open(&cli.database).await?;
-            web::serve(pool, &bind).await?;
+            web::serve(pool, &bind, credentials).await?;
         }
     }
     Ok(())

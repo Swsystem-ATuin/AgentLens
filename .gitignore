@@ -3,3 +3,6 @@
 /agent-lens.sqlite*
 /data/*
 !/data/.gitkeep
+
+/auth.local.json
+/auth.local.json.*

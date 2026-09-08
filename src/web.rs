@@ -149,8 +149,8 @@ struct SessionTemplate {
     segments: Vec<TranscriptSegment>,
 }
 
-pub async fn serve(pool: SqlitePool, bind: &str) -> Result<()> {
-    let app = Router::new()
+fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
+    Router::new()
         .route(
             "/",
             get(|| async { axum::response::Redirect::temporary("/sessions") }),
@@ -158,7 +158,19 @@ pub async fn serve(pool: SqlitePool, bind: &str) -> Result<()> {
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", get(session))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { pool });
+        .with_state(AppState { pool })
+        .layer(axum::middleware::from_fn_with_state(
+            credentials,
+            crate::auth::require_auth,
+        ))
+}
+
+pub async fn serve(
+    pool: SqlitePool,
+    bind: &str,
+    credentials: crate::auth::Credentials,
+) -> Result<()> {
+    let app = router(pool, credentials);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
@@ -294,6 +306,100 @@ impl IntoResponse for WebError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn every_route_requires_authentication() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("auth.json");
+        std::fs::write(
+            &config,
+            r#"{"username":"test","password":"synthetic:password"}"#,
+        )
+        .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = router(pool, crate::auth::Credentials::load(&config).unwrap());
+        let valid = format!("Basic {}", STANDARD.encode("test:synthetic:password"));
+        let wrong_password = format!("Basic {}", STANDARD.encode("test:wrong"));
+        let wrong_user = format!("Basic {}", STANDARD.encode("wrong:synthetic:password"));
+        for path in [
+            "/",
+            "/sessions",
+            "/sessions/1",
+            "/sessions/invalid",
+            "/missing",
+        ] {
+            for auth in [
+                None,
+                Some("Basic !!!"),
+                Some("Bearer token"),
+                Some(wrong_password.as_str()),
+                Some(wrong_user.as_str()),
+            ] {
+                let mut request = Request::builder().uri(path);
+                if let Some(auth) = auth {
+                    request = request.header(header::AUTHORIZATION, auth);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+                assert!(
+                    response.headers()[header::WWW_AUTHENTICATE]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("Basic ")
+                );
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024).await.unwrap(),
+                    "Authentication required"
+                );
+            }
+        }
+        for (path, status) in [
+            ("/", StatusCode::TEMPORARY_REDIRECT),
+            ("/sessions", StatusCode::OK),
+            ("/sessions/1", StatusCode::NOT_FOUND),
+            ("/missing", StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::AUTHORIZATION, &valid)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, &valid)
+                    .header(header::AUTHORIZATION, &valid)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     #[test]
     fn recognized_initialization_is_closed_regardless_of_count_or_order() {

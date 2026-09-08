@@ -32,13 +32,28 @@ Rebuild the index from raw data:
 cargo run -- rebuild --data data
 ```
 
+Create the local authentication file and restrict its permissions:
+
+```bash
+(umask 077; cp -n auth.example.json auth.local.json)
+chmod 600 auth.local.json
+```
+
+Edit `auth.local.json` and fill in `username` and `password` with your own username and a strong, unique password. Both placeholders are deliberately empty, so the example cannot be used to log in. The real file and its backup files (`auth.local.json.*`) are ignored by Git; never commit credentials.
+
 Start the web server:
 
 ```bash
 cargo run -- serve
 ```
 
-The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>. Use `--bind` to select another address.
+The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>. Use `--bind` to select another address. Your browser will prompt for the configured username and password before any page is accessible.
+
+Authentication is required for every route, including direct transcript URLs. Missing, malformed, or empty credentials prevent startup. Responses use `Cache-Control: no-store`. Credentials are loaded at startup; restart after changing them. Browsers may retain Basic authentication credentials until closed; there is no application logout button.
+
+To use a file outside the checkout, pass `--auth-file /path/to/auth.json` after `serve`, or set `AGENT_LENS_AUTH_FILE`. Protect that file with owner-only permissions and keep it out of source control. Rebuild commands do not require credentials. Existing indexes need no migration or rebuild.
+
+For access beyond localhost, put the app behind an HTTPS reverse proxy and restrict direct access to the backend port. [HTTP Basic authentication requires HTTPS to protect credentials in transit](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Authentication). The built-in server serves HTTP and defaults to loopback.
 
 Use a different database path when needed:
 

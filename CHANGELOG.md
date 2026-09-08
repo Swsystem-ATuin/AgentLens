@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Mandatory username/password authentication on all web routes, with a Git-ignored local credentials file, an empty example, fail-closed startup, and no-store responses.
+
 - Initial Rust CLI and Axum web application.
 - Disposable SQLite index with generic agent, host, user, and instance records.
 - Tolerant Codex rollout JSONL ingestion from active and archived session trees.
