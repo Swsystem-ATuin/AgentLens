@@ -31,6 +31,9 @@ These instructions apply to the entire repository.
 
 ## Tests
 
+- Every change must include regression verification in the same commit. Behavioral changes must add or extend automated tests for the affected behavior; bug fixes must demonstrate that the regression test fails without the fix and passes with it. For documentation-only changes, validate the affected instructions and links and report that validation.
+- Run `bash scripts/check.sh` before committing each change. Keep regression cases in the normal `cargo test` suite, use descriptive failures, and test observable behavior rather than duplicating implementation logic.
+- For transcript display changes, verify rendered HTML as well as classification, covering initial and resumed sessions and preservation of ordinary conversation.
 - Derive only tiny, synthetic or fully redacted fixtures from observed source shapes.
 - Cover unknown fields, malformed lines, partial files, and schema variants when extending an agent parser.
 - Tests must not read from the private development fixture under `data/`.

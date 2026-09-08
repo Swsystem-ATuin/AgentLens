@@ -451,6 +451,52 @@ mod tests {
     }
 
     #[test]
+    fn multi_agent_role_is_collapsed_in_rendered_initial_and_resumed_transcripts() {
+        for resumed in [false, true] {
+            let mut messages = Vec::new();
+            if resumed {
+                messages.push(message(0, "user", "synthetic request"));
+                messages.push(message(1, "assistant", "synthetic reply"));
+            }
+            messages.push(message(
+                2,
+                "developer",
+                "  <multi_agent_role>synthetic setup</multi_agent_role>",
+            ));
+            messages.push(message(3, "user", "Explain <multi_agent_role> please"));
+            messages.push(message(4, "assistant", "<multi_agent_role>example output"));
+            let html = SessionTemplate {
+                session: SessionRow {
+                    id: 1,
+                    external_id: "synthetic-session".into(),
+                    started_at: None,
+                    ended_at: None,
+                    model: None,
+                    status: None,
+                    cwd: None,
+                    hostname: "synthetic-host".into(),
+                    os_user: "synthetic-user".into(),
+                    message_count: messages.len() as i64,
+                },
+                segments: group_transcript(messages),
+            }
+            .render()
+            .expect("transcript should render");
+            assert!(
+                html.contains("<details class=\"message developer\"><summary><strong>Multi-agent role</strong>"),
+                "setup must render collapsed with a descriptive title (resumed={resumed})"
+            );
+            assert!(
+                html.contains("synthetic setup"),
+                "setup content must remain available"
+            );
+            assert_eq!(html.matches(" open>").count(), if resumed { 4 } else { 2 });
+            assert!(html.contains("<details class=\"message user\" open>"));
+            assert!(html.contains("<details class=\"message assistant\" open>"));
+        }
+    }
+
+    #[test]
     fn initialization_markers_after_user_input_are_not_minimized() {
         let segments = group_transcript(vec![
             message(0, "user", "actual request"),

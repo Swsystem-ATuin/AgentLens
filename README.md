@@ -75,7 +75,9 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Tests use a small redacted rollout fixture under `tests/fixtures/`; they do not depend on private data under `data/`.
+Run the complete regression checks before each commit with `bash scripts/check.sh` (formatting, all-target/all-feature tests, Clippy, and whitespace checks). Every behavioral change must add or extend regression coverage in the normal `cargo test` suite. For bug fixes, first demonstrate that the new test fails without the fix, then passes with it. Documentation-only changes require verification of the affected instructions and links.
+
+Tests use a small redacted rollout fixture under `tests/fixtures/`; they do not depend on private data under `data/`. Transcript display tests cover rendered HTML, initial and resumed setup, and ordinary conversation remaining visible.
 
 ## Branching and releases
 
