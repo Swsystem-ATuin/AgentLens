@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Full index rebuilds batch SQLite writes in a transaction, avoiding per-record commit overhead as datasets grow.
 - Session filters are populated from indexed host, user, model, and status values, and host and user are displayed in separate columns.
 - Transcript messages are collapsible; initial configuration and environment sections start collapsed while conversation sections start expanded.
 - Consecutive agent replies before the next user message are grouped into one transcript block as separate paragraphs.
