@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Recognize resume-time repository instructions and tagged setup blocks throughout transcripts; label interruptions and user actions while keeping them expanded.
 - Repository guidance now requires a rebuild-performance review whenever import or ingest code changes.
 - Full index rebuilds batch SQLite writes in a transaction, avoiding per-record commit overhead as datasets grow.
 - Session filters are populated from indexed host, user, model, and status values, and host and user are displayed in separate columns.

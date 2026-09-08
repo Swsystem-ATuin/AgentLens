@@ -15,3 +15,7 @@ Rollout files are JSON Lines. Each record has `timestamp`, `type`, and `payload`
 `history.jsonl` records contain `session_id`, Unix timestamp `ts`, and `text`. `session_index.jsonl` records contain `id`, `thread_name`, and `updated_at`. These are useful enrichment sources but are outside the first vertical slice because rollout files already contain canonical transcript data.
 
 Parsing is intentionally tolerant: unknown fields and event types are retained in stored raw JSON where applicable and ignored for normalization. Malformed lines mark a source `partial`; file-level failures are recorded on `source_files` and do not abort the ingest run.
+
+Resuming a session can append setup as ordinary message records: a user message beginning `# AGENTS.md instructions for `, a developer message beginning `<permissions instructions>`, and a user message beginning `<environment_context>`. Other observed setup prefixes are `<skills_instructions>`, `<multi_agent_mode>`, `<collaboration_mode>`, and `<model_switch>`. These can occur after conversation has begun. Display classification does not change their stored content or message counts.
+
+Messages beginning `<turn_aborted>` occur with user or developer roles and indicate interruptions. A user message beginning `<user_action>` can contain review activity with `<context>`, `<action>`, and `<results>` children. These notices remain expanded in the transcript. No schema migration or rebuild is required for this presentation behavior.

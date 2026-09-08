@@ -50,10 +50,20 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
     let mut segments: Vec<TranscriptSegment> = Vec::new();
     let mut conversation_started = false;
     for message in messages {
-        let initialization_title = if conversation_started {
-            None
-        } else {
-            initialization_title(&message.content)
+        let initialization_title =
+            (message.role == "user" || message.role == "developer" || message.role == "system")
+                .then(|| initialization_title(&message.content, !conversation_started))
+                .flatten();
+        let notice_title = match message.role.as_str() {
+            "user" | "developer" | "system"
+                if message.content.trim_start().starts_with("<turn_aborted>") =>
+            {
+                Some("Turn interrupted")
+            }
+            "user" if message.content.trim_start().starts_with("<user_action>") => {
+                Some("User action")
+            }
+            _ => None,
         };
         if !conversation_started && message.role == "user" && initialization_title.is_none() {
             conversation_started = true;
@@ -71,6 +81,7 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
             sequence: message.sequence,
             timestamp: message.timestamp,
             title: initialization_title
+                .or(notice_title)
                 .map(str::to_owned)
                 .unwrap_or_else(|| message.role.clone()),
             initially_open: initialization_title.is_none(),
@@ -81,15 +92,23 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
     segments
 }
 
-fn initialization_title(content: &str) -> Option<&'static str> {
+fn initialization_title(content: &str, before_conversation: bool) -> Option<&'static str> {
     let trimmed = content.trim_start();
-    if content.contains("<skills_instructions>") {
+    if trimmed.starts_with("# AGENTS.md instructions for ") {
+        Some("Repository instructions")
+    } else if trimmed.starts_with("<permissions instructions>") {
+        Some("Permissions")
+    } else if trimmed.starts_with("<collaboration_mode>") {
+        Some("Collaboration mode")
+    } else if trimmed.starts_with("<model_switch>") {
+        Some("Model switch")
+    } else if trimmed.starts_with("<skills_instructions>") {
         Some("Available skills")
-    } else if trimmed.starts_with("You are ") {
+    } else if before_conversation && trimmed.starts_with("You are ") {
         Some("Initial agent configuration")
-    } else if content.contains("<multi_agent_mode>") {
+    } else if trimmed.starts_with("<multi_agent_mode>") {
         Some("Multi-agent mode")
-    } else if content.contains("<environment_context>") {
+    } else if trimmed.starts_with("<environment_context>") {
         Some("Environment context")
     } else {
         None
@@ -330,6 +349,53 @@ mod tests {
             message(1, "user", "You are part of the requested prose."),
         ]);
         assert!(segments.iter().all(|segment| segment.initially_open));
+    }
+
+    #[test]
+    fn resume_setup_is_collapsed_but_notices_and_conversation_remain_visible() {
+        let markers = [
+            (
+                "user",
+                "# AGENTS.md instructions for /synthetic",
+                "Repository instructions",
+            ),
+            ("developer", "<permissions instructions>", "Permissions"),
+            ("user", "<environment_context>", "Environment context"),
+            ("developer", "<skills_instructions>", "Available skills"),
+            ("developer", "<multi_agent_mode>", "Multi-agent mode"),
+            ("developer", "<collaboration_mode>", "Collaboration mode"),
+            ("developer", "<model_switch>", "Model switch"),
+        ];
+        for (role, prefix, title) in markers {
+            let segments = group_transcript(vec![
+                message(0, "user", "initial request"),
+                message(1, "assistant", "initial reply"),
+                message(2, role, &format!("  {prefix}\nsynthetic setup")),
+                message(3, "user", "resumed request"),
+            ]);
+            assert_eq!(segments[2].title, title);
+            assert!(!segments[2].initially_open);
+            assert!(segments[3].initially_open);
+        }
+        for (prefix, title) in [
+            ("<turn_aborted>", "Turn interrupted"),
+            ("<user_action>", "User action"),
+        ] {
+            let segments = group_transcript(vec![message(0, "user", prefix)]);
+            assert_eq!(segments[0].title, title);
+            assert!(segments[0].initially_open);
+        }
+    }
+
+    #[test]
+    fn quoted_markers_and_unknown_tags_are_not_setup() {
+        let segments = group_transcript(vec![
+            message(0, "user", "Explain <environment_context> please"),
+            message(1, "user", "<example>ordinary input</example>"),
+            message(2, "assistant", "<permissions instructions>example output"),
+        ]);
+        assert!(segments.iter().all(|segment| segment.initially_open));
+        assert_eq!(segments[2].title, "assistant");
     }
 
     #[test]
