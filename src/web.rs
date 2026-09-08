@@ -104,11 +104,23 @@ struct Filters {
     status: Option<String>,
 }
 
+struct FilterOption {
+    value: String,
+    selected: bool,
+}
+
+struct FilterOptions {
+    hosts: Vec<FilterOption>,
+    users: Vec<FilterOption>,
+    models: Vec<FilterOption>,
+    statuses: Vec<FilterOption>,
+}
+
 #[derive(Template)]
 #[template(path = "sessions.html")]
 struct SessionsTemplate {
     sessions: Vec<SessionRow>,
-    filters: Filters,
+    options: FilterOptions,
 }
 
 #[derive(Template)]
@@ -138,8 +150,10 @@ pub async fn serve(pool: SqlitePool, bind: &str) -> Result<()> {
 
 async fn sessions(
     State(state): State<AppState>,
-    Query(filters): Query<Filters>,
+    Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
+    filters.normalize();
+    let options = load_filter_options(&state.pool, &filters).await?;
     let rows = sqlx::query_as::<_, SessionRow>(r#"
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
@@ -150,10 +164,61 @@ async fn sessions(
     Ok(Html(
         SessionsTemplate {
             sessions: rows,
-            filters,
+            options,
         }
         .render()?,
     ))
+}
+
+impl Filters {
+    fn normalize(&mut self) {
+        for value in [
+            &mut self.host,
+            &mut self.user,
+            &mut self.model,
+            &mut self.status,
+        ] {
+            if value.as_deref().is_some_and(str::is_empty) {
+                *value = None;
+            }
+        }
+    }
+}
+
+async fn load_filter_options(pool: &SqlitePool, filters: &Filters) -> Result<FilterOptions> {
+    let hosts = sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
+        .fetch_all(pool)
+        .await?;
+    let users = sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
+        .fetch_all(pool)
+        .await?;
+    let models = sqlx::query_scalar(
+        "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' ORDER BY model",
+    )
+    .fetch_all(pool)
+    .await?;
+    let statuses = sqlx::query_scalar(
+        "SELECT DISTINCT status FROM sessions WHERE status IS NOT NULL AND status <> '' ORDER BY status",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(FilterOptions {
+        hosts: select_options(hosts, filters.host.as_deref()),
+        users: select_options(users, filters.user.as_deref()),
+        models: select_options(models, filters.model.as_deref()),
+        statuses: select_options(statuses, filters.status.as_deref()),
+    })
+}
+
+fn select_options(values: Vec<String>, selected: Option<&str>) -> Vec<FilterOption> {
+    values
+        .into_iter()
+        .map(|value| FilterOption {
+            selected: selected == Some(value.as_str()),
+            value,
+        })
+        .collect()
 }
 
 async fn session(
@@ -301,6 +366,54 @@ mod tests {
         assert_eq!(segments[1].role, "assistant");
         assert_eq!(segments[1].paragraphs, ["first reply", "second reply"]);
         assert_eq!(segments[2].paragraphs, ["follow-up"]);
+    }
+
+    #[test]
+    fn sessions_page_renders_known_filter_values_and_separate_identity_columns() {
+        let html = SessionsTemplate {
+            sessions: vec![SessionRow {
+                id: 1,
+                external_id: "redacted-session".into(),
+                started_at: None,
+                ended_at: None,
+                model: Some("fixture-model".into()),
+                status: Some("complete".into()),
+                cwd: None,
+                hostname: "fixture-host".into(),
+                os_user: "fixture-user".into(),
+                message_count: 2,
+            }],
+            options: FilterOptions {
+                hosts: select_options(vec!["fixture-host".into()], Some("fixture-host")),
+                users: select_options(vec!["fixture-user".into()], None),
+                models: select_options(vec!["fixture-model".into()], None),
+                statuses: select_options(vec!["complete".into()], None),
+            },
+        }
+        .render()
+        .expect("template should render");
+
+        assert!(html.contains("<th>Host</th><th>User</th>"));
+        assert!(html.contains("<option value=\"fixture-host\" selected>fixture-host</option>"));
+        assert!(html.contains("<option value=\"fixture-user\">fixture-user</option>"));
+        assert!(html.contains("<td>fixture-host</td><td>fixture-user</td>"));
+    }
+
+    #[test]
+    fn empty_filter_values_are_normalized_to_no_filter() {
+        let mut filters = Filters {
+            host: Some(String::new()),
+            user: Some(String::new()),
+            model: Some(String::new()),
+            status: Some(String::new()),
+        };
+
+        filters.normalize();
+
+        assert!(filters.host.is_none());
+        assert!(filters.user.is_none());
+        assert!(filters.model.is_none());
+        assert!(filters.status.is_none());
     }
 
     fn message(sequence: i64, role: &str, content: &str) -> MessageRow {
