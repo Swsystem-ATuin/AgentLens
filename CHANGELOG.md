@@ -19,4 +19,5 @@ All notable changes to this project will be documented in this file. The format 
 
 - Transcript messages are collapsible; initial configuration and environment sections start collapsed while conversation sections start expanded.
 - Consecutive agent replies before the next user message are grouped into one transcript block as separate paragraphs.
+- Initialization sections are recognized by their content rather than position and start collapsed with descriptive titles.
 - The development web server now defaults to port 3001.

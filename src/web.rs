@@ -42,14 +42,27 @@ struct TranscriptSegment {
     timestamp: Option<String>,
     role: String,
     paragraphs: Vec<String>,
+    title: String,
+    initially_open: bool,
 }
 
 fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
     let mut segments: Vec<TranscriptSegment> = Vec::new();
+    let mut conversation_started = false;
     for message in messages {
+        let initialization_title = if conversation_started {
+            None
+        } else {
+            initialization_title(&message.content)
+        };
+        if !conversation_started && message.role == "user" && initialization_title.is_none() {
+            conversation_started = true;
+        }
         if message.role == "assistant"
+            && initialization_title.is_none()
             && let Some(previous) = segments.last_mut()
             && previous.role == "assistant"
+            && previous.initially_open
         {
             previous.paragraphs.push(message.content);
             continue;
@@ -57,11 +70,30 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
         segments.push(TranscriptSegment {
             sequence: message.sequence,
             timestamp: message.timestamp,
+            title: initialization_title
+                .map(str::to_owned)
+                .unwrap_or_else(|| message.role.clone()),
+            initially_open: initialization_title.is_none(),
             role: message.role,
             paragraphs: vec![message.content],
         });
     }
     segments
+}
+
+fn initialization_title(content: &str) -> Option<&'static str> {
+    let trimmed = content.trim_start();
+    if content.contains("<skills_instructions>") {
+        Some("Available skills")
+    } else if trimmed.starts_with("You are ") {
+        Some("Initial agent configuration")
+    } else if content.contains("<multi_agent_mode>") {
+        Some("Multi-agent mode")
+    } else if content.contains("<environment_context>") {
+        Some("Environment context")
+    } else {
+        None
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -180,15 +212,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transcript_defaults_configuration_closed_and_conversation_open() {
-        let messages = (0..3)
-            .map(|sequence| MessageRow {
-                sequence,
-                timestamp: None,
-                role: if sequence == 2 { "user" } else { "developer" }.into(),
-                content: format!("redacted {sequence}"),
-            })
-            .collect();
+    fn recognized_initialization_is_closed_regardless_of_count_or_order() {
+        let messages = vec![
+            message(
+                0,
+                "developer",
+                "<skills_instructions>redacted</skills_instructions>",
+            ),
+            message(1, "developer", "You are a redacted test agent."),
+            message(
+                2,
+                "developer",
+                "<multi_agent_mode>redacted</multi_agent_mode>",
+            ),
+            message(
+                3,
+                "user",
+                "<environment_context>redacted</environment_context>",
+            ),
+            message(4, "user", "actual request"),
+        ];
         let html = SessionTemplate {
             session: SessionRow {
                 id: 1,
@@ -200,17 +243,28 @@ mod tests {
                 cwd: None,
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
-                message_count: 3,
+                message_count: 5,
             },
             segments: group_transcript(messages),
         }
         .render()
         .expect("template should render");
 
+        assert!(html.contains("<strong>Available skills</strong>"));
         assert!(html.contains("<strong>Initial agent configuration</strong>"));
-        assert!(html.contains("<strong>Session environment</strong>"));
-        assert_eq!(html.matches("<details class=\"message").count(), 3);
+        assert!(html.contains("<strong>Multi-agent mode</strong>"));
+        assert!(html.contains("<strong>Environment context</strong>"));
+        assert_eq!(html.matches("<details class=\"message").count(), 5);
         assert_eq!(html.matches(" open>").count(), 1);
+    }
+
+    #[test]
+    fn initialization_markers_after_user_input_are_not_minimized() {
+        let segments = group_transcript(vec![
+            message(0, "user", "actual request"),
+            message(1, "user", "You are part of the requested prose."),
+        ]);
+        assert!(segments.iter().all(|segment| segment.initially_open));
     }
 
     #[test]
@@ -247,5 +301,14 @@ mod tests {
         assert_eq!(segments[1].role, "assistant");
         assert_eq!(segments[1].paragraphs, ["first reply", "second reply"]);
         assert_eq!(segments[2].paragraphs, ["follow-up"]);
+    }
+
+    fn message(sequence: i64, role: &str, content: &str) -> MessageRow {
+        MessageRow {
+            sequence,
+            timestamp: None,
+            role: role.into(),
+            content: content.into(),
+        }
     }
 }
