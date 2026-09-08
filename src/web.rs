@@ -108,6 +108,8 @@ fn initialization_title(content: &str, before_conversation: bool) -> Option<&'st
         Some("Initial agent configuration")
     } else if trimmed.starts_with("<multi_agent_mode>") {
         Some("Multi-agent mode")
+    } else if trimmed.starts_with("<multi_agent_role>") {
+        Some("Multi-agent role")
     } else if trimmed.starts_with("<environment_context>") {
         Some("Environment context")
     } else {
@@ -469,10 +471,14 @@ mod tests {
             ("user", "<environment_context>", "Environment context"),
             ("developer", "<skills_instructions>", "Available skills"),
             ("developer", "<multi_agent_mode>", "Multi-agent mode"),
+            ("developer", "<multi_agent_role>", "Multi-agent role"),
             ("developer", "<collaboration_mode>", "Collaboration mode"),
             ("developer", "<model_switch>", "Model switch"),
         ];
         for (role, prefix, title) in markers {
+            let initial = group_transcript(vec![message(0, role, prefix)]);
+            assert_eq!(initial[0].title, title);
+            assert!(!initial[0].initially_open);
             let segments = group_transcript(vec![
                 message(0, "user", "initial request"),
                 message(1, "assistant", "initial reply"),

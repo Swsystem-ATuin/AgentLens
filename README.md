@@ -15,7 +15,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 
 The observed fixture format is documented in [docs/fixture-format.md](docs/fixture-format.md).
 
-Transcript setup blocks are labeled and collapsed even after a session resumes, including repository instructions, permissions, environment, skills, and mode/model changes. Interruption notices and user actions remain expanded with distinct labels. Unknown tags and markers quoted within ordinary prose remain conversation content. This display change needs no index rebuild; restart the server with `cargo run -- serve` after updating.
+Transcript setup blocks are labeled and collapsed even after a session resumes, including repository instructions, permissions, environment, skills, multi-agent roles, and mode/model changes. Interruption notices and user actions remain expanded with distinct labels. Unknown tags and markers quoted within ordinary prose remain conversation content. This display change needs no index rebuild; restart the server with `cargo run -- serve` after updating.
 
 ## Requirements
 

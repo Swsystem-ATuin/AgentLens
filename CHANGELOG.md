@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+
+- Collapse `<multi_agent_role>` setup messages with a descriptive title at session start and after resuming.
+
 ### Added
 
 - Prioritised project TODO list tracking architecture-review findings and conditional technology decisions.
