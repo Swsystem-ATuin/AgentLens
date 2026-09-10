@@ -449,9 +449,10 @@ async fn refresh_append_truncate_replace_archive_and_duplicates_match_rebuild() 
         "duplicate identities must not overwrite the indexed source"
     );
     std::fs::remove_file(&path).unwrap();
+    let moved = ingest_data_root(&pool, dir.path()).await.unwrap();
     assert_eq!(
-        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
-        1
+        (moved.sessions, moved.removed_sessions, moved.removed_files),
+        (1, 0, 1)
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -563,4 +564,279 @@ async fn refresh_finalization_failure_rolls_back_replacements_and_checkpoints() 
         ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
         1
     );
+}
+
+#[tokio::test]
+async fn refresh_removes_missing_sources_and_all_their_indexed_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = [
+        meta("removed"),
+        message("synthetic removed content"),
+        json!({"type":"response_item","payload":{"type":"function_call","call_id":"a","name":"synthetic","arguments":"{}"}}),
+        json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1}}}}),
+    ];
+    let path = write_source(dir.path(), "sessions", "removed.jsonl", &records);
+    let error_path = write_source(
+        dir.path(),
+        "sessions",
+        "error.jsonl",
+        &[json!({"type":"unknown"})],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    for table in ["sessions", "messages", "tool_calls", "usage_events"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(error_path).unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    for table in [
+        "sessions",
+        "messages",
+        "tool_calls",
+        "usage_events",
+        "source_files",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "refresh must remove missing source data from {table}"
+        );
+    }
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_prunes_removed_homes_only_within_the_requested_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sources");
+    let other = dir.path().join("sources-other");
+    write_source(
+        &root,
+        "sessions",
+        "first.jsonl",
+        &[meta("first"), message("first")],
+    );
+    write_source(
+        &other,
+        "sessions",
+        "second.jsonl",
+        &[meta("second"), message("second")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, &root).await.unwrap();
+    ingest_data_root(&pool, &other).await.unwrap();
+    std::fs::remove_dir_all(root.join("synthetic-host")).unwrap();
+    // Even a missing source in another root must not be pruned by this refresh.
+    std::fs::remove_dir_all(other.join("synthetic-host")).unwrap();
+    ingest_data_root(&pool, &root).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT external_id FROM sessions")
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        ["second"]
+    );
+    ingest_data_root(&pool, &other).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn refresh_missing_root_or_invalid_discovery_preserves_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sources");
+    let path = write_source(
+        &root,
+        "sessions",
+        "kept.jsonl",
+        &[meta("kept"), message("kept")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, &root).await.unwrap();
+    let expected = projection(&pool).await;
+    std::fs::rename(&root, dir.path().join("unavailable")).unwrap();
+    assert!(
+        ingest_data_root(&pool, &root).await.is_err(),
+        "missing root must fail, not appear to be an empty snapshot"
+    );
+    assert_eq!(projection(&pool).await, expected);
+    std::fs::rename(dir.path().join("unavailable"), &root).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let area = root.join("synthetic-host/synthetic-user/.codex/sessions");
+    std::fs::remove_dir_all(&area).unwrap();
+    std::fs::write(&area, "synthetic wrong file type").unwrap();
+    assert!(
+        ingest_data_root(&pool, &root).await.is_err(),
+        "invalid source directory must fail discovery and roll back"
+    );
+    assert_eq!(projection(&pool).await, expected);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refresh_pruning_rolls_back_if_run_finalization_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "kept.jsonl",
+        &[meta("kept"), message("kept")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    sqlx::raw_sql("CREATE TRIGGER fail_prune BEFORE UPDATE ON ingest_runs BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").execute(&pool).await.unwrap();
+    assert!(ingest_data_root(&pool, dir.path()).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("DROP TRIGGER fail_prune")
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0,
+        "retry must finish rolled-back deletions"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refresh_unsupported_symlink_during_traversal_cancels_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "gone.jsonl",
+        &[meta("gone"), message("kept on failure")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let link = path.parent().unwrap().join("synthetic-link");
+    std::os::unix::fs::symlink("synthetic-link", &link).unwrap();
+    let error = ingest_data_root(&pool, dir.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !error.contains("synthetic-link"),
+        "discovery diagnostics should not disclose paths"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    std::fs::remove_file(link).unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path())
+            .await
+            .unwrap()
+            .removed_sessions,
+        1
+    );
+}
+
+#[tokio::test]
+async fn refresh_file_parse_errors_do_not_prevent_removal_of_other_missing_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "gone.jsonl",
+        &[meta("gone"), message("gone")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "bad.jsonl",
+        &[json!({"type":"unknown"})],
+    );
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.removed_sessions, report.removed_files, report.errors),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn refresh_removes_a_source_file_replaced_by_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "gone.jsonl",
+        &[meta("gone"), message("gone")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((report.removed_sessions, report.removed_files), (1, 1));
+    assert!(projection(&pool).await.is_empty());
 }

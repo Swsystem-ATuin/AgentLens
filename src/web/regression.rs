@@ -208,3 +208,53 @@ fn message(sequence: i64, role: &str, content: &str) -> MessageRow {
         content: content.into(),
     }
 }
+
+#[tokio::test]
+async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    let path = source.join("synthetic.jsonl");
+    std::fs::write(
+        &path,
+        include_bytes!("../../tests/fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
+        .await
+        .unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool.clone(), crate::auth::Credentials::load(&auth).unwrap());
+    assert_eq!(
+        get(&app, &format!("/sessions/{id}")).await.0,
+        StatusCode::OK
+    );
+    assert!(
+        get(&app, "/sessions")
+            .await
+            .1
+            .contains(&format!("href=\"/sessions/{id}\""))
+    );
+    std::fs::remove_file(path).unwrap();
+    crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
+        .await
+        .unwrap();
+    assert_eq!(
+        get(&app, &format!("/sessions/{id}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        !get(&app, "/sessions")
+            .await
+            .1
+            .contains(&format!("href=\"/sessions/{id}\""))
+    );
+}

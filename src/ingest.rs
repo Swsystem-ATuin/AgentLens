@@ -29,6 +29,8 @@ pub struct IngestReport {
     pub sessions: usize,
     pub skipped: usize,
     pub files_seen: usize,
+    pub removed_sessions: u64,
+    pub removed_files: u64,
     pub messages: usize,
     pub tool_calls: usize,
     pub errors: usize,
@@ -41,19 +43,27 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
         .await?
         .last_insert_rowid();
     let mut report = IngestReport::default();
-    let homes = discover_homes(root);
+    let homes = discover_homes(root)?;
     for (host, user, home) in homes {
         let instance = ensure_instance(&mut transaction, &host, &user, &home).await?;
         for area in ["sessions", "archived_sessions"] {
             let dir = home.join(area);
-            if !dir.exists() {
+            if !optional_source_directory(&dir)? {
                 continue;
             }
-            for entry in WalkDir::new(&dir)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-            {
+            for entry in WalkDir::new(&dir).follow_links(false).into_iter() {
+                let entry = entry.map_err(|error| {
+                    anyhow::anyhow!(
+                        "source traversal failed: {}",
+                        error
+                            .io_error()
+                            .map_or(std::io::ErrorKind::Other, std::io::Error::kind)
+                    )
+                })?;
+                ensure!(
+                    !entry.file_type().is_symlink(),
+                    "source traversal encountered an unsupported symbolic link"
+                );
                 if entry.file_type().is_file()
                     && entry.path().extension().is_some_and(|x| x == "jsonl")
                 {
@@ -90,24 +100,57 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
             }
         }
     }
+    (report.removed_sessions, report.removed_files) =
+        prune_missing_sources(&mut transaction, root).await?;
     sqlx::query("UPDATE ingest_runs SET finished_at=CURRENT_TIMESTAMP,status='complete',files_seen=?,errors=? WHERE id=?")
         .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(report)
 }
 
-fn discover_homes(root: &Path) -> Vec<(String, String, PathBuf)> {
+// Missing optional directories indicate removal; inspection failures never do.
+fn optional_source_directory(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir(),
+                "expected a source directory; symbolic links and other file types are unsupported"
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("inspect source directory"),
+    }
+}
+
+fn discover_homes(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
+    ensure!(
+        optional_source_directory(root)?,
+        "source root is missing; refresh cancelled"
+    );
     let mut out = Vec::new();
-    let Ok(hosts) = std::fs::read_dir(root) else {
-        return out;
-    };
-    for host in hosts.flatten().filter(|e| e.path().is_dir()) {
-        let Ok(users) = std::fs::read_dir(host.path()) else {
+    for host in std::fs::read_dir(root).context("read source root")? {
+        let host = host.context("read source root entry")?;
+        let kind = host.file_type().context("inspect host entry")?;
+        ensure!(
+            !kind.is_symlink(),
+            "symbolic links in source discovery are unsupported"
+        );
+        if !kind.is_dir() {
             continue;
-        };
-        for user in users.flatten().filter(|e| e.path().is_dir()) {
+        }
+        for user in std::fs::read_dir(host.path()).context("read source host directory")? {
+            let user = user.context("read source host entry")?;
+            let kind = user.file_type().context("inspect user entry")?;
+            ensure!(
+                !kind.is_symlink(),
+                "symbolic links in source discovery are unsupported"
+            );
+            if !kind.is_dir() {
+                continue;
+            }
             let home = user.path().join(".codex");
-            if home.is_dir() {
+            if optional_source_directory(&home)? {
                 out.push((
                     host.file_name().to_string_lossy().into(),
                     user.file_name().to_string_lossy().into(),
@@ -116,7 +159,74 @@ fn discover_homes(root: &Path) -> Vec<(String, String, PathBuf)> {
             }
         }
     }
-    out
+    Ok(out)
+}
+
+async fn prune_missing_sources(
+    connection: &mut SqliteConnection,
+    root: &Path,
+) -> Result<(u64, u64)> {
+    // Recheck the root before deleting: an unavailable root is not an empty snapshot.
+    ensure!(
+        optional_source_directory(root)?,
+        "source root disappeared; refresh cancelled"
+    );
+    let mut cursor = 0i64;
+    let mut sessions = 0;
+    let mut files = 0;
+    loop {
+        // Bound path buffering even when a database contains many source roots.
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT source_files.id,source_files.path,agent_instances.source_home FROM source_files JOIN agent_instances ON agent_instances.id=source_files.instance_id JOIN agents ON agents.id=agent_instances.agent_id WHERE source_files.id>? AND agents.kind='codex' ORDER BY source_files.id LIMIT 256")
+            .bind(cursor).fetch_all(&mut *connection).await.context("query source removal candidates")?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, path, home) in rows {
+            cursor = id;
+            let home = Path::new(&home);
+            let Ok(relative) = home.strip_prefix(root) else {
+                continue;
+            };
+            // Only the exact root/host/user/.codex contract belongs to this run.
+            if relative.components().count() != 3
+                || relative.file_name() != Some(std::ffi::OsStr::new(".codex"))
+            {
+                continue;
+            }
+            ensure!(
+                Path::new(&path).starts_with(home),
+                "indexed source is outside its home; refresh cancelled"
+            );
+            let source_present = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    ensure!(
+                        !metadata.file_type().is_symlink(),
+                        "indexed source became a symbolic link; refresh cancelled"
+                    );
+                    metadata.is_file()
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error).context("check indexed source for removal"),
+            };
+            if !source_present {
+                sessions += sqlx::query("DELETE FROM sessions WHERE source_file_id=?")
+                    .bind(id)
+                    .execute(&mut *connection)
+                    .await
+                    .context("remove missing source sessions")?
+                    .rows_affected();
+                // Session children cascade; deleting the checkpoint also removes parse errors and paths.
+                files += sqlx::query("DELETE FROM source_files WHERE id=?")
+                    .bind(id)
+                    .execute(&mut *connection)
+                    .await
+                    .context("remove missing source checkpoint")?
+                    .rows_affected();
+            }
+        }
+    }
+    Ok((sessions, files))
 }
 
 async fn ensure_instance(
@@ -370,7 +480,7 @@ mod tests {
     fn discovers_contract_homes() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("host/user/.codex/sessions")).unwrap();
-        let homes = discover_homes(tmp.path());
+        let homes = discover_homes(tmp.path()).unwrap();
         assert_eq!((homes[0].0.as_str(), homes[0].1.as_str()), ("host", "user"));
     }
 

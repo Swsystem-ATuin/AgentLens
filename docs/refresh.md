@@ -17,21 +17,24 @@ Opening an old index automatically adds nullable checkpoint columns and an index
 
 A single outer transaction batches the run, with one savepoint per file. A successful replacement updates session metadata, replaces messages/tools/usage, and stores its checkpoint together. Session IDs are preserved for the same instance and native session ID. File failures roll back that file's changes, record an error, and allow other files to proceed. Failure to finalize or commit the run rolls back the entire run.
 
-Partial new files retain valid records and are marked `partial`; they cannot be skipped. Partial replacements retain the previously indexed transcript and record an error. Repairing the source allows the next refresh to replace it. Malformed-line diagnostics contain line numbers and a generic reason, without quoting source content. CLI error totals count failed files; initially imported partial files are included in imported sessions, with details in `source_files.parse_status` and `parse_error`.
+Partial new files retain valid records and are marked `partial`; they cannot be skipped. Partial replacements of files still present retain the previously indexed transcript and record an error. Missing-source cleanup still applies if a moved replacement cannot be imported: a transcript whose indexed source is gone is removed. Repairing the source allows the next refresh to replace it. Malformed-line diagnostics contain line numbers and a generic reason, without quoting source content. CLI error totals count failed files; initially imported partial files are included in imported sessions, with details in `source_files.parse_status` and `parse_error`.
 
 The recorded hash certifies a successfully committed file projection only when its status is `ok`. On a failed replacement, any existing hash still describes the previous projection, and the `error` status prevents skipping it. Parser changes affecting normalized data must bump `PARSER_VERSION` in `src/ingest.rs`.
 
 ## Source changes and supported operation
 
 - Appends, truncations, and rewritten content replace the affected file's projection, including tool outputs and usage events. A replacement with a different native session ID removes that path's previous session.
-- A move to `archived_sessions` preserves the session when its former path no longer exists. The previous source row remains as provenance; the session points to its new source.
+- A move to `archived_sessions` preserves the session when its former path no longer exists. The session points to its new source before cleanup removes the missing old source row.
 - Two existing files claiming the same session identity are conflicts. The already indexed source wins; on a fresh index the first successfully imported source wins. Conflicting files are reported as errors and retried. Divergent duplicate sources require resolution in the upstream copying process.
-- Missing source files are not pruned. Use a full rebuild when the index must exactly reflect deletions. Discovery still has the existing limitation of silently skipping some missing/unreadable directories (roadmap R0.2).
+- Missing source files are removed from the index after discovery/import, including their sessions, messages, tool calls, usage records, and source checkpoints/errors. This also handles removal of an entire host, user, home, or sessions directory. Cleanup only covers the requested `root/host/user/.codex` scope; other roots and agent kinds are untouched. The CLI reports the numbers of sessions and source rows removed.
+- A missing/unreadable root, directory inspection failure, traversal error, or unsupported symbolic link aborts the run and rolls back imports and deletions. A present, readable, empty root is an authoritative empty snapshot and removes its indexed sessions. Individual malformed files remain localized parse errors and do not block removal of unrelated missing files. Use a coherent, fully published copy; an empty mount point cannot be distinguished from an intentionally empty source tree.
 - Publish a coherent copied source tree before refreshing. Do not modify files in place during refresh. File size and modification time are checked around reading and again after importing; Unix also checks device, inode, and change time. Detected concurrent edits roll back the file and require retry. These checks do not provide a filesystem snapshot or prevent changes after the final check.
 
 Refresh can run while the server reads the same SQLite database: readers see committed data, and subsequent requests see the completed refresh. Run one importer at a time. Existing long-lived read transactions can continue seeing their earlier snapshot. Restart the server to load updated application code. Browser reloads do not run ingestion.
 
-Full rebuild remains available with `cargo run -- rebuild --data data`. Stop the server before rebuilding: rebuild still removes the index and its sidecars, and does not preserve the old index on failure (roadmap R0.1). Raw sources are never changed by either command.
+Both rebuild and refresh store BLAKE3 hashes during successful imports. Full rebuild remains available with `cargo run -- rebuild --data data`. Stop the server before rebuilding: rebuild still removes the index and its sidecars, and does not preserve the old index on failure (roadmap R0.1). Raw sources are never changed by either command. No manual migration or full rebuild is required for missing-source cleanup: update the binary and run refresh. Supporting indexes for tool/usage cascades are created automatically when the database opens.
+
+After refresh commits, new list and transcript requests cannot retrieve deleted sessions (direct URLs return 404). Already displayed browser pages are not remotely cleared. This is removal of indexed rows, not secure erasure of SQLite free pages, WAL files, or external backups.
 
 ## Regression verification
 
@@ -39,7 +42,9 @@ Run `bash scripts/check.sh`. Tests use temporary synthetic sources and the small
 
 Before implementation, the three initial refresh regressions failed on the existing duplicate-path/foreign-key behavior. They pass with transactional replacement and safe source-row updates.
 
-## Performance review (2026-09-10)
+Removal regressions additionally cover cascading content deletion, removed homes, root isolation, missing/invalid roots, traversal failures, rollback/retry, coexistence with parse errors, CLI removal counts, rebuild-generated checksums, and authenticated list/direct-URL visibility. The four initial removal/discovery regressions failed before the fix and pass afterward.
+
+## Initial refresh performance review (2026-09-10)
 
 Release builds before and after this change were measured on the same synthetic corpus: 40 sessions, 60,000 messages, 66,362,390 source bytes (63.3 MiB), with roughly 960 characters of synthetic content per message. Three sequential runs per case used warm filesystem caches, the same temporary SQLite location, and no concurrent build. Elapsed time includes CLI startup and commit; peak resident memory comes from child-process `wait4` usage on Linux. These measurements are workload-specific, not cold-storage predictions.
 
@@ -55,3 +60,17 @@ The new full rebuild was about 5.3% slower; an unchanged refresh was about 48 ti
 Rebuild retains one batched transaction and reads each source once, hashing during the parse. Additional database work is constant per source: checkpoint/identity lookups, a savepoint, and checkpoint updates. The source-file session index avoids scanning all sessions for each lookup. Record insertion volume is unchanged. Unchanged refresh reads all source bytes once but performs no transcript parsing or message/tool/usage writes. A changed verified source is read twice; unchanged peers are read once. Source read volume follows these paths; physical disk I/O was not separately instrumented because the benchmark used warm caches.
 
 Checksum buffers are bounded (1 MiB for verification); parsing reuses its line buffer and retains the existing per-file decoded-record collection. No corpus-wide transcript collection was introduced. Peak memory in this corpus remained similar; exceptionally large individual rollouts still require the separate bounded-parser work in roadmap R1.1.
+
+## Missing-source cleanup performance review (2026-09-10)
+
+Release builds immediately before and after cleanup were compared on 40 synthetic sources containing 60,000 messages, 6,000 tool calls, and 6,000 usage events (67,817,590 source bytes). Three sequential runs per operation used warm filesystem caches and the same temporary SQLite location, without concurrent compilation. Medians include process startup; Linux `wait4` peak RSS includes process-launch overhead.
+
+| Operation | Before cleanup | With cleanup |
+| --- | ---: | ---: |
+| Full rebuild | 6.130 s | 5.914 s |
+| Refresh, all unchanged | 0.131 s | 0.132 s |
+| Refresh, one source removed | Not supported | 0.149 s |
+
+Rebuild ranges overlapped (5.891–6.292 s before; 5.869–6.332 s after), so this run does not establish a rebuild speed improvement. Recorded peak RSS for the rebuild/unchanged cases was 18,668 KiB before and 18,752 KiB after. Each measured deletion removed one session, 1,500 messages, 150 tool calls, 150 usage events, and its checkpoint; counts were verified directly in the synthetic index.
+
+Cleanup retains the outer transaction and per-file import savepoints. It reads candidate paths in batches of at most 256, filters by the requested source-root contract, and inspects filesystem metadata for scoped sources. It reads no additional transcript contents. Candidate queries currently traverse the indexed Codex sources across roots, while metadata inspection and deletion remain scoped. Each removed source adds two parameterized deletes; foreign-key cascades remove session children. Session-key indexes for tools and usage are created automatically to avoid scanning those tables for every deleted session. Full rebuild source reading, parser allocations, and per-file decoded-record memory remain unchanged. Physical disk I/O was not separately measured under the warm-cache setup.

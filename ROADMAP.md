@@ -25,7 +25,7 @@ The following five items retain the original TODO acceptance criteria.
 
 - [ ] **R0.1 — Preserve the usable index during rebuilds.** Build and validate a replacement before switching over. Explicitly manage active database connections and SQLite WAL/SHM files. Verify that failed or interrupted rebuilds preserve the previous index and that a successful switch serves the new data. Document the supported procedure when the web server is running.
 
-- [ ] **R0.2 — Report incomplete source discovery.** Replace silently ignored directory and traversal errors with useful, sanitised diagnostics and an accurate ingest result. Verify missing and unreadable sources cannot look like a successful complete import.
+- [x] **R0.2 — Report incomplete source discovery.** Replace silently ignored directory and traversal errors with useful, sanitised diagnostics and an accurate ingest result. Verify missing and unreadable sources cannot look like a successful complete import. Delivered with transactional missing-source cleanup; [behavior and verification](docs/refresh.md).
 
 - [ ] **R0.3 — Keep internal errors out of browser responses.** Return generic server-error messages while retaining sanitised diagnostic context on the server. Test that responses and logs do not disclose private transcript content or credentials.
 
@@ -79,7 +79,7 @@ Inspiration: codex-dash's usage views and codex-blackbox's evidence-based report
 
 Inspiration: codex_viewer's incremental reader and codex-dash's freshness-aware pooled board. Copied homes remain immutable inputs; collector outputs and checkpoints must live elsewhere.
 
-Initial CLI refresh delivered; see [refresh behavior and verification](docs/refresh.md). Checksums verify every file; changed projections replace atomically, and legacy checkpoints upgrade automatically. R4.1 remains open for complete discovery diagnostics and broader snapshot/deletion and duplicate-resolution semantics.
+Initial CLI refresh delivered; see [refresh behavior and verification](docs/refresh.md). Checksums verify every file; changed projections replace atomically, and legacy checkpoints upgrade automatically. Missing-source deletion and fail-closed discovery are also delivered. R4.1 remains open for broader snapshot-publication and duplicate-resolution semantics.
 
 - [ ] **R4.1 — Incremental, idempotent indexing.** Add an explicit refresh path that detects new/changed sources and updates only affected records. Handle appended partial JSON/UTF-8, truncation, replacement, archive moves, duplicates and interrupted commits. Define how immutable snapshots are published and how appended sources are validated; do not silently inherit an upstream probe heuristic that can miss historical edits. Keep full rebuild as the repair path and all checkpoints disposable. Verify repeated refreshes and a fresh rebuild yield equivalent normalized data; benchmark full rebuild and incremental elapsed time, peak memory and file I/O before/after.
 

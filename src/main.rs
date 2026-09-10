@@ -57,13 +57,15 @@ async fn main() -> Result<()> {
             let pool = db::open(&cli.database).await?;
             let report = ingest::ingest_data_root(&pool, &data).await?;
             println!(
-                "indexed {} sessions, {} messages, {} tool calls; skipped {} unchanged files; {} errors; {} files seen",
+                "indexed {} sessions, {} messages, {} tool calls; skipped {} unchanged files; {} errors; {} files seen; removed {} sessions and {} source files",
                 report.sessions,
                 report.messages,
                 report.tool_calls,
                 report.skipped,
                 report.errors,
-                report.files_seen
+                report.files_seen,
+                report.removed_sessions,
+                report.removed_files
             );
         }
         Command::Serve { bind, auth_file } => {

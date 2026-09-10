@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Refresh removes missing source files and their indexed sessions, messages, tools, usage, and checkpoints within the requested root. Discovery failures now abort and roll back the run instead of appearing successful; archive moves preserve sessions before old checkpoints are removed. CLI summaries include removal counts.
+
 - Collapse `<multi_agent_role>` setup messages with a descriptive title at session start and after resuming.
 
 ### Added

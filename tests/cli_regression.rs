@@ -68,6 +68,15 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
             .unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),(SELECT count(*) FROM ingest_runs)").fetch_one(&pool).await.unwrap();
         assert_eq!(counts, (1, 2, 1));
+        let hash: String = sqlx::query_scalar("SELECT content_hash FROM source_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            hash,
+            format!("blake3:{}", blake3::hash(fixture).to_hex()),
+            "full rebuild must store the source checksum"
+        );
         let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
             .fetch_one(&pool)
             .await
@@ -84,6 +93,16 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
         assert_eq!(std::fs::read(&path).unwrap(), fixture);
         assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
     }
+    let args = ["--database", "index.sqlite", "refresh", "--data", "sources"];
+    let result = run(dir.path(), &args);
+    assert!(result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("skipped 1 unchanged files"));
+    std::fs::remove_file(&path).unwrap();
+    let result = run(dir.path(), &args);
+    assert!(result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains("removed 1 sessions and 1 source files")
+    );
     assert!(!dir.path().join("agent-lens.sqlite").exists());
 }
 
