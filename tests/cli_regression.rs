@@ -86,3 +86,48 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
     }
     assert!(!dir.path().join("agent-lens.sqlite").exists());
 }
+
+#[tokio::test]
+async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    let fixture = include_bytes!("fixtures/codex/rollout.jsonl");
+    std::fs::write(source.join("rollout.jsonl"), fixture).unwrap();
+    let args = ["--database", "index.sqlite", "refresh", "--data", "sources"];
+    let result = run(dir.path(), &args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("indexed 1 sessions"));
+    let options =
+        sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("index.sqlite"));
+    let pool = sqlx::SqlitePool::connect_with(options.clone())
+        .await
+        .unwrap();
+    sqlx::raw_sql("ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version;").execute(&pool).await.unwrap();
+    pool.close().await;
+    let result = run(dir.path(), &args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("indexed 1 sessions"));
+    let result = run(dir.path(), &args);
+    assert!(result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("skipped 1 unchanged files; 0 errors; 1 files seen")
+    );
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    let row: (i64, i64, String) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),content_hash FROM source_files").fetch_one(&pool).await.unwrap();
+    assert_eq!((row.0, row.1), (1, 2));
+    assert_eq!(row.2, format!("blake3:{}", blake3::hash(fixture).to_hex()));
+    assert_eq!(
+        std::fs::read(source.join("rollout.jsonl")).unwrap(),
+        fixture
+    );
+}

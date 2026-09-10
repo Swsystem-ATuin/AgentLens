@@ -18,6 +18,23 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .await
         .with_context(|| format!("open SQLite index {}", path.display()))?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    // Upgrade old disposable indexes without discarding their existing projections.
+    let mut migration = pool.begin().await?;
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('source_files')")
+            .fetch_all(&mut *migration)
+            .await?;
+    for (column, definition) in [("content_hash", "TEXT"), ("parser_version", "INTEGER")] {
+        if !columns.iter().any(|name| name == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE source_files ADD COLUMN {column} {definition}"
+            ))
+            .execute(&mut *migration)
+            .await
+            .context("upgrade source checkpoint schema")?;
+        }
+    }
+    migration.commit().await?;
     Ok(pool)
 }
 

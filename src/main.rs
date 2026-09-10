@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod fingerprint;
 mod ingest;
 mod web;
 
@@ -20,6 +21,11 @@ struct Cli {
 enum Command {
     /// Delete and rebuild the disposable index from raw agent homes.
     Rebuild {
+        #[arg(long, default_value = "data")]
+        data: PathBuf,
+    },
+    /// Import new or changed sources, preserving the existing index.
+    Refresh {
         #[arg(long, default_value = "data")]
         data: PathBuf,
     },
@@ -45,6 +51,19 @@ async fn main() -> Result<()> {
             println!(
                 "indexed {} sessions, {} messages, {} tool calls; {} errors",
                 report.sessions, report.messages, report.tool_calls, report.errors
+            );
+        }
+        Command::Refresh { data } => {
+            let pool = db::open(&cli.database).await?;
+            let report = ingest::ingest_data_root(&pool, &data).await?;
+            println!(
+                "indexed {} sessions, {} messages, {} tool calls; skipped {} unchanged files; {} errors; {} files seen",
+                report.sessions,
+                report.messages,
+                report.tool_calls,
+                report.skipped,
+                report.errors,
+                report.files_seen
             );
         }
         Command::Serve { bind, auth_file } => {

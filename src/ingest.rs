@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use crate::fingerprint::{HashingReader, ensure_unchanged, hash_file};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{Acquire, SqliteConnection, SqlitePool};
 use std::{
     collections::HashMap,
     fs::File,
@@ -12,9 +13,22 @@ use walkdir::WalkDir;
 #[cfg(test)]
 mod regression;
 
+// Bump when normalized parsing semantics change so refresh replaces old projections.
+const PARSER_VERSION: i64 = 1;
+
+#[derive(sqlx::FromRow)]
+struct SourceCheckpoint {
+    content_hash: Option<String>,
+    parser_version: Option<i64>,
+    parse_status: String,
+    has_session: bool,
+}
+
 #[derive(Default, Debug)]
 pub struct IngestReport {
     pub sessions: usize,
+    pub skipped: usize,
+    pub files_seen: usize,
     pub messages: usize,
     pub tool_calls: usize,
     pub errors: usize,
@@ -43,14 +57,23 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
                 if entry.file_type().is_file()
                     && entry.path().extension().is_some_and(|x| x == "jsonl")
                 {
-                    match ingest_rollout(&mut transaction, run, instance, entry.path(), area).await
+                    report.files_seen += 1;
+                    let mut file_transaction = transaction.begin().await?;
+                    match ingest_rollout(&mut file_transaction, run, instance, entry.path(), area)
+                        .await
                     {
-                        Ok((m, t)) => {
+                        Ok(None) => {
+                            file_transaction.commit().await?;
+                            report.skipped += 1;
+                        }
+                        Ok(Some((m, t))) => {
+                            file_transaction.commit().await?;
                             report.sessions += 1;
                             report.messages += m;
                             report.tool_calls += t;
                         }
                         Err(error) => {
+                            file_transaction.rollback().await?;
                             report.errors += 1;
                             record_file_error(
                                 &mut transaction,
@@ -68,7 +91,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
         }
     }
     sqlx::query("UPDATE ingest_runs SET finished_at=CURRENT_TIMESTAMP,status='complete',files_seen=?,errors=? WHERE id=?")
-        .bind(report.sessions as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
+        .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(report)
 }
@@ -149,18 +172,49 @@ async fn ingest_rollout(
     instance: i64,
     path: &Path,
     kind: &str,
-) -> Result<(usize, usize)> {
-    let metadata = std::fs::metadata(path)?;
-    let source_id = sqlx::query("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status) VALUES(?,?,?,?,?,'parsing')")
-        .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(metadata.len() as i64).execute(&mut *connection).await?.last_insert_rowid();
-    let file = File::open(path)?;
+) -> Result<Option<(usize, usize)>> {
+    let previous: Option<SourceCheckpoint> = sqlx::query_as(
+        "SELECT content_hash,parser_version,parse_status,EXISTS(SELECT 1 FROM sessions WHERE source_file_id=source_files.id) AS has_session FROM source_files WHERE path=?")
+        .bind(path.to_string_lossy().as_ref()).fetch_optional(&mut *connection).await?;
+    if let Some(checkpoint) = &previous
+        && checkpoint.has_session
+        && checkpoint.parser_version == Some(PARSER_VERSION)
+        && checkpoint.parse_status == "ok"
+        && let Some(hash) = &checkpoint.content_hash
+        && hash_file(path)? == *hash
+    {
+        return Ok(None);
+    }
+    let file = File::open(path).context("open rollout")?;
+    let metadata = file.metadata().context("inspect rollout")?;
+    let mut reader = BufReader::new(HashingReader::new(file));
     let mut values = Vec::new();
     let mut line_errors = Vec::new();
-    for (n, line) in BufReader::new(file).lines().enumerate() {
-        match line.and_then(|s| serde_json::from_str::<Value>(&s).map_err(std::io::Error::other)) {
-            Ok(v) => values.push(v),
-            Err(e) => line_errors.push(format!("line {}: {}", n + 1, e)),
+    let mut line = Vec::new();
+    let mut n = 0;
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .context("read rollout line")?
+            == 0
+        {
+            break;
         }
+        n += 1;
+        match serde_json::from_slice::<Value>(&line) {
+            Ok(v) => values.push(v),
+            // Do not persist parser text that could quote private source values.
+            Err(_) => line_errors.push(format!("line {n}: invalid JSON or UTF-8")),
+        }
+    }
+    ensure_unchanged(path, &metadata)?;
+    let content_hash = reader.get_ref().fingerprint();
+    if previous.as_ref().is_some_and(|row| row.has_session) {
+        ensure!(
+            line_errors.is_empty(),
+            "partial replacement; previous records retained; retry refresh"
+        );
     }
     let meta = values
         .iter()
@@ -189,8 +243,41 @@ async fn ingest_rollout(
     } else {
         "unknown"
     };
-    let session_id = sqlx::query("INSERT INTO sessions(instance_id,source_file_id,external_id,started_at,ended_at,cwd,model,status,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(instance).bind(source_id).bind(external_id).bind(started).bind(ended).bind(p["cwd"].as_str()).bind(model).bind(status).bind(meta.to_string()).execute(&mut *connection).await?.last_insert_rowid();
+    let existing: Option<(i64, String)> = sqlx::query_as("SELECT sessions.id,source_files.path FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id WHERE sessions.instance_id=? AND external_id=?")
+        .bind(instance).bind(external_id).fetch_optional(&mut *connection).await?;
+    if existing.is_some() {
+        ensure!(
+            line_errors.is_empty(),
+            "partial replacement; previous records retained; retry refresh"
+        );
+    }
+    if let Some((_, old_path)) = &existing {
+        ensure!(
+            Path::new(old_path) == path
+                || !Path::new(old_path)
+                    .try_exists()
+                    .context("inspect prior source location")?,
+            "duplicate session identity at another source; previous records retained"
+        );
+    }
+    let source_id: i64 = sqlx::query_scalar("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status) VALUES(?,?,?,?,?,'parsing') ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,kind=excluded.kind,size_bytes=excluded.size_bytes,parse_status='parsing' RETURNING id")
+        .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(metadata.len() as i64).fetch_one(&mut *connection).await?;
+    // A replaced path can now identify a different session. Remove only its old projection.
+    sqlx::query("DELETE FROM sessions WHERE source_file_id=? AND external_id<>?")
+        .bind(source_id)
+        .bind(external_id)
+        .execute(&mut *connection)
+        .await?;
+    let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,started_at,ended_at,cwd,model,status,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,raw_metadata=excluded.raw_metadata RETURNING id")
+        .bind(instance).bind(source_id).bind(external_id).bind(started).bind(ended).bind(p["cwd"].as_str()).bind(model).bind(status).bind(meta.to_string()).fetch_one(&mut *connection).await?;
+    if existing.is_some() {
+        for table in ["messages", "tool_calls", "usage_events"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
+                .bind(session_id)
+                .execute(&mut *connection)
+                .await?;
+        }
+    }
     let mut messages = 0usize;
     let mut tools = 0usize;
     let mut pending: HashMap<String, i64> = HashMap::new();
@@ -246,18 +333,21 @@ async fn ingest_rollout(
                 .bind(session_id).bind(v["timestamp"].as_str()).bind(u["input_tokens"].as_i64()).bind(u["output_tokens"].as_i64()).bind(u["cached_input_tokens"].as_i64()).bind(u["total_tokens"].as_i64()).bind(v.to_string()).execute(&mut *connection).await?;
         }
     }
+    ensure_unchanged(path, &metadata)?;
     let parse_status = if line_errors.is_empty() {
         "ok"
     } else {
         "partial"
     };
-    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=? WHERE id=?")
+    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=?,content_hash=?,parser_version=? WHERE id=?")
         .bind(parse_status)
         .bind((!line_errors.is_empty()).then(|| line_errors.join("; ")))
+        .bind(&content_hash)
+        .bind(PARSER_VERSION)
         .bind(source_id)
         .execute(&mut *connection)
         .await?;
-    Ok((messages, tools))
+    Ok(Some((messages, tools)))
 }
 
 async fn record_file_error(
@@ -268,7 +358,7 @@ async fn record_file_error(
     kind: &str,
     error: &str,
 ) -> Result<()> {
-    sqlx::query("INSERT OR REPLACE INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status,parse_error) VALUES(?,?,?,?,?,'error',?)")
+    sqlx::query("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status,parse_error) VALUES(?,?,?,?,?,'error',?) ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,parse_status='error',parse_error=excluded.parse_error")
         .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(std::fs::metadata(path).ok().map(|m| m.len() as i64)).bind(error).execute(&mut *connection).await?;
     Ok(())
 }

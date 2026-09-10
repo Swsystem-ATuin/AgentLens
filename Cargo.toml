@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+blake3 = "1"
 anyhow = "1"
 base64 = "0.22"
 sha2 = "0.10"

@@ -10,6 +10,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
 - Continues past malformed files and records source-level parsing failures.
+- Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
 - Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs.
 
@@ -26,7 +27,17 @@ Fixture data and generated SQLite indexes are intentionally excluded from Git.
 
 ## Run locally
 
-Rebuild the index from raw data:
+Create or refresh the index from raw data:
+
+```bash
+cargo run -- refresh --data data
+```
+
+Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, errors, and files seen. A browser reload only reads SQLite; run this command to index updated copied sources.
+
+Existing databases are upgraded automatically: files without hashes are reimported once. No full rebuild is required. Checksums and normalized records are committed together; failed or partial replacements retain the previous transcript and are retried on the next refresh. New partial files still expose their valid records. See [refresh behavior and verification](docs/refresh.md) for archive moves, duplicate identities, source publication, and limitations.
+
+Explicitly discard and rebuild the index from raw data:
 
 ```bash
 cargo run -- rebuild --data data
@@ -51,7 +62,7 @@ The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001
 
 Authentication is required for every route, including direct transcript URLs. Missing, malformed, or empty credentials prevent startup. Responses use `Cache-Control: no-store`. Credentials are loaded at startup; restart after changing them. Browsers may retain Basic authentication credentials until closed; there is no application logout button.
 
-To use a file outside the checkout, pass `--auth-file /path/to/auth.json` after `serve`, or set `AGENT_LENS_AUTH_FILE`. Protect that file with owner-only permissions and keep it out of source control. Rebuild commands do not require credentials. Existing indexes need no migration or rebuild.
+To use a file outside the checkout, pass `--auth-file /path/to/auth.json` after `serve`, or set `AGENT_LENS_AUTH_FILE`. Protect that file with owner-only permissions and keep it out of source control. Refresh and rebuild commands do not require credentials. The checkpoint schema upgrade is automatic; no manual migration is needed.
 
 For access beyond localhost, put the app behind an HTTPS reverse proxy and restrict direct access to the backend port. [HTTP Basic authentication requires HTTPS to protect credentials in transit](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Authentication). The built-in server serves HTTP and defaults to loopback.
 

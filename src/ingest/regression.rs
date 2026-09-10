@@ -237,3 +237,330 @@ async fn failed_run_finalization_rolls_back_all_index_writes() {
             .unwrap();
     assert_eq!(run, ("complete".into(), 1, 0, true));
 }
+
+fn message(text: &str) -> Value {
+    json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":text}]}})
+}
+
+#[tokio::test]
+async fn refresh_skips_verified_files_and_reimports_missing_hashes_and_parser_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("original")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    let run: i64 = sqlx::query_scalar("SELECT ingest_run_id FROM source_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.sessions, report.errors),
+        (0, 0),
+        "unchanged imports must be skipped, not fail on duplicate paths"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT ingest_run_id FROM source_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        run
+    );
+    for update in [
+        "UPDATE source_files SET content_hash=NULL",
+        "UPDATE source_files SET parser_version=0",
+    ] {
+        sqlx::query(update).execute(&pool).await.unwrap();
+        let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+        assert_eq!((report.sessions, report.errors), (1, 0));
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refresh_detects_same_metadata_edits_and_preserves_session_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("before")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("after!")],
+    );
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((report.sessions, report.errors), (1, 0));
+    let row: (i64, String) = sqlx::query_as(
+        "SELECT sessions.id,content FROM sessions JOIN messages ON messages.session_id=sessions.id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (id, "after!".into()));
+}
+
+#[tokio::test]
+async fn refresh_failed_and_partial_replacements_preserve_previous_records_and_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("original")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    for broken in [
+        "not-json".to_owned(),
+        format!("{}\n{}\n{{", meta("refresh"), message("partial")),
+    ] {
+        std::fs::write(&path, broken).unwrap();
+        for _ in 0..2 {
+            assert_eq!(ingest_data_root(&pool, dir.path()).await.unwrap().errors, 1);
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT content FROM messages")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                "original"
+            );
+        }
+    }
+    write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("repaired")],
+    );
+    sqlx::raw_sql("CREATE TRIGGER fail_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").execute(&pool).await.unwrap();
+    assert_eq!(ingest_data_root(&pool, dir.path()).await.unwrap().errors, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT content FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "original"
+    );
+    sqlx::query("DROP TRIGGER fail_message")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT content FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "repaired"
+    );
+}
+
+async fn projection(pool: &SqlitePool) -> Vec<String> {
+    let mut out = Vec::new();
+    for query in [
+        "SELECT external_id || ':' || raw_metadata FROM sessions ORDER BY external_id",
+        "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
+        "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
+        "SELECT external_id || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,usage_events.raw_json",
+    ] {
+        out.extend(
+            sqlx::query_scalar::<_, String>(query)
+                .fetch_all(pool)
+                .await
+                .unwrap(),
+        );
+    }
+    out
+}
+
+#[tokio::test]
+async fn refresh_append_truncate_replace_archive_and_duplicates_match_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut records = vec![
+        meta("changing"),
+        message("initial"),
+        json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+    ];
+    let path = write_source(dir.path(), "sessions", "changing.jsonl", &records);
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    records.extend([
+        message("resumed"),
+        json!({"type":"response_item","payload":{"type":"function_call","call_id":"call","name":"synthetic","arguments":"{}"}}),
+        json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":"synthetic output"}}),
+        json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":12}}}}),
+    ]);
+    for current in [&records[..], &records[..2]] {
+        write_source(dir.path(), "sessions", "changing.jsonl", current);
+        assert_eq!(
+            ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+            1
+        );
+        let rebuilt = crate::db::rebuild(&dir.path().join("rebuilt.sqlite"))
+            .await
+            .unwrap();
+        ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+        assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+        rebuilt.close().await;
+    }
+    let archived = write_source(dir.path(), "archived_sessions", "changing.jsonl", &records);
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.skipped, report.errors),
+        (1, 1),
+        "duplicate identities must not overwrite the indexed source"
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT kind FROM source_files JOIN sessions ON source_files.id=sessions.source_file_id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "archived_sessions"
+    );
+    std::fs::write(
+        &archived,
+        format!("{}\n{}", meta("replacement"), message("new identity")),
+    )
+    .unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+    let rebuilt = crate::db::open(&dir.path().join("final.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_partial_utf8_tail_is_retried_and_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "partial.jsonl",
+        &[meta("partial"), message("good")],
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"\n{\"unfinished\":\"\xc3");
+    std::fs::write(&path, bytes).unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+    assert_eq!(ingest_data_root(&pool, dir.path()).await.unwrap().errors, 1);
+    write_source(
+        dir.path(),
+        "sessions",
+        "partial.jsonl",
+        &[meta("partial"), message("complete")],
+    );
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().skipped,
+        1
+    );
+}
+
+#[tokio::test]
+async fn refresh_finalization_failure_rolls_back_replacements_and_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("before")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    let original = projection(&pool).await;
+    let hash: String = sqlx::query_scalar("SELECT content_hash FROM source_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "refresh.jsonl",
+        &[meta("refresh"), message("after")],
+    );
+    sqlx::raw_sql("CREATE TRIGGER fail_refresh BEFORE UPDATE ON ingest_runs BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").execute(&pool).await.unwrap();
+    assert!(ingest_data_root(&pool, dir.path()).await.is_err());
+    assert_eq!(projection(&pool).await, original);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT content_hash FROM source_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        hash
+    );
+    sqlx::query("DROP TRIGGER fail_refresh")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
+        1
+    );
+}
