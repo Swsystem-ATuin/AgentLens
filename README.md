@@ -65,9 +65,9 @@ The `AGENT_LENS_DB` environment variable provides the same override.
 
 ## Development
 
-Planned improvements and architecture follow-ups are tracked in [TODO.md](TODO.md). Update the checklist as work is completed or requirements change.
+Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). Update the roadmap as work is completed or requirements change. The former TODO checklist has been consolidated into the roadmap.
 
-Multiple application users are a planned requirement. The current shared username/password is interim; individual identities, access permissions, and persistent account storage are tracked in the TODO list and are not implemented yet.
+Multiple application users are a planned requirement. The current shared username/password is interim; individual identities, access permissions, and persistent account storage are tracked in the roadmap and are not implemented yet.
 
 ```bash
 cargo fmt --check

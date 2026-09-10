@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Feature comparison of codex_viewer, codex-dash, and codex-blackbox, with pinned sources and a phased AgentLens roadmap covering browsing, usage, diagnostics, incremental collection, and additional agents.
+
 - Historical regression audit and expanded synthetic coverage for ingestion variants and failures, transaction rollback, database integrity, CLI rebuilds, authentication, filtering, and rendered transcripts.
 - A shared `scripts/check.sh` regression check command and mandatory per-change regression verification, including rendered transcript coverage.
 - Prioritised project TODO list tracking architecture-review findings and conditional technology decisions.
@@ -26,6 +28,8 @@ All notable changes to this project will be documented in this file. The format 
 - Agent Lens project identity and canonical repository metadata.
 
 ### Changed
+
+- Consolidate all 16 open architecture TODO items into the roadmap, retaining acceptance criteria and multi-user deployment requirements; TODO.md now links to the single backlog.
 
 - Record multiple application users as a confirmed roadmap requirement, including individual identities, access permissions, and account storage independent of index rebuilds.
 - Recognize resume-time repository instructions and tagged setup blocks throughout transcripts; label interruptions and user actions while keeping them expanded.
