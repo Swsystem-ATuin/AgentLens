@@ -165,7 +165,13 @@ fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
         )
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", get(session))
-        .layer(TraceLayer::new_for_http())
+        // Query strings can contain user-supplied private values. Keep request
+        // spans useful without recording the URI in server diagnostics.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!("http_request", method = %request.method())
+            },
+        ))
         .with_state(AppState { pool })
         .layer(axum::middleware::from_fn_with_state(
             credentials,
@@ -199,13 +205,14 @@ async fn sessions(
         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
         WHERE (s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
         ORDER BY s.started_at DESC
-    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).fetch_all(&state.pool).await?;
+    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
     Ok(Html(
         SessionsTemplate {
             sessions: rows,
             options,
         }
-        .render()?,
+        .render()
+        .map_err(|error| WebError::template("render sessions", error))?,
     ))
 }
 
@@ -224,24 +231,31 @@ impl Filters {
     }
 }
 
-async fn load_filter_options(pool: &SqlitePool, filters: &Filters) -> Result<FilterOptions> {
+async fn load_filter_options(
+    pool: &SqlitePool,
+    filters: &Filters,
+) -> Result<FilterOptions, WebError> {
     let hosts = sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
         .fetch_all(pool)
-        .await?;
+        .await
+        .map_err(|error| WebError::database("load host filters", error))?;
     let users = sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
         .fetch_all(pool)
-        .await?;
+        .await
+        .map_err(|error| WebError::database("load user filters", error))?;
     let models = sqlx::query_scalar(
         "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' AND model NOT LIKE ? ORDER BY model",
     )
     .bind(HIDDEN_MODEL_PATTERN)
     .fetch_all(pool)
-    .await?;
+    .await
+    .map_err(|error| WebError::database("load model filters", error))?;
     let statuses = sqlx::query_scalar(
         "SELECT DISTINCT status FROM sessions WHERE status IS NOT NULL AND status <> '' ORDER BY status",
     )
     .fetch_all(pool)
-    .await?;
+    .await
+    .map_err(|error| WebError::database("load status filters", error))?;
 
     Ok(FilterOptions {
         hosts: select_options(hosts, filters.host.as_deref()),
@@ -269,46 +283,95 @@ async fn session(
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (s.model IS NULL OR s.model NOT LIKE ?)
-    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(&state.pool).await?.ok_or_else(|| WebError::not_found("session not found"))?;
+    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(&state.pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)?;
     let messages = sqlx::query_as::<_, MessageRow>(
         "SELECT sequence,timestamp,role,content FROM messages WHERE session_id=? ORDER BY sequence",
     )
     .bind(id)
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .map_err(|error| WebError::database("load transcript", error))?;
     Ok(Html(
         SessionTemplate {
             session: row,
             segments: group_transcript(messages),
         }
-        .render()?,
+        .render()
+        .map_err(|error| WebError::template("render transcript", error))?,
     ))
 }
 
 struct WebError {
     status: StatusCode,
-    source: anyhow::Error,
+    public_message: &'static str,
+    operation: &'static str,
+    error_kind: &'static str,
+    error_code: Option<String>,
 }
 impl WebError {
-    fn not_found(message: &str) -> Self {
+    fn not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            source: anyhow::anyhow!(message.to_owned()),
+            public_message: "session not found",
+            operation: "load session",
+            error_kind: "not_found",
+            error_code: None,
+        }
+    }
+
+    fn database(operation: &'static str, error: sqlx::Error) -> Self {
+        let (error_kind, error_code) = classify_database_error(&error);
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "Internal server error",
+            operation,
+            error_kind,
+            error_code,
+        }
+    }
+
+    fn template(operation: &'static str, _error: askama::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "Internal server error",
+            operation,
+            error_kind: "template",
+            error_code: None,
         }
     }
 }
-impl<E: Into<anyhow::Error>> From<E> for WebError {
-    fn from(e: E) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            source: e.into(),
-        }
+
+fn classify_database_error(error: &sqlx::Error) -> (&'static str, Option<String>) {
+    match error {
+        sqlx::Error::Configuration(_) => ("configuration", None),
+        sqlx::Error::Database(error) => ("database", error.code().map(|code| code.into_owned())),
+        sqlx::Error::Io(error) => ("io", Some(format!("{:?}", error.kind()))),
+        sqlx::Error::Tls(_) => ("tls", None),
+        sqlx::Error::Protocol(_) => ("protocol", None),
+        sqlx::Error::RowNotFound => ("row_not_found", None),
+        sqlx::Error::TypeNotFound { .. } => ("type_not_found", None),
+        sqlx::Error::ColumnIndexOutOfBounds { .. } => ("column_index", None),
+        sqlx::Error::ColumnNotFound(_) => ("column_not_found", None),
+        sqlx::Error::ColumnDecode { .. } => ("column_decode", None),
+        sqlx::Error::Decode(_) => ("decode", None),
+        sqlx::Error::AnyDriverError(_) => ("driver", None),
+        sqlx::Error::PoolTimedOut => ("pool_timeout", None),
+        sqlx::Error::PoolClosed => ("pool_closed", None),
+        sqlx::Error::WorkerCrashed => ("worker_crashed", None),
+        sqlx::Error::Migrate(_) => ("migration", None),
+        _ => ("unknown", None),
     }
 }
 impl IntoResponse for WebError {
     fn into_response(self) -> axum::response::Response {
-        tracing::error!(error=%self.source, "request failed");
-        (self.status, self.source.to_string()).into_response()
+        tracing::error!(
+            operation = self.operation,
+            error_kind = self.error_kind,
+            error_code = self.error_code.as_deref(),
+            status = self.status.as_u16(),
+            "request failed"
+        );
+        (self.status, self.public_message).into_response()
     }
 }
 

@@ -4,7 +4,41 @@ use axum::{
     http::{Request, header},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 use tower::ServiceExt;
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(Arc::clone(&self.0))
+    }
+}
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
 
 async fn seeded_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
@@ -257,6 +291,75 @@ async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
             .1
             .contains(&format!("href=\"/sessions/{id}\""))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn internal_errors_are_generic_and_server_diagnostics_are_sanitized() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    pool.close().await;
+    let auth = dir.path().join("auth.json");
+    std::fs::write(
+        &auth,
+        r#"{"username":"synthetic","password":"private-login-secret"}"#,
+    )
+    .unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    let authorization = format!(
+        "Basic {}",
+        STANDARD.encode("synthetic:private-login-secret")
+    );
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/sessions?model=private-transcript-secret")
+                .header(header::AUTHORIZATION, &authorization)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "Internal server error"
+    );
+
+    let response = WebError::database(
+        "load synthetic record",
+        sqlx::Error::Protocol("private-database-secret".into()),
+    )
+    .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "Internal server error"
+    );
+
+    let logs = logs.text();
+    assert!(logs.contains("load host filters"), "{logs}");
+    assert!(logs.contains("pool_closed"), "{logs}");
+    assert!(logs.contains("load synthetic record"), "{logs}");
+    assert!(logs.contains("protocol"), "{logs}");
+    for private in [
+        "private-login-secret",
+        "private-transcript-secret",
+        "private-database-secret",
+        &authorization,
+    ] {
+        assert!(!logs.contains(private), "logs disclosed {private}: {logs}");
+    }
 }
 
 #[tokio::test]

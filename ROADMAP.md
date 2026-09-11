@@ -1,6 +1,6 @@
 # AgentLens roadmap
 
-Updated 2026-09-10. This is the single backlog for planned features, architecture work, and conditional decisions. It incorporates every open item from the 2026-09-09 architecture TODO and the [feature comparison](docs/feature-comparison.md) of codex_viewer, codex-dash, and codex-blackbox. All unchecked items are unimplemented proposals; the multiple-user requirement is confirmed, while its visibility policy remains undecided.
+Updated 2026-09-12. This is the single backlog for planned features, architecture work, and conditional decisions. It incorporates every open item from the 2026-09-09 architecture TODO and the [feature comparison](docs/feature-comparison.md) of codex_viewer, codex-dash, and codex-blackbox. All unchecked items are unimplemented proposals; the multiple-user requirement is confirmed, while its visibility policy remains undecided.
 
 Keep IDs stable, check items when delivered, and link the implementing commit or documentation. Milestones express dependency order, not delivery dates. Retain Rust, SQLite, server-rendered HTML, immutable raw sources, and a completely rebuildable index. Performance benefits are hypotheses until measured.
 
@@ -27,7 +27,7 @@ The following five items retain the original TODO acceptance criteria.
 
 - [x] **R0.2 — Report incomplete source discovery.** Replace silently ignored directory and traversal errors with useful, sanitised diagnostics and an accurate ingest result. Verify missing and unreadable sources cannot look like a successful complete import. Delivered with transactional missing-source cleanup; [behavior and verification](docs/refresh.md).
 
-- [ ] **R0.3 — Keep internal errors out of browser responses.** Return generic server-error messages while retaining sanitised diagnostic context on the server. Test that responses and logs do not disclose private transcript content or credentials.
+- [x] **R0.3 — Keep internal errors out of browser responses.** Return generic server-error messages while retaining sanitised diagnostic context on the server. Test that responses and logs do not disclose private transcript content or credentials. Delivered with source-free browser responses and allowlisted server diagnostics; [behavior and verification](docs/web-errors.md).
 
 - [ ] **R0.4 — Derive session status from event order.** Define completion, interruption, and resumed-session behavior, then cover those sequences with synthetic tests instead of relying on whether an event appears anywhere in a file.
 

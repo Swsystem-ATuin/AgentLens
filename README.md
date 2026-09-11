@@ -84,6 +84,8 @@ The `AGENT_LENS_DB` environment variable provides the same override.
 
 Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). Update the roadmap as work is completed or requirements change. The former TODO checklist has been consolidated into the roadmap.
 
+Internal web failures return a generic response. Server diagnostics record only an allowlisted operation, error category, optional database/IO code, HTTP status, and request method; they do not record request URIs, authorization headers, database error text, or transcript content. See [web error handling](docs/web-errors.md).
+
 Multiple application users are a planned requirement. The current shared username/password is interim; individual identities, access permissions, and persistent account storage are tracked in the roadmap and are not implemented yet.
 
 ```bash
