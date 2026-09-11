@@ -107,6 +107,64 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
 }
 
 #[tokio::test]
+async fn cli_rebuild_and_refresh_accept_a_direct_codex_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("single/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("rollout.jsonl"),
+        include_bytes!("fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    let rebuild = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "rebuild",
+            "--data",
+            "single/.codex",
+        ],
+    );
+    assert!(
+        rebuild.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rebuild.stdout).contains("indexed 1 sessions"));
+
+    let refresh = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "refresh",
+            "--data",
+            "single/.codex",
+        ],
+    );
+    assert!(
+        refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+    assert!(String::from_utf8_lossy(&refresh.stdout).contains("skipped 1 unchanged files"));
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("index.sqlite")),
+        )
+        .await
+        .unwrap();
+    let layouts: Vec<String> =
+        sqlx::query_scalar("SELECT source_layout FROM ingest_runs ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(layouts, ["direct-codex-home", "direct-codex-home"]);
+}
+
+#[tokio::test]
 async fn failed_cli_rebuild_preserves_the_previous_index_and_removes_staging_files() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("sources/host/user/.codex/sessions");
@@ -177,7 +235,7 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
     let pool = sqlx::SqlitePool::connect_with(options.clone())
         .await
         .unwrap();
-    sqlx::raw_sql("ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version;").execute(&pool).await.unwrap();
+    sqlx::raw_sql("ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version; ALTER TABLE ingest_runs DROP COLUMN source_layout;").execute(&pool).await.unwrap();
     pool.close().await;
     let result = run(dir.path(), &args);
     assert!(

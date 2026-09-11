@@ -6,13 +6,13 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 
 ## Current functionality
 
-- Discovers Codex homes at `data/{hostname}/{os_user}/.codex/`.
+- Discovers Codex homes at `data/{hostname}/{os_user}/.codex/`, or accepts one `.codex/` directory directly.
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
 - Continues past malformed files and records source-level parsing failures.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
-- Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs.
+- Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
 - Derives each session's coarse lifecycle status from source-record order. Later completion or interruption events win; subsequent turn or user activity resets an earlier terminal outcome to `unknown`, which does not imply the copied session is currently running. See [session status semantics](docs/session-status.md).
 
 Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidden from the sessions list, model dropdown, and direct transcript URLs. Their indexed data is retained. Restart the server after updating; no refresh or rebuild is required for this visibility rule.
@@ -24,7 +24,7 @@ Transcript setup blocks are labeled and collapsed even after a session resumes, 
 ## Requirements
 
 - A recent stable Rust toolchain
-- A copied Codex home beneath `data/{hostname}/{os_user}/.codex/`
+- Either copied Codex homes beneath `data/{hostname}/{os_user}/.codex/`, or one copied `.codex/` home
 
 Fixture data and generated SQLite indexes are intentionally excluded from Git.
 
@@ -34,9 +34,11 @@ Create or refresh the index from raw data:
 
 ```bash
 cargo run -- refresh --data data
+# Or index one home without host/user labels:
+cargo run -- refresh --data /path/to/.codex
 ```
 
-Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, errors, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort the run. A browser reload only reads SQLite; run this command to index updated copied sources.
+Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, errors, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort the run. A direct `.codex` refresh is accepted for a new index or one whose previous rebuild/refresh also used direct-home mode. Changing between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
 
 Source directories may be symbolic links to nightly backups, including the data root, host/user folders, `.codex`, and session subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
 
@@ -46,6 +48,8 @@ Explicitly discard and rebuild the index from raw data (this also stores BLAKE3 
 
 ```bash
 cargo run -- rebuild --data data
+# Or rebuild from one home without host/user labels:
+cargo run -- rebuild --data /path/to/.codex
 ```
 
 Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.

@@ -20,8 +20,89 @@ fn write_source(root: &Path, area: &str, name: &str, records: &[Value]) -> PathB
     path
 }
 
+fn write_direct_source(home: &Path, name: &str, records: &[Value]) -> PathBuf {
+    let directory = home.join("sessions");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(name);
+    std::fs::write(
+        &path,
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    path
+}
+
 fn meta(id: &str) -> Value {
     json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"id":id,"future_field":true}})
+}
+
+#[tokio::test]
+async fn direct_codex_home_refreshes_only_an_existing_hostless_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("single/.codex");
+    let direct_path = write_direct_source(&home, "direct.jsonl", &[meta("direct")]);
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let first = ingest_data_root(&pool, &home).await.unwrap();
+    assert_eq!(first.sessions, 1);
+    let layout: String =
+        sqlx::query_scalar("SELECT source_layout FROM ingest_runs ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(layout, "direct-codex-home");
+    let identity: (String, String) = sqlx::query_as(
+        "SELECT h.name,u.os_user FROM agent_instances i JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(identity, (String::new(), String::new()));
+
+    let second = ingest_data_root(&pool, &home).await.unwrap();
+    assert_eq!(second.skipped, 1);
+    std::fs::remove_file(direct_path).unwrap();
+    let third = ingest_data_root(&pool, &home).await.unwrap();
+    assert_eq!((third.removed_sessions, third.removed_files), (1, 1));
+
+    let rooted = dir.path().join("rooted");
+    write_source(&rooted, "sessions", "rooted.jsonl", &[meta("rooted")]);
+    let error = ingest_data_root(&pool, &rooted).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("source layout does not match"),
+        "unexpected error: {error:#}"
+    );
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 3, "a rejected refresh must not record a run");
+}
+
+#[tokio::test]
+async fn direct_codex_home_is_rejected_after_a_host_user_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(dir.path(), "sessions", "rooted.jsonl", &[meta("rooted")]);
+    let home = dir.path().join("single/.codex");
+    write_direct_source(&home, "direct.jsonl", &[meta("direct")]);
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    let error = ingest_data_root(&pool, &home).await.unwrap_err();
+    assert!(format!("{error:#}").contains("source layout does not match"));
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 1, "the incompatible refresh must change nothing");
 }
 
 #[tokio::test]

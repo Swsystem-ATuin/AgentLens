@@ -174,6 +174,40 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     assert!(!html.contains("<details"));
 }
 
+#[tokio::test]
+async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("single/.codex/sessions");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("direct.jsonl"),
+        include_bytes!("../../tests/fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    crate::ingest::ingest_data_root(&pool, &dir.path().join("single/.codex"))
+        .await
+        .unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+
+    let (_, list) = get(&app, "/sessions?host=ignored&user=ignored").await;
+    assert!(!list.contains("aria-label=\"Host\""), "{list}");
+    assert!(!list.contains("aria-label=\"User\""), "{list}");
+    assert!(!list.contains("<th>Host</th>"), "{list}");
+    assert!(!list.contains("<th>User</th>"), "{list}");
+    assert!(list.contains(&format!("href=\"/sessions/{id}\"")), "{list}");
+    let (_, transcript) = get(&app, &format!("/sessions/{id}")).await;
+    assert!(!transcript.contains("<span> / </span>"), "{transcript}");
+}
+
 #[test]
 fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
     for (prefix, title, open) in [
@@ -211,6 +245,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 message(2, "user", &format!("  {prefix}\nsynthetic")),
                 message(3, "assistant", "next reply"),
             ]),
+            show_origin: true,
         }
         .render()
         .unwrap();
@@ -348,7 +383,7 @@ async fn internal_errors_are_generic_and_server_diagnostics_are_sanitized() {
     );
 
     let logs = logs.text();
-    assert!(logs.contains("load host filters"), "{logs}");
+    assert!(logs.contains("load source layout"), "{logs}");
     assert!(logs.contains("pool_closed"), "{logs}");
     assert!(logs.contains("load synthetic record"), "{logs}");
     assert!(logs.contains("protocol"), "{logs}");

@@ -3,9 +3,10 @@
 ```bash
 cargo run -- refresh --data data
 cargo run -- --database /tmp/agent-lens.sqlite refresh --data data
+cargo run -- refresh --data /path/to/.codex
 ```
 
-`AGENT_LENS_DB` also selects the index. Refresh creates an index when missing and requires no authentication file. Use the same working directory and source-path spelling across runs: source homes and file paths are currently stored as supplied, not canonicalized identities.
+`AGENT_LENS_DB` also selects the index. Refresh creates an index when missing and requires no authentication file. The data path may use the multi-origin `root/host/user/.codex` layout or name one `.codex` home directly. Direct-home indexes omit host/user filters, columns, and transcript metadata. Refresh preserves the layout recorded by the previous successful rebuild or refresh; use `rebuild` to change layouts. Use the same working directory and source-path spelling across runs: source homes and file paths are currently stored as supplied, not canonicalized identities.
 
 Every discovered rollout is checked against a source-file checkpoint in SQLite. Checkpoints contain a `blake3:`-prefixed digest of the exact file bytes, a parser version, and parse status. A matching checksum skips parsing only when the parser version is current, status is `ok`, and an indexed session references that source. Session lifecycle status is not used: a completed task may resume later.
 
@@ -26,7 +27,7 @@ The recorded hash certifies a successfully committed file projection only when i
 - Appends, truncations, and rewritten content replace the affected file's projection, including tool outputs and usage events. A replacement with a different native session ID removes that path's previous session.
 - A move to `archived_sessions` preserves the session when its former path no longer exists. The session points to its new source before cleanup removes the missing old source row.
 - Two existing files claiming the same session identity are conflicts. The already indexed source wins; on a fresh index the first successfully imported source wins. Conflicting files are reported as errors and retried. Divergent duplicate sources require resolution in the upstream copying process.
-- Missing source files are removed from the index after discovery/import, including their sessions, messages, tool calls, usage records, and source checkpoints/errors. This also handles removal of an entire host, user, home, or sessions directory. Cleanup only covers the requested `root/host/user/.codex` scope; other roots and agent kinds are untouched. The CLI reports the numbers of sessions and source rows removed.
+- Missing source files are removed from the index after discovery/import, including their sessions, messages, tool calls, usage records, and source checkpoints/errors. This also handles removal of an entire host, user, home, or sessions directory. Cleanup covers only the requested direct `.codex` home or `root/host/user/.codex` scope; other roots and agent kinds are untouched. The CLI reports the numbers of sessions and source rows removed.
 - A missing/unreadable root, directory inspection failure, traversal error, broken symbolic link, directory loop, or symbolic link to an individual file aborts the run and rolls back imports and deletions. A present, readable, empty root is an authoritative empty snapshot and removes its indexed sessions. Individual malformed files remain localized parse errors and do not block removal of unrelated missing files. Use a coherent, fully published copy; an empty mount point cannot be distinguished from an intentionally empty source tree.
 - Directory symbolic links are followed at the root, host, user, `.codex`, active/archive area, and nested session-directory levels. Relative targets work too. Logical paths through the links remain the indexed identities, so retargeting a stable link to the next nightly backup retains unchanged-file checkpoints. Targets may be outside the source root and are read only. Keep link targets available and unchanged throughout refresh; broken links cancel the whole run instead of being treated as removed directories. No schema migration or rebuild is needed.
 - Publish a coherent copied source tree before refreshing. Do not modify files in place during refresh. File size and modification time are checked around reading and again after importing; Unix also checks device, inode, and change time. Detected concurrent edits roll back the file and require retry. These checks do not provide a filesystem snapshot or prevent changes after the final check.
@@ -39,7 +40,7 @@ After refresh commits, new list and transcript requests cannot retrieve deleted 
 
 ## Regression verification
 
-Run `bash scripts/check.sh`. Tests use temporary synthetic sources and the small redacted fixture, never private `data/`. Coverage includes missing hashes, legacy schema migration, parser-version invalidation, repeated skips, checksum correctness, same-size/same-timestamp edits, resumed completed sessions, truncation, changed identities, archive moves, duplicate conflicts, partial JSON/UTF-8, rollback of failed replacements and failed finalization, retries, source immutability, and normalized refresh/rebuild parity for messages, tools, and usage.
+Run `bash scripts/check.sh`. Tests use temporary synthetic sources and the small redacted fixture, never private `data/`. Coverage includes direct-home rebuild/refresh and rendered hostless pages, layout mismatch rollback, missing hashes, legacy schema migration, parser-version invalidation, repeated skips, checksum correctness, same-size/same-timestamp edits, resumed completed sessions, truncation, changed identities, archive moves, duplicate conflicts, partial JSON/UTF-8, rollback of failed replacements and failed finalization, retries, source immutability, and normalized refresh/rebuild parity for messages, tools, and usage.
 
 Before implementation, the three initial refresh regressions failed on the existing duplicate-path/foreign-key behavior. They pass with transactional replacement and safe source-row updates.
 
@@ -83,3 +84,14 @@ The new directory-link regression failed with the previous unsupported-source-di
 Full rebuilds were compared using release binaries before and after the change, with 40 synthetic sessions, 60,000 messages, and 64,982,390 source bytes. Three sequential runs per binary used warm caches, ordinary source directories, the same temporary SQLite path, and no concurrent build. Median elapsed time was 5.566 s before (5.556–5.808 s) and 5.811 s after (5.465–5.932 s), a 4.4% increase with overlapping ranges. The benchmark driver's cumulative child-process peak RSS stayed at 17,920 KiB across both groups; this is not a per-run memory comparison.
 
 Transaction boundaries, SQL query volume, transcript reads, and parser allocations are unchanged. Directory links add target metadata resolution and WalkDir's ancestor-loop checks; ordinary discovery retains directory-entry type checks. Traversal remains streaming and cleanup still buffers at most 256 paths. Actual backup storage latency and directory layout may dominate costs; these warm-cache measurements do not predict remote-backup performance.
+
+## Direct-home performance review (2026-09-12)
+
+Release builds immediately before and after direct `.codex` support were compared on 40 synthetic sessions containing 60,000 messages and 65,223,640 source bytes. Three alternating warm-cache rebuilds per binary used the same host/user source tree and separate SQLite paths. Elapsed time includes process startup and publication; a `/proc` sampler recorded peak resident memory. No private fixture was read.
+
+| Implementation | Median elapsed | Observed range | Peak RSS range |
+| --- | ---: | ---: | ---: |
+| Before direct-home support | 6.395 s | 6.367–6.416 s | 19,676–19,844 KiB |
+| After direct-home support | 6.419 s | 6.352–6.673 s | 19,704–19,864 KiB |
+
+The 0.4% median difference and memory ranges are within the observed run-to-run spread. Normal host/user discovery still visits the same directories and source files. The change adds one bounded lookup of the previous layout and one layout value per ingest run; parsing, hashing, per-source queries, transaction boundaries, decoded-record allocation, and source-file I/O are unchanged. Direct-home mode skips the two directory levels used to discover hosts and users. Peak RSS sampling was polling-based and may miss brief maxima.

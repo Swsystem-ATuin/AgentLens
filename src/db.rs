@@ -45,6 +45,18 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             .context("upgrade source checkpoint schema")?;
         }
     }
+    let ingest_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('ingest_runs')")
+            .fetch_all(&mut *migration)
+            .await?;
+    if !ingest_columns.iter().any(|name| name == "source_layout") {
+        sqlx::query(
+            "ALTER TABLE ingest_runs ADD COLUMN source_layout TEXT NOT NULL DEFAULT 'host-user'",
+        )
+        .execute(&mut *migration)
+        .await
+        .context("upgrade ingest source-layout schema")?;
+    }
     migration.commit().await?;
     Ok(pool)
 }

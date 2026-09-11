@@ -148,6 +148,7 @@ struct FilterOptions {
 struct SessionsTemplate {
     sessions: Vec<SessionRow>,
     options: FilterOptions,
+    show_origins: bool,
 }
 
 #[derive(Template)]
@@ -155,6 +156,7 @@ struct SessionsTemplate {
 struct SessionTemplate {
     session: SessionRow,
     segments: Vec<TranscriptSegment>,
+    show_origin: bool,
 }
 
 fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
@@ -198,7 +200,12 @@ async fn sessions(
     Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
-    let options = load_filter_options(&state.pool, &filters).await?;
+    let show_origins = show_origins(&state.pool).await?;
+    if !show_origins {
+        filters.host = None;
+        filters.user = None;
+    }
+    let options = load_filter_options(&state.pool, &filters, show_origins).await?;
     let rows = sqlx::query_as::<_, SessionRow>(r#"
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
@@ -210,6 +217,7 @@ async fn sessions(
         SessionsTemplate {
             sessions: rows,
             options,
+            show_origins,
         }
         .render()
         .map_err(|error| WebError::template("render sessions", error))?,
@@ -234,15 +242,22 @@ impl Filters {
 async fn load_filter_options(
     pool: &SqlitePool,
     filters: &Filters,
+    show_origins: bool,
 ) -> Result<FilterOptions, WebError> {
-    let hosts = sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| WebError::database("load host filters", error))?;
-    let users = sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| WebError::database("load user filters", error))?;
+    let (hosts, users) = if show_origins {
+        (
+            sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
+                .fetch_all(pool)
+                .await
+                .map_err(|error| WebError::database("load host filters", error))?,
+            sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
+                .fetch_all(pool)
+                .await
+                .map_err(|error| WebError::database("load user filters", error))?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let models = sqlx::query_scalar(
         "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' AND model NOT LIKE ? ORDER BY model",
     )
@@ -265,6 +280,16 @@ async fn load_filter_options(
     })
 }
 
+async fn show_origins(pool: &SqlitePool) -> Result<bool, WebError> {
+    let layout: Option<String> = sqlx::query_scalar(
+        "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| WebError::database("load source layout", error))?;
+    Ok(layout.as_deref() != Some("direct-codex-home"))
+}
+
 fn select_options(values: Vec<String>, selected: Option<&str>) -> Vec<FilterOption> {
     values
         .into_iter()
@@ -279,6 +304,7 @@ async fn session(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Html<String>, WebError> {
+    let show_origin = show_origins(&state.pool).await?;
     let row = sqlx::query_as::<_, SessionRow>(r#"
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
@@ -295,6 +321,7 @@ async fn session(
         SessionTemplate {
             session: row,
             segments: group_transcript(messages),
+            show_origin,
         }
         .render()
         .map_err(|error| WebError::template("render transcript", error))?,
@@ -508,6 +535,7 @@ mod tests {
                 message_count: 5,
             },
             segments: group_transcript(messages),
+            show_origin: true,
         }
         .render()
         .expect("template should render");
@@ -549,6 +577,7 @@ mod tests {
                     message_count: messages.len() as i64,
                 },
                 segments: group_transcript(messages),
+                show_origin: true,
             }
             .render()
             .expect("transcript should render");
@@ -683,6 +712,7 @@ mod tests {
                 models: select_options(vec!["fixture-model".into()], None),
                 statuses: select_options(vec!["complete".into()], None),
             },
+            show_origins: true,
         }
         .render()
         .expect("template should render");

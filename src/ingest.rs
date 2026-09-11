@@ -16,6 +16,26 @@ mod regression;
 // Bump when normalized parsing semantics change so refresh replaces old projections.
 const PARSER_VERSION: i64 = 2;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceLayout {
+    HostUser,
+    DirectCodexHome,
+}
+
+impl SourceLayout {
+    fn database_value(self) -> &'static str {
+        match self {
+            Self::HostUser => "host-user",
+            Self::DirectCodexHome => "direct-codex-home",
+        }
+    }
+}
+
+struct DiscoveredSources {
+    layout: SourceLayout,
+    homes: Vec<(String, String, PathBuf)>,
+}
+
 #[derive(sqlx::FromRow)]
 struct SourceCheckpoint {
     content_hash: Option<String>,
@@ -37,14 +57,27 @@ pub struct IngestReport {
 }
 
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
+    let discovered = discover_homes(root)?;
     let mut transaction = pool.begin().await?;
-    let run = sqlx::query("INSERT INTO ingest_runs(status) VALUES('running')")
+    let previous_layout: Option<String> = sqlx::query_scalar(
+        "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("load previous ingest source layout")?;
+    ensure!(
+        previous_layout
+            .as_deref()
+            .is_none_or(|previous| previous == discovered.layout.database_value()),
+        "source layout does not match the previous rebuild or refresh; run rebuild to change between a direct .codex home and host/user data"
+    );
+    let run = sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running',?)")
+        .bind(discovered.layout.database_value())
         .execute(&mut *transaction)
         .await?
         .last_insert_rowid();
     let mut report = IngestReport::default();
-    let homes = discover_homes(root)?;
-    for (host, user, home) in homes {
+    for (host, user, home) in discovered.homes {
         let instance = ensure_instance(&mut transaction, &host, &user, &home).await?;
         for area in ["sessions", "archived_sessions"] {
             let dir = home.join(area);
@@ -101,7 +134,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
         }
     }
     (report.removed_sessions, report.removed_files) =
-        prune_missing_sources(&mut transaction, root).await?;
+        prune_missing_sources(&mut transaction, root, discovered.layout).await?;
     sqlx::query("UPDATE ingest_runs SET finished_at=CURRENT_TIMESTAMP,status='complete',files_seen=?,errors=? WHERE id=?")
         .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;
@@ -129,12 +162,20 @@ fn optional_source_directory(path: &Path) -> Result<bool> {
     }
 }
 
-fn discover_homes(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
+fn discover_homes(root: &Path) -> Result<DiscoveredSources> {
     ensure!(
         optional_source_directory(root)?,
         "source root is missing; refresh cancelled"
     );
-    let mut out = Vec::new();
+    if root.file_name() == Some(std::ffi::OsStr::new(".codex")) {
+        return Ok(DiscoveredSources {
+            layout: SourceLayout::DirectCodexHome,
+            // The relational schema retains one internal identity for a direct
+            // home. Its empty values are never presented by the web UI.
+            homes: vec![(String::new(), String::new(), root.to_path_buf())],
+        });
+    }
+    let mut homes = Vec::new();
     for host in std::fs::read_dir(root).context("read source root")? {
         let host = host.context("read source root entry")?;
         let kind = host.file_type().context("inspect host entry")?;
@@ -149,7 +190,7 @@ fn discover_homes(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
             }
             let home = user.path().join(".codex");
             if optional_source_directory(&home)? {
-                out.push((
+                homes.push((
                     host.file_name().to_string_lossy().into(),
                     user.file_name().to_string_lossy().into(),
                     home,
@@ -157,12 +198,16 @@ fn discover_homes(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
             }
         }
     }
-    Ok(out)
+    Ok(DiscoveredSources {
+        layout: SourceLayout::HostUser,
+        homes,
+    })
 }
 
 async fn prune_missing_sources(
     connection: &mut SqliteConnection,
     root: &Path,
+    layout: SourceLayout,
 ) -> Result<(u64, u64)> {
     // Recheck the root before deleting: an unavailable root is not an empty snapshot.
     ensure!(
@@ -183,14 +228,20 @@ async fn prune_missing_sources(
         for (id, path, home) in rows {
             cursor = id;
             let home = Path::new(&home);
-            let Ok(relative) = home.strip_prefix(root) else {
-                continue;
-            };
-            // Only the exact root/host/user/.codex contract belongs to this run.
-            if relative.components().count() != 3
-                || relative.file_name() != Some(std::ffi::OsStr::new(".codex"))
-            {
-                continue;
+            match layout {
+                SourceLayout::DirectCodexHome if home != root => continue,
+                SourceLayout::DirectCodexHome => {}
+                SourceLayout::HostUser => {
+                    let Ok(relative) = home.strip_prefix(root) else {
+                        continue;
+                    };
+                    // Only the exact root/host/user/.codex contract belongs to this run.
+                    if relative.components().count() != 3
+                        || relative.file_name() != Some(std::ffi::OsStr::new(".codex"))
+                    {
+                        continue;
+                    }
+                }
             }
             ensure!(
                 Path::new(&path).starts_with(home),
@@ -489,7 +540,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("host/user/.codex/sessions")).unwrap();
         let homes = discover_homes(tmp.path()).unwrap();
-        assert_eq!((homes[0].0.as_str(), homes[0].1.as_str()), ("host", "user"));
+        assert_eq!(homes.layout, SourceLayout::HostUser);
+        assert_eq!(
+            (homes.homes[0].0.as_str(), homes.homes[0].1.as_str()),
+            ("host", "user")
+        );
     }
 
     #[tokio::test]

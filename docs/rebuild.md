@@ -4,7 +4,10 @@ Run a full rebuild when the disposable index needs to be recreated from its raw 
 
 ```bash
 cargo run -- rebuild --data data
+cargo run -- rebuild --data /path/to/.codex
 ```
+
+The data path may contain the multi-origin `host/user/.codex` hierarchy or be one `.codex` home directly. Direct-home rebuilds intentionally omit host and user fields from the sessions list and transcript. A later refresh must use the same layout; rebuild again to switch layouts.
 
 Rebuild creates a uniquely named staging database beside the configured index and imports into that database. The existing index is not modified during discovery or ingestion. Before publication, Agent Lens runs SQLite quick-integrity and foreign-key checks, verifies that no ingest run remains unfinished, checkpoints the staging WAL, and closes its connections. It then checkpoints the existing index, verifies that its WAL and shared-memory sidecars are no longer in use, and renames the validated database over it.
 
