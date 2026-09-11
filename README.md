@@ -47,6 +47,8 @@ Explicitly discard and rebuild the index from raw data (this also stores BLAKE3 
 cargo run -- rebuild --data data
 ```
 
+Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.
+
 Create the local authentication file and restrict its permissions:
 
 ```bash

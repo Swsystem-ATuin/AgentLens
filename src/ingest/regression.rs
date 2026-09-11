@@ -434,7 +434,7 @@ async fn refresh_append_truncate_replace_archive_and_duplicates_match_rebuild() 
             ingest_data_root(&pool, dir.path()).await.unwrap().sessions,
             1
         );
-        let rebuilt = crate::db::rebuild(&dir.path().join("rebuilt.sqlite"))
+        let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
             .await
             .unwrap();
         ingest_data_root(&rebuilt, dir.path()).await.unwrap();

@@ -107,6 +107,57 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
 }
 
 #[tokio::test]
+async fn failed_cli_rebuild_preserves_the_previous_index_and_removes_staging_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("rollout.jsonl"),
+        include_bytes!("fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    let result = run(
+        dir.path(),
+        &["--database", "index.sqlite", "rebuild", "--data", "sources"],
+    );
+    assert!(result.status.success());
+
+    let result = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "rebuild",
+            "--data",
+            "missing-sources",
+        ],
+    );
+    assert!(!result.status.success(), "missing discovery root must fail");
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("index.sqlite")),
+        )
+        .await
+        .unwrap();
+    let counts: (i64, i64) =
+        sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counts, (1, 2), "the last usable index must remain intact");
+    pool.close().await;
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|name| !name.contains(".rebuild-")),
+        "failed rebuild must clean up its staged database: {names:?}"
+    );
+}
+
+#[tokio::test]
 async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("sources/host/user/.codex/sessions");

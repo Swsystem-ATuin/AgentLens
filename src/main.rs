@@ -19,7 +19,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Delete and rebuild the disposable index from raw agent homes.
+    /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
         #[arg(long, default_value = "data")]
         data: PathBuf,
@@ -46,8 +46,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Rebuild { data } => {
-            let pool = db::rebuild(&cli.database).await?;
-            let report = ingest::ingest_data_root(&pool, &data).await?;
+            let rebuild = db::begin_rebuild(&cli.database).await?;
+            let report = match ingest::ingest_data_root(rebuild.pool(), &data).await {
+                Ok(report) => report,
+                Err(error) => {
+                    if let Err(discard_error) = rebuild.discard().await {
+                        return Err(error.context(format!(
+                            "discard staged rebuild after failure: {discard_error:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            };
+            rebuild.publish().await?;
             println!(
                 "indexed {} sessions, {} messages, {} tool calls; {} errors",
                 report.sessions, report.messages, report.tool_calls, report.errors

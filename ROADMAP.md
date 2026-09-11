@@ -23,7 +23,7 @@ Start with R0, then deliver R1 before expanding the browser workload. R2 and R3 
 
 The following five items retain the original TODO acceptance criteria.
 
-- [ ] **R0.1 — Preserve the usable index during rebuilds.** Build and validate a replacement before switching over. Explicitly manage active database connections and SQLite WAL/SHM files. Verify that failed or interrupted rebuilds preserve the previous index and that a successful switch serves the new data. Document the supported procedure when the web server is running.
+- [x] **R0.1 — Preserve the usable index during rebuilds.** Build and validate a replacement before switching over. Explicitly manage active database connections and SQLite WAL/SHM files. Verify that failed or interrupted rebuilds preserve the previous index and that a successful switch serves the new data. Document the supported procedure when the web server is running. Delivered with staged, validated publication; [behavior and verification](docs/rebuild.md).
 
 - [x] **R0.2 — Report incomplete source discovery.** Replace silently ignored directory and traversal errors with useful, sanitised diagnostics and an accurate ingest result. Verify missing and unreadable sources cannot look like a successful complete import. Delivered with transactional missing-source cleanup; [behavior and verification](docs/refresh.md).
 

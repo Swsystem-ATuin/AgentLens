@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Full rebuilds now import into and validate a staging database before replacing the usable index. Failed rebuilds preserve the previous index, and publication refuses to replace a database still held open by the web server.
+
 - Refresh and rebuild accept directory symlinks to nightly backups throughout source discovery and traversal, preserving logical source paths across backup rotation. Broken links and directory loops roll back refresh without pruning indexed sessions.
 
 - Hide `codex-auto-review` model sessions, including prefixed variants, from the sessions list, model dropdown, and direct transcript URLs without deleting indexed data.
