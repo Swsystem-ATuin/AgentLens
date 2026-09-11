@@ -125,6 +125,92 @@ async fn schema_variants_preserve_messages_tools_usage_and_raw_fields() {
 }
 
 #[tokio::test]
+async fn session_status_follows_ordered_lifecycle_and_resume_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = |kind: &str, timestamp: &str| json!({"type":"event_msg","timestamp":timestamp,"payload":{"type":kind}});
+    let context = json!({"type":"turn_context","timestamp":"2025-01-01T00:00:00Z","payload":{}});
+    let user_event = event("user_message", "2025-01-01T00:00:00Z");
+    let cases = [
+        (
+            "complete-then-abort",
+            vec![
+                event("task_complete", "2026-01-01T00:00:00Z"),
+                event("turn_aborted", "2025-01-01T00:00:00Z"),
+            ],
+            "aborted",
+        ),
+        (
+            "abort-then-complete",
+            vec![
+                event("turn_aborted", "2026-01-01T00:00:00Z"),
+                event("task_complete", "2025-01-01T00:00:00Z"),
+            ],
+            "complete",
+        ),
+        (
+            "complete-then-started",
+            vec![
+                event("task_complete", "2026-01-01T00:00:00Z"),
+                event("task_started", "2025-01-01T00:00:00Z"),
+            ],
+            "unknown",
+        ),
+        (
+            "aborted-then-context",
+            vec![event("turn_aborted", "2026-01-01T00:00:00Z"), context],
+            "unknown",
+        ),
+        (
+            "complete-then-user-message",
+            vec![
+                event("task_complete", "2026-01-01T00:00:00Z"),
+                message("resumed"),
+            ],
+            "unknown",
+        ),
+        (
+            "aborted-then-user-event",
+            vec![event("turn_aborted", "2026-01-01T00:00:00Z"), user_event],
+            "unknown",
+        ),
+        (
+            "complete-then-unrelated",
+            vec![
+                event("task_complete", "2026-01-01T00:00:00Z"),
+                event("token_count", "2025-01-01T00:00:00Z"),
+            ],
+            "complete",
+        ),
+        ("no-lifecycle", vec![message("initial")], "unknown"),
+    ];
+    for (id, records, _) in &cases {
+        let mut source = vec![meta(id)];
+        source.extend(records.iter().cloned());
+        write_source(dir.path(), "sessions", &format!("{id}.jsonl"), &source);
+    }
+
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((report.sessions, report.errors), (cases.len(), 0));
+    let actual: std::collections::HashMap<String, String> =
+        sqlx::query_as("SELECT external_id,status FROM sessions")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+    for (id, _, expected) in cases {
+        assert_eq!(
+            actual.get(id).map(String::as_str),
+            Some(expected),
+            "lifecycle status for {id}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn malformed_lines_partial_tails_and_bad_files_do_not_discard_good_records() {
     let dir = tempfile::tempdir().unwrap();
     let partial = write_source(
@@ -394,7 +480,7 @@ async fn refresh_failed_and_partial_replacements_preserve_previous_records_and_r
 async fn projection(pool: &SqlitePool) -> Vec<String> {
     let mut out = Vec::new();
     for query in [
-        "SELECT external_id || ':' || raw_metadata FROM sessions ORDER BY external_id",
+        "SELECT external_id || ':' || status || ':' || raw_metadata FROM sessions ORDER BY external_id",
         "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,usage_events.raw_json",

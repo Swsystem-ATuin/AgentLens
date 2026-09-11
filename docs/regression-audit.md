@@ -29,6 +29,6 @@ Four temporary mutations independently produced test assertion failures: discard
 
 ## Limits and outstanding work
 
-The passing suite protects the covered current behavior. It does not resolve the existing TODO items concerning preservation of the old index during failed/live rebuilds, silently skipped discovery errors, internal error disclosure, event-order-based status, or bounded memory. The rollback test covers an ingest transaction, not preservation of the old database across the CLI's destructive rebuild step. The parser tests cover representative variants; they do not establish support for all future schemas or accurate aggregate counting of partial-line errors.
+The passing suite protects the covered current behavior. Subsequent work resolved preservation of the old index during rebuilds, incomplete discovery reporting, internal web error disclosure, and event-order-based status; see the [roadmap deliveries](../ROADMAP.md). Bounded ingestion memory remains open. The parser tests cover representative variants; they do not establish support for all future schemas or accurate aggregate counting of partial-line errors.
 
 No production ingest code changes in this audit. Transaction boundaries, query volume, file I/O, allocations, and memory behavior are unchanged; a throughput benchmark would not measure a new implementation and was not run.

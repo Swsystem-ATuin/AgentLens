@@ -29,7 +29,7 @@ The following five items retain the original TODO acceptance criteria.
 
 - [x] **R0.3 — Keep internal errors out of browser responses.** Return generic server-error messages while retaining sanitised diagnostic context on the server. Test that responses and logs do not disclose private transcript content or credentials. Delivered with source-free browser responses and allowlisted server diagnostics; [behavior and verification](docs/web-errors.md).
 
-- [ ] **R0.4 — Derive session status from event order.** Define completion, interruption, and resumed-session behavior, then cover those sequences with synthetic tests instead of relying on whether an event appears anywhere in a file.
+- [x] **R0.4 — Derive session status from event order.** Define completion, interruption, and resumed-session behavior, then cover those sequences with synthetic tests instead of relying on whether an event appears anywhere in a file. Delivered with an ordered, conservative lifecycle reducer; [behavior and verification](docs/session-status.md).
 
 - [ ] **R0.5 — Expand parser resilience tests.** Cover unknown fields, malformed lines, partial files, and observed schema variants with tiny synthetic or fully redacted fixtures. Verify useful records survive local parsing failures and diagnostics accurately describe partial imports.
 

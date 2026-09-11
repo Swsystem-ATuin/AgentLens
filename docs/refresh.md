@@ -19,7 +19,7 @@ A single outer transaction batches the run, with one savepoint per file. A succe
 
 Partial new files retain valid records and are marked `partial`; they cannot be skipped. Partial replacements of files still present retain the previously indexed transcript and record an error. Missing-source cleanup still applies if a moved replacement cannot be imported: a transcript whose indexed source is gone is removed. Repairing the source allows the next refresh to replace it. Malformed-line diagnostics contain line numbers and a generic reason, without quoting source content. CLI error totals count failed files; initially imported partial files are included in imported sessions, with details in `source_files.parse_status` and `parse_error`.
 
-The recorded hash certifies a successfully committed file projection only when its status is `ok`. On a failed replacement, any existing hash still describes the previous projection, and the `error` status prevents skipping it. Parser changes affecting normalized data must bump `PARSER_VERSION` in `src/ingest.rs`.
+The recorded hash certifies a successfully committed file projection only when its status is `ok`. On a failed replacement, any existing hash still describes the previous projection, and the `error` status prevents skipping it. Parser changes affecting normalized data must bump `PARSER_VERSION` in `src/ingest.rs`. Ordered lifecycle derivation raised the version to 2, so the first refresh with this release reimports every rollout whose checkpoint has an older version and corrects its stored status.
 
 ## Source changes and supported operation
 

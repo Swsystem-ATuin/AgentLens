@@ -13,6 +13,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
 - Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs.
+- Derives each session's coarse lifecycle status from source-record order. Later completion or interruption events win; subsequent turn or user activity resets an earlier terminal outcome to `unknown`, which does not imply the copied session is currently running. See [session status semantics](docs/session-status.md).
 
 Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidden from the sessions list, model dropdown, and direct transcript URLs. Their indexed data is retained. Restart the server after updating; no refresh or rebuild is required for this visibility rule.
 

@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 mod regression;
 
 // Bump when normalized parsing semantics change so refresh replaces old projections.
-const PARSER_VERSION: i64 = 1;
+const PARSER_VERSION: i64 = 2;
 
 #[derive(sqlx::FromRow)]
 struct SourceCheckpoint {
@@ -338,19 +338,7 @@ async fn ingest_rollout(
         .find(|v| v["type"] == "turn_context")
         .and_then(|v| v["payload"]["model"].as_str());
     let ended = values.iter().rev().find_map(|v| v["timestamp"].as_str());
-    let status = if values
-        .iter()
-        .any(|v| v["type"] == "event_msg" && v["payload"]["type"] == "task_complete")
-    {
-        "complete"
-    } else if values
-        .iter()
-        .any(|v| v["type"] == "event_msg" && v["payload"]["type"] == "turn_aborted")
-    {
-        "aborted"
-    } else {
-        "unknown"
-    };
+    let status = derive_session_status(&values);
     let existing: Option<(i64, String)> = sqlx::query_as("SELECT sessions.id,source_files.path FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id WHERE sessions.instance_id=? AND external_id=?")
         .bind(instance).bind(external_id).fetch_optional(&mut *connection).await?;
     if existing.is_some() {
@@ -456,6 +444,28 @@ async fn ingest_rollout(
         .execute(&mut *connection)
         .await?;
     Ok(Some((messages, tools)))
+}
+
+/// Derive the last lifecycle outcome in source-record order. `unknown` means
+/// that no terminal outcome has been observed for the latest opened turn; it
+/// deliberately does not claim that a copied session is currently running.
+fn derive_session_status(values: &[Value]) -> &'static str {
+    values.iter().fold("unknown", |status, value| {
+        let record_type = value["type"].as_str();
+        let payload = &value["payload"];
+        match (record_type, payload["type"].as_str()) {
+            (Some("event_msg"), Some("task_complete")) => "complete",
+            (Some("event_msg"), Some("turn_aborted")) => "aborted",
+            (Some("event_msg"), Some("task_started" | "user_message"))
+            | (Some("turn_context"), _) => "unknown",
+            (Some("response_item"), Some("message"))
+                if payload["role"].as_str() == Some("user") =>
+            {
+                "unknown"
+            }
+            _ => status,
+        }
+    })
 }
 
 async fn record_file_error(
