@@ -258,3 +258,70 @@ async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
             .contains(&format!("href=\"/sessions/{id}\""))
     );
 }
+
+#[tokio::test]
+async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
+    let (dir, app) = seeded_app().await;
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    for (id, model) in [
+        (4, Some("codex-auto-review")),
+        (5, Some("codex-auto-review-test")),
+        (6, None),
+        (7, Some("ordinary-codex-auto-review")),
+    ] {
+        sqlx::query("INSERT INTO sessions(id,instance_id,external_id,model) VALUES(?,1,?,?)")
+            .bind(id)
+            .bind(format!("synthetic-{id}"))
+            .bind(model)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(session_id,sequence,role,content) VALUES(?,0,'assistant','synthetic conversation')")
+            .bind(id).execute(&pool).await.unwrap();
+    }
+    for query in [
+        "",
+        "?model=codex-auto-review",
+        "?model=codex-auto-review-test",
+        "?host=host-a",
+    ] {
+        let (status, html) = get(&app, &format!("/sessions{query}")).await;
+        assert_eq!(status, StatusCode::OK);
+        for id in [4, 5] {
+            assert!(
+                !html.contains(&format!("href=\"/sessions/{id}\"")),
+                "hidden session leaked for {query}"
+            );
+        }
+        assert!(
+            !html.contains("<option value=\"codex-auto-review"),
+            "hidden model leaked into filter options"
+        );
+    }
+    for id in [4, 5] {
+        let (status, html) = get(&app, &format!("/sessions/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!html.contains("synthetic conversation"));
+    }
+    let (_, html) = get(&app, "/sessions").await;
+    for id in [1, 2, 3, 6, 7] {
+        assert!(
+            html.contains(&format!("href=\"/sessions/{id}\"")),
+            "ordinary or unknown model must remain visible"
+        );
+        assert_eq!(
+            get(&app, &format!("/sessions/{id}")).await.0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        7,
+        "visibility must not remove indexed data"
+    );
+}

@@ -14,6 +14,8 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
 - Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs.
 
+Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidden from the sessions list, model dropdown, and direct transcript URLs. Their indexed data is retained. Restart the server after updating; no refresh or rebuild is required for this visibility rule.
+
 The observed fixture format is documented in [docs/fixture-format.md](docs/fixture-format.md).
 
 Transcript setup blocks are labeled and collapsed even after a session resumes, including repository instructions, permissions, environment, skills, multi-agent roles, and mode/model changes. Interruption notices and user actions remain expanded with distinct labels. Unknown tags and markers quoted within ordinary prose remain conversation content. This display change needs no index rebuild; restart the server with `cargo run -- serve` after updating.

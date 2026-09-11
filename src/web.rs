@@ -14,6 +14,9 @@ use tower_http::trace::TraceLayer;
 #[cfg(test)]
 mod regression;
 
+// Presentation policy only: retain these sessions in the rebuildable index.
+const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
+
 #[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
@@ -194,9 +197,9 @@ async fn sessions(
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
-        WHERE (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
+        WHERE (s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
         ORDER BY s.started_at DESC
-    "#).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).fetch_all(&state.pool).await?;
+    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).fetch_all(&state.pool).await?;
     Ok(Html(
         SessionsTemplate {
             sessions: rows,
@@ -229,8 +232,9 @@ async fn load_filter_options(pool: &SqlitePool, filters: &Filters) -> Result<Fil
         .fetch_all(pool)
         .await?;
     let models = sqlx::query_scalar(
-        "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' ORDER BY model",
+        "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' AND model NOT LIKE ? ORDER BY model",
     )
+    .bind(HIDDEN_MODEL_PATTERN)
     .fetch_all(pool)
     .await?;
     let statuses = sqlx::query_scalar(
@@ -264,8 +268,8 @@ async fn session(
     let row = sqlx::query_as::<_, SessionRow>(r#"
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=?
-    "#).bind(id).fetch_optional(&state.pool).await?.ok_or_else(|| WebError::not_found("session not found"))?;
+        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (s.model IS NULL OR s.model NOT LIKE ?)
+    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(&state.pool).await?.ok_or_else(|| WebError::not_found("session not found"))?;
     let messages = sqlx::query_as::<_, MessageRow>(
         "SELECT sequence,timestamp,role,content FROM messages WHERE session_id=? ORDER BY sequence",
     )
