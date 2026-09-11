@@ -37,6 +37,8 @@ cargo run -- refresh --data data
 
 Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, errors, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort the run. A browser reload only reads SQLite; run this command to index updated copied sources.
 
+Source directories may be symbolic links to nightly backups, including the data root, host/user folders, `.codex`, and session subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
+
 Existing databases are upgraded automatically: files without hashes are reimported once. No full rebuild is required. Checksums and normalized records are committed together; failed or partial replacements retain the previous transcript and are retried on the next refresh. New partial files still expose their valid records. See [refresh behavior and verification](docs/refresh.md) for archive moves, duplicate identities, source publication, and limitations.
 
 Explicitly discard and rebuild the index from raw data (this also stores BLAKE3 hashes for subsequent refreshes):

@@ -51,7 +51,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
             if !optional_source_directory(&dir)? {
                 continue;
             }
-            for entry in WalkDir::new(&dir).follow_links(false).into_iter() {
+            for entry in WalkDir::new(&dir).follow_links(true).into_iter() {
                 let entry = entry.map_err(|error| {
                     anyhow::anyhow!(
                         "source traversal failed: {}",
@@ -61,8 +61,8 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
                     )
                 })?;
                 ensure!(
-                    !entry.file_type().is_symlink(),
-                    "source traversal encountered an unsupported symbolic link"
+                    !entry.path_is_symlink() || entry.file_type().is_dir(),
+                    "source traversal encountered an unsupported file symbolic link"
                 );
                 if entry.file_type().is_file()
                     && entry.path().extension().is_some_and(|x| x == "jsonl")
@@ -109,12 +109,18 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
 }
 
 // Missing optional directories indicate removal; inspection failures never do.
+// Inspect the link itself first: a dangling backup link is a failure, not removal.
 fn optional_source_directory(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
+            let metadata = if metadata.file_type().is_symlink() {
+                std::fs::metadata(path).context("resolve source directory symbolic link")?
+            } else {
+                metadata
+            };
             ensure!(
                 metadata.is_dir(),
-                "expected a source directory; symbolic links and other file types are unsupported"
+                "expected a source directory or symbolic link to a directory"
             );
             Ok(true)
         }
@@ -132,21 +138,13 @@ fn discover_homes(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
     for host in std::fs::read_dir(root).context("read source root")? {
         let host = host.context("read source root entry")?;
         let kind = host.file_type().context("inspect host entry")?;
-        ensure!(
-            !kind.is_symlink(),
-            "symbolic links in source discovery are unsupported"
-        );
-        if !kind.is_dir() {
+        if !(kind.is_dir() || kind.is_symlink() && optional_source_directory(&host.path())?) {
             continue;
         }
         for user in std::fs::read_dir(host.path()).context("read source host directory")? {
             let user = user.context("read source host entry")?;
             let kind = user.file_type().context("inspect user entry")?;
-            ensure!(
-                !kind.is_symlink(),
-                "symbolic links in source discovery are unsupported"
-            );
-            if !kind.is_dir() {
+            if !(kind.is_dir() || kind.is_symlink() && optional_source_directory(&user.path())?) {
                 continue;
             }
             let home = user.path().join(".codex");

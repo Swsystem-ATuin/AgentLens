@@ -747,7 +747,7 @@ async fn refresh_pruning_rolls_back_if_run_finalization_fails() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn refresh_unsupported_symlink_during_traversal_cancels_pruning() {
+async fn refresh_symlink_loop_during_traversal_cancels_pruning() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_source(
         dir.path(),
@@ -839,4 +839,129 @@ async fn refresh_removes_a_source_file_replaced_by_a_directory() {
     let report = ingest_data_root(&pool, dir.path()).await.unwrap();
     assert_eq!((report.removed_sessions, report.removed_files), (1, 1));
     assert!(projection(&pool).await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refresh_directory_symlinks_support_backup_rotation_and_broken_target_rollback() {
+    use std::os::unix::fs::symlink;
+    for level in [
+        "",
+        "synthetic-host",
+        "synthetic-host/synthetic-user",
+        "synthetic-host/synthetic-user/.codex",
+        "synthetic-host/synthetic-user/.codex/sessions",
+        "synthetic-host/synthetic-user/.codex/sessions/nested",
+        "synthetic-host/synthetic-user/.codex/archived_sessions",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sources");
+        let original = write_source(
+            &root,
+            if level.ends_with("archived_sessions") {
+                "archived_sessions"
+            } else {
+                "sessions"
+            },
+            "rollout.jsonl",
+            &[meta("backup"), message("first")],
+        );
+        let bytes = std::fs::read(&original).unwrap();
+        let link = if level.is_empty() {
+            root.clone()
+        } else {
+            root.join(level)
+        };
+        let backup = dir.path().join("nightly");
+        std::fs::rename(&link, &backup).unwrap();
+        symlink(&backup, &link).unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let report = ingest_data_root(&pool, &root)
+            .await
+            .expect("directory symlinks must import at every source-tree level");
+        assert_eq!((report.sessions, report.errors), (1, 0), "level {level}");
+        assert_eq!(ingest_data_root(&pool, &root).await.unwrap().skipped, 1);
+        let indexed: String = sqlx::query_scalar("SELECT path FROM source_files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            indexed,
+            original.to_string_lossy(),
+            "retain logical source identity"
+        );
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            bytes,
+            "backup stays immutable"
+        );
+
+        let next = dir.path().join("next-nightly");
+        std::fs::rename(&backup, &next).unwrap();
+        assert!(
+            ingest_data_root(&pool, &root).await.is_err(),
+            "broken backup links must cancel refresh"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "broken links must not prune indexed sessions"
+        );
+        std::fs::remove_file(&link).unwrap();
+        symlink(&next, &link).unwrap();
+        assert_eq!(
+            ingest_data_root(&pool, &root).await.unwrap().skipped,
+            1,
+            "retargeting preserves checkpoints"
+        );
+        std::fs::remove_file(&original).unwrap();
+        assert_eq!(
+            ingest_data_root(&pool, &root)
+                .await
+                .unwrap()
+                .removed_sessions,
+            1,
+            "prune missing files in valid backup targets"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refresh_relative_directory_links_reject_cycles_and_file_links() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sources");
+    let source = write_source(&root, "sessions", "rollout.jsonl", &[meta("relative")]);
+    let sessions = source.parent().unwrap().parent().unwrap();
+    let nested = sessions.join("nested");
+    std::fs::rename(&nested, sessions.parent().unwrap().join("backup")).unwrap();
+    symlink("../backup", &nested).unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    assert_eq!(ingest_data_root(&pool, &root).await.unwrap().sessions, 1);
+    for target in ["..", "missing-backup", "../backup/rollout.jsonl"] {
+        let link = sessions.join("invalid");
+        symlink(target, &link).unwrap();
+        assert!(
+            ingest_data_root(&pool, &root).await.is_err(),
+            "invalid traversal target {target} must cancel refresh"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "failed traversal must roll back the run"
+        );
+        std::fs::remove_file(link).unwrap();
+    }
+    assert_eq!(ingest_data_root(&pool, &root).await.unwrap().skipped, 1);
 }
