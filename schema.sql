@@ -13,4 +13,5 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_file ON sessions(source_file_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_pair ON tool_calls(session_id, call_id, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);

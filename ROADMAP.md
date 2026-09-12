@@ -37,7 +37,7 @@ The following five items retain the original TODO acceptance criteria.
 
 These five items retain the original TODO acceptance criteria. The regression suite already covers several parser variants; the remaining work extends its guarantees rather than replacing it.
 
-- [ ] **R1.1 — Bound ingestion memory.** Evaluate streaming with bounded buffering against a two-pass parser where metadata discovery requires it. Measure representative full rebuilds before and after, including elapsed time and peak memory; review transaction boundaries, query volume, file I/O, and allocations. Report only aggregate results, without private content.
+- [x] **R1.1 — Bound ingestion memory.** Evaluate streaming with bounded buffering against a two-pass parser where metadata discovery requires it. Measure representative full rebuilds before and after, including elapsed time and peak memory; review transaction boundaries, query volume, file I/O, and allocations. Report only aggregate results, without private content. Delivered with two-pass record streaming, bounded malformed-line examples, indexed tool-output pairing, preserved transactional semantics, and a synthetic before/after benchmark; [design and verification](docs/ingestion-memory.md).
 
 - [ ] **R1.2 — Paginate the sessions list.** Add bounded queries with stable ordering and navigation that preserves filters. Verify that larger datasets do not require loading every matching session for one page.
 

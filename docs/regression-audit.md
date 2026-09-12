@@ -29,6 +29,6 @@ Four temporary mutations independently produced test assertion failures: discard
 
 ## Limits and outstanding work
 
-The passing suite protects the covered current behavior. Subsequent work resolved preservation of the old index during rebuilds, incomplete discovery reporting, internal web error disclosure, event-order-based status, and aggregate partial-file/malformed-line diagnostics; see the [roadmap deliveries](../ROADMAP.md). Bounded ingestion memory remains open. Parser tests cover representative variants and sanitised diagnostics, but cannot establish support for every future schema.
+The passing suite protects the covered current behavior. Subsequent work resolved preservation of the old index during rebuilds, incomplete discovery reporting, internal web error disclosure, event-order-based status, aggregate partial-file/malformed-line diagnostics, and bounded rollout ingestion; see the [roadmap deliveries](../ROADMAP.md). Parser tests cover representative variants and sanitised diagnostics, but cannot establish support for every future schema.
 
 No production ingest code changes in this audit. Transaction boundaries, query volume, file I/O, allocations, and memory behavior are unchanged; a throughput benchmark would not measure a new implementation and was not run.

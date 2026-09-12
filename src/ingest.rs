@@ -3,8 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::{Acquire, SqliteConnection, SqlitePool};
 use std::{
-    collections::HashMap,
-    fs::File,
+    fs::{File, Metadata},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
@@ -15,6 +14,7 @@ mod regression;
 
 // Bump when normalized parsing semantics change so refresh replaces old projections.
 const PARSER_VERSION: i64 = 2;
+const MAX_PARSE_DIAGNOSTICS: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceLayout {
@@ -62,6 +62,52 @@ struct ImportedRollout {
     messages: usize,
     tool_calls: usize,
     malformed_lines: usize,
+}
+
+struct RolloutSummary {
+    metadata: Metadata,
+    content_hash: String,
+    external_id: String,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    cwd: Option<String>,
+    model: Option<String>,
+    status: &'static str,
+    raw_metadata: String,
+    malformed_lines: usize,
+    parse_error: Option<String>,
+}
+
+#[derive(Default)]
+struct ParseDiagnostics {
+    malformed_lines: usize,
+    examples: Vec<String>,
+}
+
+impl ParseDiagnostics {
+    fn record(&mut self, line_number: usize) -> Result<()> {
+        self.malformed_lines = self
+            .malformed_lines
+            .checked_add(1)
+            .context("malformed-line count exceeds supported range")?;
+        if self.examples.len() < MAX_PARSE_DIAGNOSTICS {
+            self.examples
+                .push(format!("line {line_number}: invalid JSON or UTF-8"));
+        }
+        Ok(())
+    }
+
+    fn message(&self) -> Option<String> {
+        if self.malformed_lines == 0 {
+            return None;
+        }
+        let mut message = self.examples.join("; ");
+        let omitted = self.malformed_lines - self.examples.len();
+        if omitted != 0 {
+            message.push_str(&format!("; {omitted} additional malformed lines omitted"));
+        }
+        Some(message)
+    }
 }
 
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
@@ -356,57 +402,18 @@ async fn ingest_rollout(
     {
         return Ok(None);
     }
-    let file = File::open(path).context("open rollout")?;
-    let metadata = file.metadata().context("inspect rollout")?;
-    let mut reader = BufReader::new(HashingReader::new(file));
-    let mut values = Vec::new();
-    let mut line_errors = Vec::new();
-    let mut line = Vec::new();
-    let mut n = 0;
-    loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .context("read rollout line")?
-            == 0
-        {
-            break;
-        }
-        n += 1;
-        match serde_json::from_slice::<Value>(&line) {
-            Ok(v) => values.push(v),
-            // Do not persist parser text that could quote private source values.
-            Err(_) => line_errors.push(format!("line {n}: invalid JSON or UTF-8")),
-        }
-    }
-    ensure_unchanged(path, &metadata)?;
-    let content_hash = reader.get_ref().fingerprint();
+    let summary = scan_rollout(path)?;
     if previous.as_ref().is_some_and(|row| row.has_session) {
         ensure!(
-            line_errors.is_empty(),
+            summary.malformed_lines == 0,
             "partial replacement; previous records retained; retry refresh"
         );
     }
-    let meta = values
-        .iter()
-        .find(|v| v["type"] == "session_meta")
-        .context("missing session_meta")?;
-    let p = &meta["payload"];
-    let external_id = p["id"].as_str().context("session_meta missing id")?;
-    let started = p["timestamp"]
-        .as_str()
-        .or_else(|| meta["timestamp"].as_str());
-    let model = values
-        .iter()
-        .find(|v| v["type"] == "turn_context")
-        .and_then(|v| v["payload"]["model"].as_str());
-    let ended = values.iter().rev().find_map(|v| v["timestamp"].as_str());
-    let status = derive_session_status(&values);
     let existing: Option<(i64, String)> = sqlx::query_as("SELECT sessions.id,source_files.path FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id WHERE sessions.instance_id=? AND external_id=?")
-        .bind(instance).bind(external_id).fetch_optional(&mut *connection).await?;
+        .bind(instance).bind(&summary.external_id).fetch_optional(&mut *connection).await?;
     if existing.is_some() {
         ensure!(
-            line_errors.is_empty(),
+            summary.malformed_lines == 0,
             "partial replacement; previous records retained; retry refresh"
         );
     }
@@ -420,15 +427,15 @@ async fn ingest_rollout(
         );
     }
     let source_id: i64 = sqlx::query_scalar("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status) VALUES(?,?,?,?,?,'parsing') ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,kind=excluded.kind,size_bytes=excluded.size_bytes,parse_status='parsing' RETURNING id")
-        .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(metadata.len() as i64).fetch_one(&mut *connection).await?;
+        .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(summary.metadata.len() as i64).fetch_one(&mut *connection).await?;
     // A replaced path can now identify a different session. Remove only its old projection.
     sqlx::query("DELETE FROM sessions WHERE source_file_id=? AND external_id<>?")
         .bind(source_id)
-        .bind(external_id)
+        .bind(&summary.external_id)
         .execute(&mut *connection)
         .await?;
     let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,started_at,ended_at,cwd,model,status,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,raw_metadata=excluded.raw_metadata RETURNING id")
-        .bind(instance).bind(source_id).bind(external_id).bind(started).bind(ended).bind(p["cwd"].as_str()).bind(model).bind(status).bind(meta.to_string()).fetch_one(&mut *connection).await?;
+        .bind(instance).bind(source_id).bind(&summary.external_id).bind(summary.started_at.as_deref()).bind(summary.ended_at.as_deref()).bind(summary.cwd.as_deref()).bind(summary.model.as_deref()).bind(summary.status).bind(&summary.raw_metadata).fetch_one(&mut *connection).await?;
     if existing.is_some() {
         for table in ["messages", "tool_calls", "usage_events"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
@@ -437,24 +444,140 @@ async fn ingest_rollout(
                 .await?;
         }
     }
+    let (messages, tools, second_pass_malformed) =
+        import_rollout_records(connection, path, &summary.metadata, session_id).await?;
+    ensure!(
+        second_pass_malformed == summary.malformed_lines,
+        "source changed between parsing passes; retry refresh"
+    );
+    let parse_status = if summary.malformed_lines == 0 {
+        "ok"
+    } else {
+        "partial"
+    };
+    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=?,content_hash=?,parser_version=? WHERE id=?")
+        .bind(parse_status)
+        .bind(summary.parse_error.as_deref())
+        .bind(&summary.content_hash)
+        .bind(PARSER_VERSION)
+        .bind(source_id)
+        .execute(&mut *connection)
+        .await?;
+    Ok(Some(ImportedRollout {
+        messages,
+        tool_calls: tools,
+        malformed_lines: summary.malformed_lines,
+    }))
+}
+
+fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
+    let file = File::open(path).context("open rollout")?;
+    let metadata = file.metadata().context("inspect rollout")?;
+    let mut reader = BufReader::new(HashingReader::new(file));
+    let mut session_metadata = None;
+    let mut model = None;
+    let mut saw_turn_context = false;
+    let mut ended_at = None;
+    let mut status = "unknown";
+    let mut diagnostics = ParseDiagnostics::default();
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .context("read rollout line")?
+            == 0
+        {
+            break;
+        }
+        line_number = line_number
+            .checked_add(1)
+            .context("rollout line count exceeds supported range")?;
+        match serde_json::from_slice::<Value>(&line) {
+            Ok(value) => {
+                let capture_session_metadata =
+                    session_metadata.is_none() && value["type"] == "session_meta";
+                if !saw_turn_context && value["type"] == "turn_context" {
+                    saw_turn_context = true;
+                    model = value["payload"]["model"].as_str().map(str::to_owned);
+                }
+                if let Some(timestamp) = value["timestamp"].as_str() {
+                    ended_at = Some(timestamp.to_owned());
+                }
+                status = next_session_status(status, &value);
+                if capture_session_metadata {
+                    session_metadata = Some(value);
+                }
+            }
+            // Never retain malformed source content in diagnostics.
+            Err(_) => diagnostics.record(line_number)?,
+        }
+    }
+    ensure_unchanged(path, &metadata)?;
+    let content_hash = reader.get_ref().fingerprint();
+    let meta = session_metadata.context("missing session_meta")?;
+    let payload = &meta["payload"];
+    let external_id = payload["id"]
+        .as_str()
+        .context("session_meta missing id")?
+        .to_owned();
+    let started_at = payload["timestamp"]
+        .as_str()
+        .or_else(|| meta["timestamp"].as_str())
+        .map(str::to_owned);
+    Ok(RolloutSummary {
+        metadata,
+        content_hash,
+        external_id,
+        started_at,
+        ended_at,
+        cwd: payload["cwd"].as_str().map(str::to_owned),
+        model,
+        status,
+        raw_metadata: meta.to_string(),
+        malformed_lines: diagnostics.malformed_lines,
+        parse_error: diagnostics.message(),
+    })
+}
+
+async fn import_rollout_records(
+    connection: &mut SqliteConnection,
+    path: &Path,
+    metadata: &Metadata,
+    session_id: i64,
+) -> Result<(usize, usize, usize)> {
+    ensure_unchanged(path, metadata)?;
+    let file = File::open(path).context("reopen rollout for record import")?;
+    let mut reader = BufReader::new(file);
     let mut messages = 0usize;
     let mut tools = 0usize;
-    let mut pending: HashMap<String, i64> = HashMap::new();
-    for (sequence, v) in values.iter().enumerate() {
-        let typ = v["type"].as_str().unwrap_or("");
-        let payload = &v["payload"];
+    let mut malformed_lines = 0usize;
+    let mut sequence = 0i64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .context("read rollout record for import")?
+            == 0
+        {
+            break;
+        }
+        let value = match serde_json::from_slice::<Value>(&line) {
+            Ok(value) => value,
+            Err(_) => {
+                malformed_lines = malformed_lines
+                    .checked_add(1)
+                    .context("malformed-line count exceeds supported range")?;
+                continue;
+            }
+        };
+        let typ = value["type"].as_str().unwrap_or("");
+        let payload = &value["payload"];
         if typ == "response_item" && payload["type"] == "message" {
-            let content = payload["content"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
             sqlx::query("INSERT INTO messages(session_id,sequence,timestamp,role,content,raw_json) VALUES(?,?,?,?,?,?)")
-                .bind(session_id).bind(sequence as i64).bind(v["timestamp"].as_str()).bind(payload["role"].as_str().unwrap_or("unknown")).bind(content).bind(v.to_string()).execute(&mut *connection).await?;
+                .bind(session_id).bind(sequence).bind(value["timestamp"].as_str()).bind(payload["role"].as_str().unwrap_or("unknown")).bind(message_content(payload)).bind(value.to_string()).execute(&mut *connection).await?;
             messages += 1;
         } else if typ == "response_item"
             && matches!(
@@ -466,9 +589,8 @@ async fn ingest_rollout(
                 .as_str()
                 .or_else(|| payload["id"].as_str())
                 .unwrap_or("");
-            let id = sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json) VALUES(?,?,?,?,?,?,'called',?)")
-                .bind(session_id).bind(sequence as i64).bind(v["timestamp"].as_str()).bind(call_id).bind(payload["name"].as_str()).bind(payload["arguments"].as_str().or_else(|| payload["input"].as_str())).bind(v.to_string()).execute(&mut *connection).await?.last_insert_rowid();
-            pending.insert(call_id.to_owned(), id);
+            sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json) VALUES(?,?,?,?,?,?,'called',?)")
+                .bind(session_id).bind(sequence).bind(value["timestamp"].as_str()).bind(call_id).bind(payload["name"].as_str()).bind(payload["arguments"].as_str().or_else(|| payload["input"].as_str())).bind(value.to_string()).execute(&mut *connection).await?;
             tools += 1;
         } else if typ == "response_item"
             && matches!(
@@ -476,10 +598,11 @@ async fn ingest_rollout(
                 Some("function_call_output" | "custom_tool_call_output")
             )
         {
-            if let Some(id) = payload["call_id"].as_str().and_then(|x| pending.get(x)) {
-                sqlx::query("UPDATE tool_calls SET output=?,status='complete' WHERE id=?")
+            if let Some(call_id) = payload["call_id"].as_str() {
+                sqlx::query("UPDATE tool_calls SET output=?,status='complete' WHERE id=(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? ORDER BY sequence DESC LIMIT 1)")
                     .bind(payload["output"].as_str())
-                    .bind(id)
+                    .bind(session_id)
+                    .bind(call_id)
                     .execute(&mut *connection)
                     .await?;
             }
@@ -487,53 +610,51 @@ async fn ingest_rollout(
             && payload["type"] == "token_count"
             && !payload["info"].is_null()
         {
-            let u = &payload["info"]["total_token_usage"];
+            let usage = &payload["info"]["total_token_usage"];
             sqlx::query("INSERT INTO usage_events(session_id,timestamp,input_tokens,output_tokens,cached_input_tokens,total_tokens,raw_json) VALUES(?,?,?,?,?,?,?)")
-                .bind(session_id).bind(v["timestamp"].as_str()).bind(u["input_tokens"].as_i64()).bind(u["output_tokens"].as_i64()).bind(u["cached_input_tokens"].as_i64()).bind(u["total_tokens"].as_i64()).bind(v.to_string()).execute(&mut *connection).await?;
+                .bind(session_id).bind(value["timestamp"].as_str()).bind(usage["input_tokens"].as_i64()).bind(usage["output_tokens"].as_i64()).bind(usage["cached_input_tokens"].as_i64()).bind(usage["total_tokens"].as_i64()).bind(value.to_string()).execute(&mut *connection).await?;
         }
+        sequence = sequence
+            .checked_add(1)
+            .context("rollout record count exceeds supported range")?;
     }
-    ensure_unchanged(path, &metadata)?;
-    let malformed_lines = line_errors.len();
-    let parse_status = if line_errors.is_empty() {
-        "ok"
-    } else {
-        "partial"
-    };
-    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=?,content_hash=?,parser_version=? WHERE id=?")
-        .bind(parse_status)
-        .bind((!line_errors.is_empty()).then(|| line_errors.join("; ")))
-        .bind(&content_hash)
-        .bind(PARSER_VERSION)
-        .bind(source_id)
-        .execute(&mut *connection)
-        .await?;
-    Ok(Some(ImportedRollout {
-        messages,
-        tool_calls: tools,
-        malformed_lines,
-    }))
+    ensure_unchanged(path, metadata)?;
+    Ok((messages, tools, malformed_lines))
 }
 
-/// Derive the last lifecycle outcome in source-record order. `unknown` means
-/// that no terminal outcome has been observed for the latest opened turn; it
-/// deliberately does not claim that a copied session is currently running.
-fn derive_session_status(values: &[Value]) -> &'static str {
-    values.iter().fold("unknown", |status, value| {
-        let record_type = value["type"].as_str();
-        let payload = &value["payload"];
-        match (record_type, payload["type"].as_str()) {
-            (Some("event_msg"), Some("task_complete")) => "complete",
-            (Some("event_msg"), Some("turn_aborted")) => "aborted",
-            (Some("event_msg"), Some("task_started" | "user_message"))
-            | (Some("turn_context"), _) => "unknown",
-            (Some("response_item"), Some("message"))
-                if payload["role"].as_str() == Some("user") =>
-            {
-                "unknown"
-            }
-            _ => status,
+fn message_content(payload: &Value) -> String {
+    let Some(parts) = payload["content"].as_array() else {
+        return String::new();
+    };
+    let mut content = String::new();
+    let mut has_text = false;
+    for text in parts.iter().filter_map(|part| part["text"].as_str()) {
+        if has_text {
+            content.push('\n');
         }
-    })
+        content.push_str(text);
+        has_text = true;
+    }
+    content
+}
+
+/// Advance the lifecycle outcome in source-record order. `unknown` means that
+/// no terminal outcome has been observed for the latest opened turn; it does
+/// not claim that a copied session is currently running.
+fn next_session_status(status: &'static str, value: &Value) -> &'static str {
+    let record_type = value["type"].as_str();
+    let payload = &value["payload"];
+    match (record_type, payload["type"].as_str()) {
+        (Some("event_msg"), Some("task_complete")) => "complete",
+        (Some("event_msg"), Some("turn_aborted")) => "aborted",
+        (Some("event_msg"), Some("task_started" | "user_message")) | (Some("turn_context"), _) => {
+            "unknown"
+        }
+        (Some("response_item"), Some("message")) if payload["role"].as_str() == Some("user") => {
+            "unknown"
+        }
+        _ => status,
+    }
 }
 
 async fn record_file_error(

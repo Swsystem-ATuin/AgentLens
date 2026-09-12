@@ -115,6 +115,8 @@ async fn schema_variants_preserve_messages_tools_usage_and_raw_fields() {
         &[
             meta("synthetic-variants"),
             json!({"type":"future_record","payload":{"unknown":true}}),
+            json!({"type":"turn_context","payload":{"future":true}}),
+            json!({"type":"turn_context","payload":{"model":"later-model"}}),
             json!({"type":"response_item","payload":{"type":"message","future":42,"content":[{"text":"first"},{"type":"image"},{"text":"second"}]}}),
             json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":null}}),
             json!({"type":"response_item","payload":{"type":"function_call","call_id":"a","name":"synthetic_function","arguments":"{}"}}),
@@ -203,6 +205,48 @@ async fn schema_variants_preserve_messages_tools_usage_and_raw_fields() {
         .unwrap();
     assert_eq!(source, ("archived_sessions".into(), "ok".into()));
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn streaming_tool_pairing_preserves_latest_matching_call_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "repeated-call-id.jsonl",
+        &[
+            meta("repeated-call-id"),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"same","name":"first","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"same","name":"second","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"same","output":"latest result"}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"missing","output":"ignored"}}),
+        ],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.sessions, report.tool_calls, report.errors),
+        (1, 2, 0)
+    );
+    let tools: Vec<(String, Option<String>, String)> =
+        sqlx::query_as("SELECT tool_name,output,status FROM tool_calls ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        tools,
+        [
+            ("first".into(), None, "called".into()),
+            (
+                "second".into(),
+                Some("latest result".into()),
+                "complete".into()
+            ),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -365,6 +409,50 @@ async fn malformed_lines_partial_tails_and_bad_files_do_not_discard_good_records
         .unwrap();
     assert_eq!(message, (1, "surviving message".into()));
     assert_eq!(std::fs::read_to_string(partial).unwrap(), content);
+}
+
+#[tokio::test]
+async fn malformed_line_diagnostics_are_bounded_while_counts_remain_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "many-malformed.jsonl",
+        &[meta("many-malformed")],
+    );
+    let mut content = std::fs::read_to_string(&path).unwrap();
+    for _ in 0..25 {
+        content.push_str("\nprivate malformed value");
+    }
+    content.push('\n');
+    content.push_str(&message("survives").to_string());
+    std::fs::write(&path, content).unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((report.partial_files, report.malformed_lines), (1, 25));
+    let error: String = sqlx::query_scalar("SELECT parse_error FROM source_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(error.contains("line 2: invalid JSON or UTF-8"), "{error}");
+    assert!(error.contains("line 21: invalid JSON or UTF-8"), "{error}");
+    assert!(
+        error.contains("5 additional malformed lines omitted"),
+        "{error}"
+    );
+    assert!(!error.contains("line 22:"), "{error}");
+    assert!(!error.contains("private malformed value"), "{error}");
+    assert!(error.len() < 1_000, "diagnostic grew unexpectedly: {error}");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT content FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "survives"
+    );
 }
 
 #[tokio::test]

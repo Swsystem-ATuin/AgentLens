@@ -11,7 +11,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
 - Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
-- Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
+- Streams each rollout in two record-at-a-time passes while batching index writes transactionally, bounding memory to individual record size instead of total transcript size. See [bounded rollout ingestion](docs/ingestion-memory.md).
 - Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
 - Derives each session's coarse lifecycle status from source-record order. Later completion or interruption events win; subsequent turn or user activity resets an earlier terminal outcome to `unknown`, which does not imply the copied session is currently running. See [session status semantics](docs/session-status.md).
 

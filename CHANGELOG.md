@@ -47,6 +47,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Rollout ingestion now uses two record-streaming passes instead of retaining every decoded record in a file. Malformed diagnostic examples are capped with exact totals, and tool outputs use indexed SQLite pairing instead of an unbounded in-memory map. A 65.2 MB synthetic single-rollout benchmark reduced sampled peak RSS by roughly 93% and improved median rebuild time by about 18%.
+
 - Consolidate all 16 open architecture TODO items into the roadmap, retaining acceptance criteria and multi-user deployment requirements; TODO.md now links to the single backlog.
 
 - Record multiple application users as a confirmed roadmap requirement, including individual identities, access permissions, and account storage independent of index rebuilds.
