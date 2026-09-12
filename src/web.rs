@@ -8,115 +8,37 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 
+mod presentation;
+mod queries;
 #[cfg(test)]
 mod regression;
 
-const SESSION_PAGE_SIZE: usize = 50;
+#[cfg(test)]
+use presentation::select_options;
+use presentation::{
+    FilterOptions, Pagination, TranscriptSegment, group_transcript_section, message_href,
+    sessions_href, transcript_href,
+};
+#[cfg(test)]
+use queries::MessageRow;
+use queries::{
+    MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
+    TRANSCRIPT_SECTION_SIZE,
+};
+
 const MAX_SESSION_PAGE: u32 = 100_000;
-const TRANSCRIPT_SECTION_SIZE: usize = 50;
-const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
-const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 
 #[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
 }
 
-#[derive(FromRow)]
-struct SessionRow {
-    id: i64,
-    agent_kind: String,
-    external_id: String,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    model: Option<String>,
-    status: Option<String>,
-    cwd: Option<String>,
-    hostname: String,
-    os_user: String,
-    message_count: i64,
-}
-#[derive(FromRow)]
-struct MessageRow {
-    sequence: i64,
-    timestamp: Option<String>,
-    role: String,
-    content: String,
-    content_truncated: bool,
-}
-
-struct TranscriptSegment {
-    sequence: i64,
-    timestamp: Option<String>,
-    role: String,
-    paragraphs: Vec<String>,
-    truncated_sequences: Vec<i64>,
-    title: String,
-    initially_open: bool,
-}
-
 #[cfg(test)]
 fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
     group_transcript_section(messages, crate::sources::codex::KIND, false)
-}
-
-fn group_transcript_section(
-    messages: Vec<MessageRow>,
-    source_kind: &str,
-    mut conversation_started: bool,
-) -> Vec<TranscriptSegment> {
-    let mut segments: Vec<TranscriptSegment> = Vec::new();
-    for message in messages {
-        let presentation = crate::sources::classify_message(
-            source_kind,
-            &message.role,
-            &message.content,
-            !conversation_started,
-        );
-        if !conversation_started
-            && message.role == "user"
-            && presentation
-                .as_ref()
-                .is_none_or(|presentation| presentation.initially_open)
-        {
-            conversation_started = true;
-        }
-        if message.role == "assistant"
-            && presentation.is_none()
-            && let Some(previous) = segments.last_mut()
-            && previous.role == "assistant"
-            && previous.initially_open
-        {
-            previous.paragraphs.push(message.content);
-            if message.content_truncated {
-                previous.truncated_sequences.push(message.sequence);
-            }
-            continue;
-        }
-        let truncated_sequences = message
-            .content_truncated
-            .then_some(message.sequence)
-            .into_iter()
-            .collect();
-        segments.push(TranscriptSegment {
-            sequence: message.sequence,
-            timestamp: message.timestamp,
-            title: presentation
-                .as_ref()
-                .map(|presentation| presentation.title.to_owned())
-                .unwrap_or_else(|| message.role.clone()),
-            initially_open: presentation
-                .as_ref()
-                .is_none_or(|presentation| presentation.initially_open),
-            role: message.role,
-            paragraphs: vec![message.content],
-            truncated_sequences,
-        });
-    }
-    segments
 }
 
 #[derive(Deserialize, Default)]
@@ -128,18 +50,6 @@ struct Filters {
     page: Option<u32>,
 }
 
-struct FilterOption {
-    value: String,
-    selected: bool,
-}
-
-struct FilterOptions {
-    hosts: Vec<FilterOption>,
-    users: Vec<FilterOption>,
-    models: Vec<FilterOption>,
-    statuses: Vec<FilterOption>,
-}
-
 #[derive(Template)]
 #[template(path = "sessions.html")]
 struct SessionsTemplate {
@@ -147,12 +57,6 @@ struct SessionsTemplate {
     options: FilterOptions,
     show_origins: bool,
     pagination: Pagination,
-}
-
-struct Pagination {
-    page: u32,
-    previous_href: Option<String>,
-    next_href: Option<String>,
 }
 
 #[derive(Template)]
@@ -172,15 +76,6 @@ struct TranscriptQuery {
 #[derive(Deserialize, Default)]
 struct MessageQuery {
     part: Option<u32>,
-}
-
-#[derive(FromRow)]
-struct MessageChunk {
-    sequence: i64,
-    timestamp: Option<String>,
-    role: String,
-    content: String,
-    total_chars: i64,
 }
 
 #[derive(Template)]
@@ -234,27 +129,37 @@ async fn sessions(
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
     let page = filters.page_number()?;
-    let show_origins = show_origins(&state.pool).await?;
+    let show_origins = queries::show_origins(&state.pool)
+        .await
+        .map_err(|error| WebError::database("load source layout", error))?;
     if !show_origins {
         filters.host = None;
         filters.user = None;
     }
-    let options = load_filter_options(&state.pool, &filters, show_origins).await?;
-    let model_exclusion = crate::sources::model_exclusion();
-    let mut rows = sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
-               (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
-        WHERE (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
-        ORDER BY s.started_at DESC, s.id DESC
-        LIMIT ? OFFSET ?
-    "#).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).bind((SESSION_PAGE_SIZE + 1) as i64).bind(i64::from(page - 1) * SESSION_PAGE_SIZE as i64).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
+    let values = queries::filter_values(&state.pool, show_origins)
+        .await
+        .map_err(|error| WebError::database("load filter options", error))?;
+    let options = FilterOptions::new(
+        values,
+        filters.host.as_deref(),
+        filters.user.as_deref(),
+        filters.model.as_deref(),
+        filters.status.as_deref(),
+    );
+    let query_filters = filters.as_query();
+    let mut rows = queries::sessions(
+        &state.pool,
+        &query_filters,
+        i64::from(page - 1) * SESSION_PAGE_SIZE as i64,
+    )
+    .await
+    .map_err(|error| WebError::database("load sessions", error))?;
     let has_next = rows.len() > SESSION_PAGE_SIZE;
     rows.truncate(SESSION_PAGE_SIZE);
     let pagination = Pagination {
         page,
-        previous_href: (page > 1).then(|| page_href(&filters, page - 1)),
-        next_href: (has_next && page < MAX_SESSION_PAGE).then(|| page_href(&filters, page + 1)),
+        previous_href: (page > 1).then(|| filters.href(page - 1)),
+        next_href: (has_next && page < MAX_SESSION_PAGE).then(|| filters.href(page + 1)),
     };
     Ok(Html(
         SessionsTemplate {
@@ -289,100 +194,25 @@ impl Filters {
         }
         Ok(page)
     }
-}
 
-fn page_href(filters: &Filters, page: u32) -> String {
-    let mut pairs = Vec::new();
-    for (name, value) in [
-        ("host", filters.host.as_deref()),
-        ("user", filters.user.as_deref()),
-        ("model", filters.model.as_deref()),
-        ("status", filters.status.as_deref()),
-    ] {
-        if let Some(value) = value {
-            pairs.push(format!("{name}={}", percent_encode(value)));
+    fn as_query(&self) -> SessionFilters<'_> {
+        SessionFilters {
+            host: self.host.as_deref(),
+            user: self.user.as_deref(),
+            model: self.model.as_deref(),
+            status: self.status.as_deref(),
         }
     }
-    pairs.push(format!("page={page}"));
-    format!("/sessions?{}", pairs.join("&"))
-}
 
-fn percent_encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(char::from(HEX[(byte >> 4) as usize]));
-            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
-        }
-    }
-    encoded
-}
-
-async fn load_filter_options(
-    pool: &SqlitePool,
-    filters: &Filters,
-    show_origins: bool,
-) -> Result<FilterOptions, WebError> {
-    let (hosts, users) = if show_origins {
-        (
-            sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
-                .fetch_all(pool)
-                .await
-                .map_err(|error| WebError::database("load host filters", error))?,
-            sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
-                .fetch_all(pool)
-                .await
-                .map_err(|error| WebError::database("load user filters", error))?,
+    fn href(&self, page: u32) -> String {
+        sessions_href(
+            self.host.as_deref(),
+            self.user.as_deref(),
+            self.model.as_deref(),
+            self.status.as_deref(),
+            page,
         )
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let model_exclusion = crate::sources::model_exclusion();
-    let models = sqlx::query_scalar(
-        "SELECT DISTINCT s.model FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE s.model IS NOT NULL AND s.model <> '' AND (a.kind<>? OR s.model NOT LIKE ?) ORDER BY s.model",
-    )
-    .bind(model_exclusion.source_kind)
-    .bind(model_exclusion.pattern)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| WebError::database("load model filters", error))?;
-    let statuses = sqlx::query_scalar(
-        "SELECT DISTINCT status FROM sessions WHERE status IS NOT NULL AND status <> '' ORDER BY status",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|error| WebError::database("load status filters", error))?;
-
-    Ok(FilterOptions {
-        hosts: select_options(hosts, filters.host.as_deref()),
-        users: select_options(users, filters.user.as_deref()),
-        models: select_options(models, filters.model.as_deref()),
-        statuses: select_options(statuses, filters.status.as_deref()),
-    })
-}
-
-async fn show_origins(pool: &SqlitePool) -> Result<bool, WebError> {
-    let layout: Option<String> = sqlx::query_scalar(
-        "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| WebError::database("load source layout", error))?;
-    Ok(layout.as_deref() != Some("direct-codex-home"))
-}
-
-fn select_options(values: Vec<String>, selected: Option<&str>) -> Vec<FilterOption> {
-    values
-        .into_iter()
-        .map(|value| FilterOption {
-            selected: selected == Some(value.as_str()),
-            value,
-        })
-        .collect()
+    }
 }
 
 async fn session(
@@ -391,18 +221,15 @@ async fn session(
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
     let section = bounded_page(query.section, "validate transcript section")?;
-    let show_origin = show_origins(&state.pool).await?;
+    let show_origin = queries::show_origins(&state.pool)
+        .await
+        .map_err(|error| WebError::database("load source layout", error))?;
     let row = load_session(&state.pool, id).await?;
-    let mut messages = sqlx::query_as::<_, MessageRow>(
-        "SELECT sequence,timestamp,role,substr(content,1,?) content,length(content)>? content_truncated \
-         FROM messages WHERE session_id=? ORDER BY sequence LIMIT ? OFFSET ?",
+    let mut messages = queries::transcript_section(
+        &state.pool,
+        id,
+        i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64,
     )
-    .bind(MESSAGE_PREVIEW_CHARS)
-    .bind(MESSAGE_PREVIEW_CHARS)
-    .bind(id)
-    .bind((TRANSCRIPT_SECTION_SIZE + 1) as i64)
-    .bind(i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64)
-    .fetch_all(&state.pool)
     .await
     .map_err(|error| WebError::database("load transcript section", error))?;
     let has_next = messages.len() > TRANSCRIPT_SECTION_SIZE;
@@ -427,12 +254,10 @@ async fn session(
 }
 
 async fn load_session(pool: &SqlitePool, id: i64) -> Result<SessionRow, WebError> {
-    let model_exclusion = crate::sources::model_exclusion();
-    sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
-               (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)
-    "#).bind(id).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).fetch_optional(pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)
+    queries::session(pool, id)
+        .await
+        .map_err(|error| WebError::database("load session", error))?
+        .ok_or_else(WebError::not_found)
 }
 
 async fn message(
@@ -443,28 +268,16 @@ async fn message(
     let part = bounded_page(query.part, "validate message part")?;
     load_session(&state.pool, id).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
-    let message = sqlx::query_as::<_, MessageChunk>(
-        "SELECT sequence,timestamp,role,substr(content,? + 1,?) content,length(content) total_chars \
-         FROM messages WHERE session_id=? AND sequence=?",
-    )
-    .bind(offset)
-    .bind(MESSAGE_CHUNK_CHARS)
-    .bind(id)
-    .bind(sequence)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|error| WebError::database("load message part", error))?
-    .ok_or_else(WebError::not_found)?;
+    let message = queries::message_chunk(&state.pool, id, sequence, offset)
+        .await
+        .map_err(|error| WebError::database("load message part", error))?
+        .ok_or_else(WebError::not_found)?;
     if part > 1 && offset >= message.total_chars {
         return Err(WebError::invalid_pagination("validate message part"));
     }
-    let preceding: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM messages WHERE session_id=? AND sequence<?")
-            .bind(id)
-            .bind(sequence)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|error| WebError::database("locate message section", error))?;
+    let preceding = queries::preceding_message_count(&state.pool, id, sequence)
+        .await
+        .map_err(|error| WebError::database("locate message section", error))?;
     let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
     let pagination = Pagination {
         page: part,
@@ -489,14 +302,6 @@ fn bounded_page(page: Option<u32>, operation: &'static str) -> Result<u32, WebEr
         return Err(WebError::invalid_pagination(operation));
     }
     Ok(page)
-}
-
-fn transcript_href(id: i64, section: u32) -> String {
-    format!("/sessions/{id}?section={section}")
-}
-
-fn message_href(id: i64, sequence: i64, part: u32) -> String {
-    format!("/sessions/{id}/messages/{sequence}?part={part}")
 }
 
 struct WebError {
@@ -980,7 +785,7 @@ mod tests {
         };
 
         assert_eq!(
-            page_href(&filters, 3),
+            filters.href(3),
             "/sessions?host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&page=3"
         );
     }

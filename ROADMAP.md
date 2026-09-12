@@ -45,7 +45,7 @@ These five items retain the original TODO acceptance criteria. The regression su
 
 - [x] **R1.4 — Separate source adapters from generic application logic.** Move Codex discovery, parsing, and setup-marker recognition into source-specific modules. Keep normalised events, indexing, queries, and presentation generic; preserve existing behavior with tests. Delivered with a source-neutral record/presentation contract, a dedicated Codex discovery and streaming parser module, agent-kind presentation dispatch, cross-source policy regressions, and [documented boundaries and performance verification](docs/source-adapters.md).
 
-- [ ] **R1.5 — Separate querying and transcript presentation from route handlers.** Extract focused modules as part of the source-boundary refactor, keeping handlers responsible for request extraction and responses.
+- [x] **R1.5 — Separate querying and transcript presentation from route handlers.** Extract focused modules as part of the source-boundary refactor, keeping handlers responsible for request extraction and responses. Delivered with dedicated SQLite query and presentation/view-model modules, thin coordinating handlers, preserved route-level regressions, and [documented web boundaries](docs/web-architecture.md).
 
 ## R2 — Find and understand sessions
 

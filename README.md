@@ -4,7 +4,7 @@ Agent Lens is a local, self-hosted Rust web application for indexing and browsin
 
 Raw agent files are always the source of truth. The SQLite database is a disposable local index: it can be deleted and rebuilt without changing anything under `data/`.
 
-Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Codex discovery, JSONL interpretation, lifecycle rules, parser versioning, and presentation markers live in the Codex adapter; normalized database orchestration and web rendering remain source-neutral.
+Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Codex discovery, JSONL interpretation, lifecycle rules, parser versioning, and presentation markers live in the Codex adapter; normalized database orchestration and web rendering remain source-neutral. The web application separately defines its [route, query, and presentation boundaries](docs/web-architecture.md).
 
 ## Current functionality
 
