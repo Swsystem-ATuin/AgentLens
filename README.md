@@ -9,7 +9,7 @@ Raw agent files are always the source of truth. The SQLite database is a disposa
 - Discovers Codex homes at `data/{hostname}/{os_user}/.codex/`, or accepts one `.codex/` directory directly.
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
-- Continues past malformed files and records source-level parsing failures.
+- Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Batches index writes in a transaction so full rebuilds remain efficient as transcript volume grows.
 - Provides a sessions list with known host, user, model, and status values as dropdown filters, plus a collapsible transcript drill-down UI that minimizes recognized initialization sections and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
@@ -38,7 +38,7 @@ cargo run -- refresh --data data
 cargo run -- refresh --data /path/to/.codex
 ```
 
-Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, errors, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort the run. A direct `.codex` refresh is accepted for a new index or one whose previous rebuild/refresh also used direct-home mode. Changing between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
+Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, hard file errors, partial files, malformed lines, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort the run. A direct `.codex` refresh is accepted for a new index or one whose previous rebuild/refresh also used direct-home mode. Changing between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
 
 Source directories may be symbolic links to nightly backups, including the data root, host/user folders, `.codex`, and session subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
 

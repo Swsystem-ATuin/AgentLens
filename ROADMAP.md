@@ -31,7 +31,7 @@ The following five items retain the original TODO acceptance criteria.
 
 - [x] **R0.4 — Derive session status from event order.** Define completion, interruption, and resumed-session behavior, then cover those sequences with synthetic tests instead of relying on whether an event appears anywhere in a file. Delivered with an ordered, conservative lifecycle reducer; [behavior and verification](docs/session-status.md).
 
-- [ ] **R0.5 — Expand parser resilience tests.** Cover unknown fields, malformed lines, partial files, and observed schema variants with tiny synthetic or fully redacted fixtures. Verify useful records survive local parsing failures and diagnostics accurately describe partial imports.
+- [x] **R0.5 — Expand parser resilience tests.** Cover unknown fields, malformed lines, partial files, and observed schema variants with tiny synthetic or fully redacted fixtures. Verify useful records survive local parsing failures and diagnostics accurately describe partial imports. Delivered with retained raw-field/schema-variant coverage, valid-record survival across malformed JSON/UTF-8, exact sanitised line diagnostics, and separate CLI partial-file/malformed-line totals; [format contract](docs/fixture-format.md) and [refresh behavior](docs/refresh.md).
 
 ## R1 — Bounded browsing and source boundaries
 

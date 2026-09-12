@@ -334,25 +334,36 @@ async fn malformed_lines_partial_tails_and_bad_files_do_not_discard_good_records
         .await
         .unwrap();
     let report = ingest_data_root(&pool, dir.path()).await.unwrap();
-    assert_eq!((report.sessions, report.messages, report.errors), (2, 1, 2));
+    assert_eq!(
+        (
+            report.sessions,
+            report.messages,
+            report.errors,
+            report.partial_files,
+            report.malformed_lines,
+        ),
+        (2, 1, 2, 1, 2)
+    );
     let errors: String =
         sqlx::query_scalar("SELECT parse_error FROM source_files WHERE parse_status='partial'")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(errors.contains("line 2:"));
-    assert!(errors.contains("line 4:"));
+    assert_eq!(
+        errors,
+        "line 2: invalid JSON or UTF-8; line 4: invalid JSON or UTF-8"
+    );
     let failures: i64 =
         sqlx::query_scalar("SELECT count(*) FROM source_files WHERE parse_status='error'")
             .fetch_one(&pool)
             .await
             .unwrap();
     assert_eq!(failures, 2);
-    let message: String = sqlx::query_scalar("SELECT content FROM messages")
+    let message: (i64, String) = sqlx::query_as("SELECT sequence,content FROM messages")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(message, "surviving message");
+    assert_eq!(message, (1, "surviving message".into()));
     assert_eq!(std::fs::read_to_string(partial).unwrap(), content);
 }
 

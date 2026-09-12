@@ -37,6 +37,39 @@ fn missing_or_invalid_authentication_fails_before_creating_database() {
     }
 }
 
+#[test]
+fn refresh_summary_distinguishes_partial_files_and_malformed_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("partial.jsonl"),
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"synthetic-partial\"}}\n",
+            "private malformed content\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"survives\"}]}}\n",
+            "{"
+        ),
+    )
+    .unwrap();
+
+    let result = run(
+        dir.path(),
+        &["--database", "index.sqlite", "refresh", "--data", "sources"],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(
+        stdout.contains("partial files: 1; malformed lines: 2"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("private malformed content"), "{stdout}");
+}
+
 #[tokio::test]
 async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needing_auth() {
     let dir = tempfile::tempdir().unwrap();
@@ -246,10 +279,9 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
     assert!(String::from_utf8_lossy(&result.stdout).contains("indexed 1 sessions"));
     let result = run(dir.path(), &args);
     assert!(result.status.success());
-    assert!(
-        String::from_utf8_lossy(&result.stdout)
-            .contains("skipped 1 unchanged files; 0 errors; 1 files seen")
-    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains(
+        "skipped 1 unchanged files; 0 errors; partial files: 0; malformed lines: 0; 1 files seen"
+    ));
     let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
     let row: (i64, i64, String) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),content_hash FROM source_files").fetch_one(&pool).await.unwrap();
     assert_eq!((row.0, row.1), (1, 2));

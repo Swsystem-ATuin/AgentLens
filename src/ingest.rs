@@ -54,6 +54,14 @@ pub struct IngestReport {
     pub messages: usize,
     pub tool_calls: usize,
     pub errors: usize,
+    pub partial_files: usize,
+    pub malformed_lines: usize,
+}
+
+struct ImportedRollout {
+    messages: usize,
+    tool_calls: usize,
+    malformed_lines: usize,
 }
 
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
@@ -109,11 +117,15 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
                             file_transaction.commit().await?;
                             report.skipped += 1;
                         }
-                        Ok(Some((m, t))) => {
+                        Ok(Some(imported)) => {
                             file_transaction.commit().await?;
                             report.sessions += 1;
-                            report.messages += m;
-                            report.tool_calls += t;
+                            report.messages += imported.messages;
+                            report.tool_calls += imported.tool_calls;
+                            if imported.malformed_lines != 0 {
+                                report.partial_files += 1;
+                                report.malformed_lines += imported.malformed_lines;
+                            }
                         }
                         Err(error) => {
                             file_transaction.rollback().await?;
@@ -331,7 +343,7 @@ async fn ingest_rollout(
     instance: i64,
     path: &Path,
     kind: &str,
-) -> Result<Option<(usize, usize)>> {
+) -> Result<Option<ImportedRollout>> {
     let previous: Option<SourceCheckpoint> = sqlx::query_as(
         "SELECT content_hash,parser_version,parse_status,EXISTS(SELECT 1 FROM sessions WHERE source_file_id=source_files.id) AS has_session FROM source_files WHERE path=?")
         .bind(path.to_string_lossy().as_ref()).fetch_optional(&mut *connection).await?;
@@ -481,6 +493,7 @@ async fn ingest_rollout(
         }
     }
     ensure_unchanged(path, &metadata)?;
+    let malformed_lines = line_errors.len();
     let parse_status = if line_errors.is_empty() {
         "ok"
     } else {
@@ -494,7 +507,11 @@ async fn ingest_rollout(
         .bind(source_id)
         .execute(&mut *connection)
         .await?;
-    Ok(Some((messages, tools)))
+    Ok(Some(ImportedRollout {
+        messages,
+        tool_calls: tools,
+        malformed_lines,
+    }))
 }
 
 /// Derive the last lifecycle outcome in source-record order. `unknown` means
