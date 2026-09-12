@@ -72,6 +72,41 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
     (dir, app)
 }
 
+async fn paginated_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "
+        INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+        INSERT INTO hosts VALUES(1,'host name');
+        INSERT INTO users VALUES(1,1,'user/name');
+        INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
+        ",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    for id in 1..=105_i64 {
+        sqlx::query(
+            "INSERT INTO sessions(id,instance_id,external_id,started_at,model,status,cwd) \
+             VALUES(?,1,?,'2026-01-01','model &/+','complete','/synthetic')",
+        )
+        .bind(id)
+        .bind(format!("session-{id}"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
 async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
     let response = app
         .clone()
@@ -141,6 +176,72 @@ async fn filters_query_real_rows_individually_together_and_with_literal_input() 
         "options remain available outside current filter"
     );
     assert!(html.contains("<td>host-b</td><td>user-b</td>"));
+}
+
+#[tokio::test]
+async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
+    let (_dir, app) = paginated_app().await;
+
+    let (status, first) = get(&app, "/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("<a href=\"/sessions/").count(), 50);
+    assert!(
+        first.len() < 64 * 1024,
+        "response was {} bytes",
+        first.len()
+    );
+    assert_session_order(&first, (56..=105).rev());
+    assert!(!first.contains("href=\"/sessions/55\""));
+    assert!(!first.contains("rel=\"prev\""));
+    assert!(first.contains("rel=\"next\" href=\"/sessions?page=2\""));
+    assert!(first.contains("Page 1"));
+
+    let encoded_filter = "model=model%20%26%2F%2B";
+    let (status, second) = get(&app, &format!("/sessions?{encoded_filter}&page=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second.matches("<a href=\"/sessions/").count(), 50);
+    assert_session_order(&second, (6..=55).rev());
+    assert!(
+        second.contains(&format!(
+            "rel=\"prev\" href=\"/sessions?{encoded_filter}&#38;page=1\""
+        )),
+        "{second}"
+    );
+    assert!(second.contains(&format!(
+        "rel=\"next\" href=\"/sessions?{encoded_filter}&#38;page=3\""
+    )));
+    assert!(second.contains("<option value=\"model &#38;/+\" selected>"));
+    assert!(second.contains("Page 2"));
+
+    let (status, third) = get(&app, &format!("/sessions?{encoded_filter}&page=3")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(third.matches("<a href=\"/sessions/").count(), 5);
+    assert_session_order(&third, (1..=5).rev());
+    assert!(third.contains("rel=\"prev\""));
+    assert!(!third.contains("rel=\"next\""));
+    assert!(third.contains("Page 3"));
+
+    for page in ["0", "100001", "not-a-number"] {
+        assert_eq!(
+            get(&app, &format!("/sessions?page={page}")).await.0,
+            StatusCode::BAD_REQUEST,
+            "page={page}"
+        );
+    }
+}
+
+fn assert_session_order(html: &str, expected: impl IntoIterator<Item = i64>) {
+    let mut previous = None;
+    for id in expected {
+        let position = html
+            .find(&format!("href=\"/sessions/{id}\""))
+            .unwrap_or_else(|| panic!("missing session {id}"));
+        assert!(
+            previous.is_none_or(|last| last < position),
+            "session {id} was out of order"
+        );
+        previous = Some(position);
+    }
 }
 
 #[tokio::test]

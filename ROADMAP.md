@@ -39,7 +39,7 @@ These five items retain the original TODO acceptance criteria. The regression su
 
 - [x] **R1.1 — Bound ingestion memory.** Evaluate streaming with bounded buffering against a two-pass parser where metadata discovery requires it. Measure representative full rebuilds before and after, including elapsed time and peak memory; review transaction boundaries, query volume, file I/O, and allocations. Report only aggregate results, without private content. Delivered with two-pass record streaming, bounded malformed-line examples, indexed tool-output pairing, preserved transactional semantics, and a synthetic before/after benchmark; [design and verification](docs/ingestion-memory.md).
 
-- [ ] **R1.2 — Paginate the sessions list.** Add bounded queries with stable ordering and navigation that preserves filters. Verify that larger datasets do not require loading every matching session for one page.
+- [x] **R1.2 — Paginate the sessions list.** Add bounded queries with stable ordering and navigation that preserves filters. Verify that larger datasets do not require loading every matching session for one page. Implemented with 50-row pages, a 51-row query ceiling for next-page detection, deterministic timestamp/ID ordering, safely encoded filter continuity, and rendered multi-page regressions.
 
 - [ ] **R1.3 — Load long transcripts in sections.** Bound database reads and rendered response size while preserving message order and sensible grouping across section boundaries. Collapsed content should not require transferring the entire transcript upfront.
 

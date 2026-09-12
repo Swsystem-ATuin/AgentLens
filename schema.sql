@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id INTEGER 
 CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, call_id TEXT, tool_name TEXT, arguments TEXT, output TEXT, status TEXT, raw_json TEXT);
 CREATE TABLE IF NOT EXISTS usage_events (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, timestamp TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, total_tokens INTEGER, raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_started_id ON sessions(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_file ON sessions(source_file_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);

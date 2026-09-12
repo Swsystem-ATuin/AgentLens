@@ -16,6 +16,8 @@ mod regression;
 
 // Presentation policy only: retain these sessions in the rebuildable index.
 const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
+const SESSION_PAGE_SIZE: usize = 50;
+const MAX_SESSION_PAGE: u32 = 100_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -129,6 +131,7 @@ struct Filters {
     user: Option<String>,
     model: Option<String>,
     status: Option<String>,
+    page: Option<u32>,
 }
 
 struct FilterOption {
@@ -149,6 +152,13 @@ struct SessionsTemplate {
     sessions: Vec<SessionRow>,
     options: FilterOptions,
     show_origins: bool,
+    pagination: Pagination,
+}
+
+struct Pagination {
+    page: u32,
+    previous_href: Option<String>,
+    next_href: Option<String>,
 }
 
 #[derive(Template)]
@@ -200,24 +210,34 @@ async fn sessions(
     Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
+    let page = filters.page_number()?;
     let show_origins = show_origins(&state.pool).await?;
     if !show_origins {
         filters.host = None;
         filters.user = None;
     }
     let options = load_filter_options(&state.pool, &filters, show_origins).await?;
-    let rows = sqlx::query_as::<_, SessionRow>(r#"
+    let mut rows = sqlx::query_as::<_, SessionRow>(r#"
         SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
         WHERE (s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
-        ORDER BY s.started_at DESC
-    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
+        ORDER BY s.started_at DESC, s.id DESC
+        LIMIT ? OFFSET ?
+    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).bind((SESSION_PAGE_SIZE + 1) as i64).bind(i64::from(page - 1) * SESSION_PAGE_SIZE as i64).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
+    let has_next = rows.len() > SESSION_PAGE_SIZE;
+    rows.truncate(SESSION_PAGE_SIZE);
+    let pagination = Pagination {
+        page,
+        previous_href: (page > 1).then(|| page_href(&filters, page - 1)),
+        next_href: (has_next && page < MAX_SESSION_PAGE).then(|| page_href(&filters, page + 1)),
+    };
     Ok(Html(
         SessionsTemplate {
             sessions: rows,
             options,
             show_origins,
+            pagination,
         }
         .render()
         .map_err(|error| WebError::template("render sessions", error))?,
@@ -237,6 +257,45 @@ impl Filters {
             }
         }
     }
+
+    fn page_number(&self) -> Result<u32, WebError> {
+        let page = self.page.unwrap_or(1);
+        if page == 0 || page > MAX_SESSION_PAGE {
+            return Err(WebError::invalid_page());
+        }
+        Ok(page)
+    }
+}
+
+fn page_href(filters: &Filters, page: u32) -> String {
+    let mut pairs = Vec::new();
+    for (name, value) in [
+        ("host", filters.host.as_deref()),
+        ("user", filters.user.as_deref()),
+        ("model", filters.model.as_deref()),
+        ("status", filters.status.as_deref()),
+    ] {
+        if let Some(value) = value {
+            pairs.push(format!("{name}={}", percent_encode(value)));
+        }
+    }
+    pairs.push(format!("page={page}"));
+    format!("/sessions?{}", pairs.join("&"))
+}
+
+fn percent_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 async fn load_filter_options(
@@ -342,6 +401,16 @@ impl WebError {
             public_message: "session not found",
             operation: "load session",
             error_kind: "not_found",
+            error_code: None,
+        }
+    }
+
+    fn invalid_page() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            public_message: "invalid page",
+            operation: "validate session page",
+            error_kind: "invalid_input",
             error_code: None,
         }
     }
@@ -713,6 +782,11 @@ mod tests {
                 statuses: select_options(vec!["complete".into()], None),
             },
             show_origins: true,
+            pagination: Pagination {
+                page: 1,
+                previous_href: None,
+                next_href: None,
+            },
         }
         .render()
         .expect("template should render");
@@ -730,6 +804,7 @@ mod tests {
             user: Some(String::new()),
             model: Some(String::new()),
             status: Some(String::new()),
+            page: None,
         };
 
         filters.normalize();
@@ -738,6 +813,57 @@ mod tests {
         assert!(filters.user.is_none());
         assert!(filters.model.is_none());
         assert!(filters.status.is_none());
+    }
+
+    #[test]
+    fn pagination_links_encode_and_preserve_active_filters() {
+        let filters = Filters {
+            host: Some("host name".into()),
+            user: Some("user/name".into()),
+            model: Some("model &+".into()),
+            status: Some("完了".into()),
+            page: Some(2),
+        };
+
+        assert_eq!(
+            page_href(&filters, 3),
+            "/sessions?host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&page=3"
+        );
+    }
+
+    #[test]
+    fn page_numbers_are_bounded() {
+        for (page, expected) in [
+            (None, 1),
+            (Some(1), 1),
+            (Some(MAX_SESSION_PAGE), MAX_SESSION_PAGE),
+        ] {
+            assert_eq!(
+                Filters {
+                    host: None,
+                    user: None,
+                    model: None,
+                    status: None,
+                    page,
+                }
+                .page_number()
+                .ok(),
+                Some(expected)
+            );
+        }
+        for page in [0, MAX_SESSION_PAGE + 1] {
+            let error = Filters {
+                host: None,
+                user: None,
+                model: None,
+                status: None,
+                page: Some(page),
+            }
+            .page_number()
+            .unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.public_message, "invalid page");
+        }
     }
 
     fn message(sequence: i64, role: &str, content: &str) -> MessageRow {
