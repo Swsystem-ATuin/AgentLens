@@ -10,6 +10,23 @@ use std::{
 };
 
 const SCHEMA: &str = include_str!("../schema.sql");
+const DROP_MESSAGE_SEARCH_TRIGGERS: &str = "
+    DROP TRIGGER IF EXISTS messages_search_insert;
+    DROP TRIGGER IF EXISTS messages_search_delete;
+    DROP TRIGGER IF EXISTS messages_search_update;
+";
+const CREATE_MESSAGE_SEARCH_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS messages_search_insert AFTER INSERT ON messages BEGIN
+      INSERT INTO message_search(rowid,content,session_id,sequence,role) VALUES(new.id,new.content,new.session_id,new.sequence,new.role);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_search_delete AFTER DELETE ON messages BEGIN
+      INSERT INTO message_search(message_search,rowid,content,session_id,sequence,role) VALUES('delete',old.id,old.content,old.session_id,old.sequence,old.role);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_search_update AFTER UPDATE ON messages BEGIN
+      INSERT INTO message_search(message_search,rowid,content,session_id,sequence,role) VALUES('delete',old.id,old.content,old.session_id,old.sequence,old.role);
+      INSERT INTO message_search(rowid,content,session_id,sequence,role) VALUES(new.id,new.content,new.session_id,new.sequence,new.role);
+    END;
+";
 static REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct Rebuild {
@@ -28,7 +45,27 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await
         .with_context(|| format!("open SQLite index {}", path.display()))?;
+    let existing_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('index_metadata','message_search')",
+    )
+    .fetch_all(&pool)
+    .await
+    .context("inspect transcript search schema")?;
+    let search_schema_current = existing_tables.iter().any(|name| name == "message_search")
+        && existing_tables.iter().any(|name| name == "index_metadata")
+        && sqlx::query_scalar::<_, String>(
+            "SELECT value FROM index_metadata WHERE key='message_search_version'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .context("inspect transcript search version")?
+        .as_deref()
+            == Some("1");
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    sqlx::raw_sql(CREATE_MESSAGE_SEARCH_TRIGGERS)
+        .execute(&pool)
+        .await
+        .context("enable transcript search maintenance")?;
     // Upgrade old disposable indexes without discarding their existing projections.
     let mut migration = pool.begin().await?;
     let columns: Vec<String> =
@@ -123,6 +160,19 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .execute(&mut *migration)
         .await
         .context("index stable session activity order")?;
+    if !search_schema_current {
+        sqlx::query("INSERT INTO message_search(message_search) VALUES('rebuild')")
+            .execute(&mut *migration)
+            .await
+            .context("backfill transcript search index")?;
+        sqlx::query(
+            "INSERT INTO index_metadata(key,value) VALUES('message_search_version','1') \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .execute(&mut *migration)
+        .await
+        .context("record transcript search schema version")?;
+    }
     migration.commit().await?;
     Ok(pool)
 }
@@ -160,6 +210,15 @@ pub async fn begin_rebuild(path: &Path) -> Result<Rebuild> {
             return Err(error).context("initialize staged rebuild");
         }
     };
+    if let Err(error) = sqlx::raw_sql(DROP_MESSAGE_SEARCH_TRIGGERS)
+        .execute(&pool)
+        .await
+        .context("prepare staged transcript search rebuild")
+    {
+        pool.close().await;
+        let _ = remove_database_files(&staged_path);
+        return Err(error);
+    }
     Ok(Rebuild {
         pool,
         staged_path,
@@ -189,6 +248,14 @@ impl Rebuild {
 
     async fn publish_inner(&self) -> Result<()> {
         let pool = self.pool();
+        sqlx::query("INSERT INTO message_search(message_search) VALUES('rebuild')")
+            .execute(pool)
+            .await
+            .context("build staged transcript search index")?;
+        sqlx::raw_sql(CREATE_MESSAGE_SEARCH_TRIGGERS)
+            .execute(pool)
+            .await
+            .context("enable staged transcript search maintenance")?;
         let integrity: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
             .fetch_all(pool)
             .await
@@ -335,6 +402,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hosts, ["synthetic"]);
+    }
+
+    #[tokio::test]
+    async fn opening_a_legacy_index_backfills_transcript_search_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let pool = super::open(&path).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+             INSERT INTO hosts VALUES(1,'host');
+             INSERT INTO users VALUES(1,1,'user');
+             INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
+             INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'native','stable','title');
+             INSERT INTO messages(session_id,sequence,role,content) VALUES(1,0,'user','legacy searchable text');
+             DROP TABLE message_search;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let pool = super::open(&path).await.unwrap();
+        let matches: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM message_search WHERE message_search MATCH 'searchable'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(matches, 1);
+        pool.close().await;
+
+        let pool = super::open(&path).await.unwrap();
+        let matches: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM message_search WHERE message_search MATCH 'searchable'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(matches, 1, "normal reopen must not duplicate the index");
     }
 
     #[tokio::test]

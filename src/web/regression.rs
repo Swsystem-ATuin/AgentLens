@@ -57,10 +57,10 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
           (3,1,'session-c','3','Session C','2026-01-03','model-b','unknown','/synthetic/c');
         INSERT INTO messages(session_id,sequence,role,content) VALUES
           (1,3,'assistant','second reply'),
-          (1,0,'developer','<multi_agent_role>synthetic setup</multi_agent_role>'),
-          (1,4,'user','<script>synthetic</script>'),
+          (1,0,'developer','<multi_agent_role>ordinarymatch setup</multi_agent_role>'),
+          (1,4,'user','<script>needle & unsafe</script>'),
           (1,2,'assistant','first reply'),
-          (1,1,'user','synthetic request');
+          (1,1,'user','synthetic request ordinarymatch');
     ",
     )
     .execute(&pool)
@@ -155,6 +155,12 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
         .execute(&mut *transaction)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO messages(session_id,sequence,role,content) VALUES(?,0,'user',?)")
+            .bind(id)
+            .bind(format!("sharedterm bounded result {id}"))
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
     }
     transaction.commit().await.unwrap();
     let auth = dir.path().join("auth.json");
@@ -191,7 +197,7 @@ async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
             "assistant"
         };
         let content = if sequence == 0 {
-            format!("<skills_instructions>{}TAIL", "&".repeat(20_000))
+            format!("<skills_instructions>needle {}TAIL", "x".repeat(20_000))
         } else {
             format!("message-{sequence}")
         };
@@ -317,6 +323,7 @@ async fn projects_dates_archives_and_agents_filter_rendered_sessions() {
             "session-z",
             "session-a",
         ),
+        ("?q=UI", "session-z", "session-a"),
         ("?from=2026-01-02&to=2026-01-02", "session-two", "session-z"),
     ] {
         let (status, html) = get(&app, &format!("/sessions{query}")).await;
@@ -411,6 +418,77 @@ async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
     }
 }
 
+#[tokio::test]
+async fn search_is_safe_composable_and_links_to_an_ordinary_matching_message() {
+    let (_dir, app) = seeded_app().await;
+
+    for (query, expected, absent) in [
+        ("Session%20B", "/sessions/2", "/sessions/1"),
+        ("session-c", "/sessions/3", "/sessions/2"),
+        ("ordinarymatch", "/sessions/1", "/sessions/2"),
+    ] {
+        let (status, html) = get(&app, &format!("/sessions?q={query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert!(html.contains(expected), "{query}: {html}");
+        assert!(!html.contains(absent), "{query}: {html}");
+    }
+
+    let (_, ordinary) = get(&app, "/sessions?q=ordinarymatch").await;
+    assert!(
+        ordinary.contains("href=\"/sessions/1/messages/1\""),
+        "{ordinary}"
+    );
+    assert!(
+        !ordinary.contains("/messages/0"),
+        "setup match obscured conversation"
+    );
+
+    let (_, unsafe_html) = get(&app, "/sessions?q=needle").await;
+    let normalized = unsafe_html
+        .replace("&#60;", "&lt;")
+        .replace("&#62;", "&gt;")
+        .replace("&#38;", "&amp;");
+    assert!(normalized.contains("&lt;script&gt;<mark>needle</mark> &amp; unsafe"));
+    assert!(!unsafe_html.contains("<script>"));
+    assert!(unsafe_html.contains("href=\"/sessions/1/messages/4\""));
+
+    let (_, combined) = get(&app, "/sessions?q=ordinarymatch&status=complete").await;
+    assert!(combined.contains("/sessions/1"));
+    let (_, excluded) = get(&app, "/sessions?q=ordinarymatch&status=aborted").await;
+    assert!(excluded.contains("No sessions match these filters."));
+
+    for query in ["%22", "%27%20OR%201%3D1--", "foo-bar%2Fbaz", "%E2%9C%93"] {
+        assert_eq!(
+            get(&app, &format!("/sessions?q={query}")).await.0,
+            StatusCode::OK,
+            "special query {query}"
+        );
+    }
+    let long_query = "x".repeat(crate::search::MAX_QUERY_CHARS + 1);
+    assert_eq!(
+        get(&app, &format!("/sessions?q={long_query}")).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn transcript_search_large_results_keep_page_and_response_bounded() {
+    let (_dir, app) = paginated_app().await;
+    let (_, first) = get(&app, "/sessions?q=sharedterm").await;
+    assert_eq!(first.matches("class=\"search-preview\"").count(), 50);
+    assert!(
+        first.len() < 96 * 1024,
+        "response was {} bytes",
+        first.len()
+    );
+    assert!(first.contains("rel=\"next\" href=\"/sessions?q=sharedterm&#38;page=2\""));
+
+    let (_, second) = get(&app, "/sessions?q=sharedterm&page=2").await;
+    assert_eq!(second.matches("class=\"search-preview\"").count(), 50);
+    assert!(second.contains("rel=\"prev\" href=\"/sessions?q=sharedterm&#38;page=1\""));
+    assert!(second.contains("rel=\"next\" href=\"/sessions?q=sharedterm&#38;page=3\""));
+}
+
 fn assert_session_order(html: &str, expected: impl IntoIterator<Item = i64>) {
     let mut previous = None;
     for id in expected {
@@ -428,6 +506,12 @@ fn assert_session_order(html: &str, expected: impl IntoIterator<Item = i64>) {
 #[tokio::test]
 async fn long_transcripts_use_bounded_sections_and_lazy_message_parts() {
     let (_dir, app) = bounded_transcript_app().await;
+    let (_, search) = get(&app, "/sessions?q=needle").await;
+    assert!(
+        search.len() < 64 * 1024,
+        "search response was {} bytes",
+        search.len()
+    );
 
     let (status, first) = get(&app, "/sessions/1").await;
     assert_eq!(status, StatusCode::OK);
@@ -505,9 +589,10 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     let normalized = html
         .replace("&#60;", "&lt;")
         .replace("&#62;", "&gt;")
-        .replace("&#47;", "/");
+        .replace("&#47;", "/")
+        .replace("&#38;", "&amp;");
     assert!(
-        normalized.contains("&lt;script&gt;synthetic&lt;/script&gt;"),
+        normalized.contains("&lt;script&gt;needle &amp; unsafe&lt;/script&gt;"),
         "synthetic HTML: {html}"
     );
     assert!(!html.contains("<script>"));
@@ -595,6 +680,8 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 hostname: "host".into(),
                 os_user: "user".into(),
                 message_count: 4,
+                match_sequence: None,
+                match_snippet: None,
             },
             segments: group_transcript(vec![
                 message(0, "user", "request"),
@@ -662,6 +749,13 @@ async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
     crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
         .await
         .unwrap();
+    let searchable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_search WHERE message_search MATCH 'redacted'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(searchable, 2);
     let id: String = sqlx::query_scalar("SELECT stable_id FROM sessions")
         .fetch_one(&pool)
         .await
@@ -683,6 +777,13 @@ async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
     crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
         .await
         .unwrap();
+    let searchable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_search WHERE message_search MATCH 'redacted'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(searchable, 0, "cascade deletion must update transcript FTS");
     assert_eq!(
         get(&app, &format!("/sessions/{id}")).await.0,
         StatusCode::NOT_FOUND
@@ -785,8 +886,14 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO messages(session_id,sequence,role,content) VALUES(?,0,'assistant','synthetic conversation')")
-            .bind(id).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO messages(session_id,sequence,role,content) VALUES(?,0,'assistant',?)",
+        )
+        .bind(id)
+        .bind(format!("synthetic conversation private-hidden-{id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     for query in [
         "",
@@ -812,6 +919,10 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(!html.contains("synthetic conversation"));
     }
+    let (_, hidden_search) = get(&app, "/sessions?q=private-hidden-4").await;
+    assert!(hidden_search.contains("No sessions match these filters."));
+    assert!(!hidden_search.contains("href=\"/sessions/4\""));
+    assert!(!hidden_search.contains("class=\"search-preview\""));
     sqlx::raw_sql(
         "
         INSERT INTO agents VALUES(2,'other-agent','Other agent');

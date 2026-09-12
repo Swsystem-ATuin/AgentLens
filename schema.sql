@@ -1,4 +1,5 @@
 PRAGMA journal_mode = WAL;
+CREATE TABLE IF NOT EXISTS index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hosts (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, host_id INTEGER NOT NULL REFERENCES hosts(id), os_user TEXT NOT NULL, UNIQUE(host_id, os_user));
@@ -7,6 +8,7 @@ CREATE TABLE IF NOT EXISTS ingest_runs (id INTEGER PRIMARY KEY, started_at TEXT 
 CREATE TABLE IF NOT EXISTS source_files (id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES agent_instances(id), ingest_run_id INTEGER NOT NULL REFERENCES ingest_runs(id), path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, size_bytes INTEGER, modified_at TEXT, parse_status TEXT NOT NULL, parse_error TEXT, content_hash TEXT, parser_version INTEGER);
 CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES agent_instances(id), source_file_id INTEGER REFERENCES source_files(id), external_id TEXT NOT NULL, stable_id TEXT, started_at TEXT, ended_at TEXT, cwd TEXT, model TEXT, status TEXT, title TEXT, derived_title TEXT, raw_metadata TEXT, UNIQUE(instance_id, external_id));
 CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT, UNIQUE(session_id, sequence));
+CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(content, session_id UNINDEXED, sequence UNINDEXED, role UNINDEXED, content='messages', content_rowid='id', tokenize='unicode61');
 CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, call_id TEXT, tool_name TEXT, arguments TEXT, output TEXT, status TEXT, raw_json TEXT);
 CREATE TABLE IF NOT EXISTS usage_events (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, timestamp TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, total_tokens INTEGER, raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);

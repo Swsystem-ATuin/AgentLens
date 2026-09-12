@@ -44,6 +44,7 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
 
 #[derive(Deserialize, Default)]
 struct Filters {
+    q: Option<String>,
     host: Option<String>,
     user: Option<String>,
     model: Option<String>,
@@ -63,6 +64,7 @@ struct SessionsTemplate {
     options: FilterOptions,
     show_origins: bool,
     pagination: Pagination,
+    search: Option<String>,
     from: Option<String>,
     to: Option<String>,
     timezone: String,
@@ -172,6 +174,35 @@ async fn sessions(
     .map_err(|error| WebError::database("load sessions", error))?;
     let has_next = rows.len() > SESSION_PAGE_SIZE;
     rows.truncate(SESSION_PAGE_SIZE);
+    if let Some(search) = filters.q.as_deref() {
+        let session_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+        let matches = queries::search_matches(&state.pool, &session_ids, search)
+            .await
+            .map_err(|error| WebError::database("load transcript search previews", error))?;
+        for row in &mut rows {
+            let candidates: Vec<_> = matches
+                .iter()
+                .filter(|candidate| candidate.session_id == row.id)
+                .collect();
+            let selected = candidates
+                .iter()
+                .copied()
+                .find(|candidate| {
+                    crate::sources::classify_message(
+                        &row.agent_kind,
+                        &candidate.role,
+                        &candidate.content_prefix,
+                        true,
+                    )
+                    .is_none()
+                })
+                .or_else(|| candidates.first().copied());
+            if let Some(selected) = selected {
+                row.match_sequence = Some(selected.sequence);
+                row.match_snippet = Some(crate::search::highlighted_html(&selected.snippet));
+            }
+        }
+    }
     let pagination = Pagination {
         page,
         previous_href: (page > 1).then(|| filters.href(page - 1)),
@@ -183,6 +214,7 @@ async fn sessions(
             options,
             show_origins,
             pagination,
+            search: filters.q.clone(),
             from: filters.from.clone(),
             to: filters.to.clone(),
             timezone: state.projects.timezone().to_owned(),
@@ -201,7 +233,11 @@ async fn sessions(
 
 impl Filters {
     fn normalize(&mut self) {
+        if let Some(search) = &mut self.q {
+            *search = search.trim().to_owned();
+        }
         for value in [
+            &mut self.q,
             &mut self.host,
             &mut self.user,
             &mut self.model,
@@ -219,6 +255,13 @@ impl Filters {
     }
 
     fn validate(&self) -> Result<(), WebError> {
+        if self
+            .q
+            .as_deref()
+            .is_some_and(|query| query.chars().count() > crate::search::MAX_QUERY_CHARS)
+        {
+            return Err(WebError::invalid_filters());
+        }
         for value in [self.from.as_deref(), self.to.as_deref()]
             .into_iter()
             .flatten()
@@ -239,7 +282,8 @@ impl Filters {
     }
 
     fn has_active(&self) -> bool {
-        self.host.is_some()
+        self.q.is_some()
+            || self.host.is_some()
             || self.user.is_some()
             || self.model.is_some()
             || self.status.is_some()
@@ -260,6 +304,7 @@ impl Filters {
 
     fn as_query(&self) -> SessionFilters<'_> {
         SessionFilters {
+            search: self.q.as_deref(),
             host: self.host.as_deref(),
             user: self.user.as_deref(),
             model: self.model.as_deref(),
@@ -639,6 +684,8 @@ mod tests {
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
                 message_count: 5,
+                match_sequence: None,
+                match_snippet: None,
             },
             segments: group_transcript(messages),
             show_origin: true,
@@ -687,6 +734,8 @@ mod tests {
                     hostname: "synthetic-host".into(),
                     os_user: "synthetic-user".into(),
                     message_count: messages.len() as i64,
+                    match_sequence: None,
+                    match_snippet: None,
                 },
                 segments: group_transcript(messages),
                 show_origin: true,
@@ -855,6 +904,8 @@ mod tests {
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
                 message_count: 2,
+                match_sequence: None,
+                match_snippet: None,
             }],
             options: FilterOptions {
                 hosts: select_options(vec!["fixture-host".into()], Some("fixture-host")),
@@ -871,6 +922,7 @@ mod tests {
                 previous_href: None,
                 next_href: None,
             },
+            search: None,
             from: None,
             to: None,
             timezone: "+00:00".into(),
@@ -907,6 +959,7 @@ mod tests {
     #[test]
     fn pagination_links_encode_and_preserve_active_filters() {
         let filters = Filters {
+            q: Some("needle text".into()),
             host: Some("host name".into()),
             user: Some("user/name".into()),
             model: Some("model &+".into()),
@@ -921,7 +974,7 @@ mod tests {
 
         assert_eq!(
             filters.href(3),
-            "/sessions?host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&from=2026-01-01&to=2026-01-31&page=3"
+            "/sessions?q=needle%20text&host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&from=2026-01-01&to=2026-01-31&page=3"
         );
     }
 

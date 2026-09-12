@@ -5,6 +5,8 @@ pub(super) const SESSION_PAGE_SIZE: usize = 50;
 pub(super) const TRANSCRIPT_SECTION_SIZE: usize = 50;
 pub(super) const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
 pub(super) const MESSAGE_CHUNK_CHARS: i64 = 16_384;
+const SEARCH_CANDIDATES_PER_SESSION: i64 = 8;
+const SEARCH_SNIPPET_CHARS: i64 = 512;
 
 #[derive(FromRow)]
 pub(super) struct SessionRow {
@@ -23,6 +25,8 @@ pub(super) struct SessionRow {
     pub(super) hostname: String,
     pub(super) os_user: String,
     pub(super) message_count: i64,
+    pub(super) match_sequence: Option<i64>,
+    pub(super) match_snippet: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -53,6 +57,16 @@ pub(super) struct SessionFilters<'a> {
     pub(super) archive: Option<&'a str>,
     pub(super) from: Option<&'a str>,
     pub(super) to: Option<&'a str>,
+    pub(super) search: Option<&'a str>,
+}
+
+#[derive(FromRow)]
+pub(super) struct SearchMatchRow {
+    pub(super) session_id: i64,
+    pub(super) sequence: i64,
+    pub(super) role: String,
+    pub(super) content_prefix: String,
+    pub(super) snippet: String,
 }
 
 pub(super) struct FilterValues {
@@ -77,7 +91,7 @@ pub(super) async fn sessions(
     );
     push_project_case(&mut query, projects);
     query.push(
-        " project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE (a.kind<>",
+        " project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE (a.kind<>",
     );
     query
         .push_bind(model_exclusion.source_kind)
@@ -103,12 +117,59 @@ pub(super) async fn sessions(
         .push(")");
     push_date_boundary(&mut query, filters.from, projects.timezone(), ">=");
     push_date_boundary(&mut query, filters.to, projects.timezone(), "<=");
+    if let Some(search) = filters.search {
+        query
+            .push(" AND (instr(lower(COALESCE(s.title,'')),lower(")
+            .push_bind(search)
+            .push("))>0 OR instr(lower(s.external_id),lower(")
+            .push_bind(search)
+            .push("))>0 OR instr(lower(COALESCE((");
+        push_project_case(&mut query, projects);
+        query
+            .push("),'')),lower(")
+            .push_bind(search)
+            .push("))>0 OR s.id IN (SELECT session_id FROM message_search WHERE message_search MATCH ")
+            .push_bind(crate::search::fts_query(search))
+            .push("))");
+    }
     query
         .push(" ORDER BY julianday(COALESCE(s.ended_at,s.started_at)) DESC,s.stable_id DESC LIMIT ")
         .push_bind((SESSION_PAGE_SIZE + 1) as i64)
         .push(" OFFSET ")
         .push_bind(offset);
     query.build_query_as::<SessionRow>().fetch_all(pool).await
+}
+
+pub(super) async fn search_matches(
+    pool: &SqlitePool,
+    session_ids: &[i64],
+    search: &str,
+) -> Result<Vec<SearchMatchRow>, sqlx::Error> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "WITH candidates AS (SELECT session_id,sequence,role,substr(content,1,",
+    );
+    query
+        .push_bind(MESSAGE_PREVIEW_CHARS)
+        .push(") content_prefix,substr(snippet(message_search,0,char(30),char(31),' … ',24),1,")
+        .push_bind(SEARCH_SNIPPET_CHARS)
+        .push(") snippet,rank FROM message_search WHERE message_search MATCH ")
+        .push_bind(crate::search::fts_query(search))
+        .push(" AND session_id IN (");
+    let mut separated = query.separated(",");
+    for session_id in session_ids {
+        separated.push_bind(session_id);
+    }
+    separated.push_unseparated(") ), ranked AS (SELECT session_id,sequence,role,content_prefix,snippet,row_number() OVER (PARTITION BY session_id ORDER BY rank,sequence) position FROM candidates) SELECT session_id,sequence,role,content_prefix,snippet FROM ranked WHERE position<=");
+    query
+        .push_bind(SEARCH_CANDIDATES_PER_SESSION)
+        .push(" ORDER BY session_id,position");
+    query
+        .build_query_as::<SearchMatchRow>()
+        .fetch_all(pool)
+        .await
 }
 
 pub(super) async fn filter_values(
@@ -198,7 +259,7 @@ pub(super) async fn session(
     );
     push_project_case(&mut query, projects);
     query
-        .push(" project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE s.stable_id=")
+        .push(" project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE s.stable_id=")
         .push_bind(stable_id)
         .push(" AND (a.kind<>")
         .push_bind(model_exclusion.source_kind)

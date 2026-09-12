@@ -114,6 +114,7 @@ pub(super) struct Pagination {
 pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
     let mut pairs = Vec::new();
     for (name, value) in [
+        ("q", filters.search),
         ("host", filters.host),
         ("user", filters.user),
         ("model", filters.model),

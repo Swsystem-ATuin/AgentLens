@@ -4,6 +4,7 @@ mod fingerprint;
 mod identity;
 mod ingest;
 mod projects;
+mod search;
 mod sources;
 mod web;
 

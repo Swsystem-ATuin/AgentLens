@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Session and transcript search now combines literal title/native-ID/project matching with a disposable SQLite FTS5 transcript index. Results preserve all filters and pagination, show bounded escaped previews linked to matching messages, prefer ordinary conversation over setup matches, and automatically backfill existing indexes. Full rebuilds bulk-build FTS before publication; documented synthetic measurements show the resulting rebuild and storage overhead.
+
 - The sessions browser now supports optional host-aware project and subproject grouping, agent/project/archive/date filters, last-observed activity, and stable activity ordering. Project configuration is read-only and runtime-loaded, with POSIX and drive-letter Windows path support, an explicit fixed-offset display timezone, preserved filter pagination, and clear empty-result states.
 
 - Transcript URLs now use reproducible source-scoped session IDs instead of disposable SQLite row IDs, remaining stable across rebuilds while preventing collisions between copied homes with the same native session ID. Session pages and lists show readable titles from streamed optional Codex advisory metadata, bounded conversation text, or native IDs, with automatic legacy-index migration.

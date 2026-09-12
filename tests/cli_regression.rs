@@ -129,8 +129,8 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
             )
             .await
             .unwrap();
-        let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),(SELECT count(*) FROM ingest_runs)").fetch_one(&pool).await.unwrap();
-        assert_eq!(counts, (1, 2, 1));
+        let counts: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),(SELECT count(*) FROM ingest_runs),(SELECT count(*) FROM message_search WHERE message_search MATCH 'redacted')").fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (1, 2, 1, 2));
         let hash: String = sqlx::query_scalar("SELECT content_hash FROM source_files")
             .fetch_one(&pool)
             .await
