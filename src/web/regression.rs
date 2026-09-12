@@ -107,6 +107,53 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
     (dir, app)
 }
 
+async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "
+        INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+        INSERT INTO hosts VALUES(1,'host');
+        INSERT INTO users VALUES(1,1,'user');
+        INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
+        INSERT INTO sessions(id,instance_id,external_id,started_at,model,status,cwd)
+          VALUES(1,1,'long-session','2026-01-01','model','complete','/synthetic');
+        ",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    for sequence in 0..=105_i64 {
+        let role = if sequence == 0 {
+            "developer"
+        } else if sequence % 2 == 0 {
+            "user"
+        } else {
+            "assistant"
+        };
+        let content = if sequence == 0 {
+            format!("<skills_instructions>{}TAIL", "&".repeat(20_000))
+        } else {
+            format!("message-{sequence}")
+        };
+        sqlx::query("INSERT INTO messages(session_id,sequence,role,content) VALUES(1,?,?,?)")
+            .bind(sequence)
+            .bind(role)
+            .bind(content)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
 async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
     let response = app
         .clone()
@@ -245,6 +292,70 @@ fn assert_session_order(html: &str, expected: impl IntoIterator<Item = i64>) {
 }
 
 #[tokio::test]
+async fn long_transcripts_use_bounded_sections_and_lazy_message_parts() {
+    let (_dir, app) = bounded_transcript_app().await;
+
+    let (status, first) = get(&app, "/sessions/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("<details class=\"message").count(), 50);
+    assert!(
+        first.len() < 128 * 1024,
+        "response was {} bytes",
+        first.len()
+    );
+    assert!(first.contains("message-49"));
+    assert!(!first.contains("message-50"));
+    assert!(!first.contains("TAIL"));
+    assert!(first.contains(
+        "<details class=\"message developer\"><summary><strong>Available skills</strong>"
+    ));
+    assert!(first.contains("href=\"/sessions/1/messages/0\""));
+    assert!(first.contains("rel=\"next\" href=\"/sessions/1?section=2\""));
+    assert!(!first.contains("rel=\"prev\""));
+
+    let (status, second) = get(&app, "/sessions/1?section=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(second.find("message-50").unwrap() < second.find("message-99").unwrap());
+    assert!(!second.contains("message-100"));
+    assert!(second.contains("rel=\"prev\" href=\"/sessions/1?section=1\""));
+    assert!(second.contains("rel=\"next\" href=\"/sessions/1?section=3\""));
+
+    let (status, third) = get(&app, "/sessions/1?section=3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(third.find("message-100").unwrap() < third.find("message-105").unwrap());
+    assert!(!third.contains("rel=\"next\""));
+
+    let (status, part_one) = get(&app, "/sessions/1/messages/0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(part_one.len() < 128 * 1024);
+    assert!(!part_one.contains("TAIL"));
+    assert!(part_one.contains("rel=\"next\" href=\"/sessions/1/messages/0?part=2\""));
+    assert!(part_one.contains("href=\"/sessions/1?section=1\""));
+
+    let (status, part_two) = get(&app, "/sessions/1/messages/0?part=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(part_two.len() < 128 * 1024);
+    assert!(part_two.contains("TAIL"));
+    assert!(part_two.contains("rel=\"prev\""));
+    assert!(!part_two.contains("rel=\"next\""));
+
+    for path in [
+        "/sessions/1?section=0",
+        "/sessions/1?section=100001",
+        "/sessions/1?section=invalid",
+        "/sessions/1/messages/0?part=0",
+        "/sessions/1/messages/0?part=3",
+        "/sessions/1/messages/0?part=invalid",
+    ] {
+        assert_eq!(get(&app, path).await.0, StatusCode::BAD_REQUEST, "{path}");
+    }
+    assert_eq!(
+        get(&app, "/sessions/1/messages/999").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() {
     let (_dir, app) = seeded_app().await;
     let (status, html) = get(&app, "/sessions/1").await;
@@ -347,6 +458,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 message(3, "assistant", "next reply"),
             ]),
             show_origin: true,
+            pagination: no_pagination(),
         }
         .render()
         .unwrap();
@@ -376,6 +488,15 @@ fn message(sequence: i64, role: &str, content: &str) -> MessageRow {
         timestamp: None,
         role: role.into(),
         content: content.into(),
+        content_truncated: false,
+    }
+}
+
+fn no_pagination() -> Pagination {
+    Pagination {
+        page: 1,
+        previous_href: None,
+        next_href: None,
     }
 }
 

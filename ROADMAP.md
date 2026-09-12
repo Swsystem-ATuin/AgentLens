@@ -41,7 +41,7 @@ These five items retain the original TODO acceptance criteria. The regression su
 
 - [x] **R1.2 — Paginate the sessions list.** Add bounded queries with stable ordering and navigation that preserves filters. Verify that larger datasets do not require loading every matching session for one page. Implemented with 50-row pages, a 51-row query ceiling for next-page detection, deterministic timestamp/ID ordering, safely encoded filter continuity, and rendered multi-page regressions.
 
-- [ ] **R1.3 — Load long transcripts in sections.** Bound database reads and rendered response size while preserving message order and sensible grouping across section boundaries. Collapsed content should not require transferring the entire transcript upfront.
+- [x] **R1.3 — Load long transcripts in sections.** Bound database reads and rendered response size while preserving message order and sensible grouping across section boundaries. Collapsed content should not require transferring the entire transcript upfront. Delivered with 50-message/51-row sections, bounded message previews, lazy message-part navigation, section-aware grouping, and [documented query and response limits](docs/transcript-sections.md).
 
 - [ ] **R1.4 — Separate source adapters from generic application logic.** Move Codex discovery, parsing, and setup-marker recognition into source-specific modules. Keep normalised events, indexing, queries, and presentation generic; preserve existing behavior with tests.
 

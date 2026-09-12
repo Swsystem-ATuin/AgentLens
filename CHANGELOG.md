@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Long transcripts now load in 50-message sections. Large message bodies use bounded previews and lazy 16,384-character parts, keeping transcript database reads and rendered responses bounded while retaining access to all indexed content.
+
 - The sessions list now uses 50-row pages with deterministic newest-first ordering and previous/next links that preserve active filters. Queries fetch at most 51 session rows to determine whether another page exists.
 
 - Rebuild and refresh can index one `.codex` home directly. Direct-home indexes omit host/user UI, repeated direct refreshes remain supported, and refresh rejects switching between hostless and host/user layouts without a rebuild.

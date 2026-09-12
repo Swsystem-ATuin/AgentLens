@@ -18,6 +18,9 @@ mod regression;
 const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const SESSION_PAGE_SIZE: usize = 50;
 const MAX_SESSION_PAGE: u32 = 100_000;
+const TRANSCRIPT_SECTION_SIZE: usize = 50;
+const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
+const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 
 #[derive(Clone)]
 struct AppState {
@@ -43,6 +46,7 @@ struct MessageRow {
     timestamp: Option<String>,
     role: String,
     content: String,
+    content_truncated: bool,
 }
 
 struct TranscriptSegment {
@@ -50,13 +54,21 @@ struct TranscriptSegment {
     timestamp: Option<String>,
     role: String,
     paragraphs: Vec<String>,
+    truncated_sequences: Vec<i64>,
     title: String,
     initially_open: bool,
 }
 
+#[cfg(test)]
 fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
+    group_transcript_section(messages, false)
+}
+
+fn group_transcript_section(
+    messages: Vec<MessageRow>,
+    mut conversation_started: bool,
+) -> Vec<TranscriptSegment> {
     let mut segments: Vec<TranscriptSegment> = Vec::new();
-    let mut conversation_started = false;
     for message in messages {
         let initialization_title =
             (message.role == "user" || message.role == "developer" || message.role == "system")
@@ -83,8 +95,16 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
             && previous.initially_open
         {
             previous.paragraphs.push(message.content);
+            if message.content_truncated {
+                previous.truncated_sequences.push(message.sequence);
+            }
             continue;
         }
+        let truncated_sequences = message
+            .content_truncated
+            .then_some(message.sequence)
+            .into_iter()
+            .collect();
         segments.push(TranscriptSegment {
             sequence: message.sequence,
             timestamp: message.timestamp,
@@ -95,6 +115,7 @@ fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
             initially_open: initialization_title.is_none(),
             role: message.role,
             paragraphs: vec![message.content],
+            truncated_sequences,
         });
     }
     segments
@@ -167,6 +188,34 @@ struct SessionTemplate {
     session: SessionRow,
     segments: Vec<TranscriptSegment>,
     show_origin: bool,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize, Default)]
+struct TranscriptQuery {
+    section: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+struct MessageQuery {
+    part: Option<u32>,
+}
+
+#[derive(FromRow)]
+struct MessageChunk {
+    sequence: i64,
+    timestamp: Option<String>,
+    role: String,
+    content: String,
+    total_chars: i64,
+}
+
+#[derive(Template)]
+#[template(path = "message.html")]
+struct MessageTemplate {
+    message: MessageChunk,
+    transcript_href: String,
+    pagination: Pagination,
 }
 
 fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
@@ -177,6 +226,7 @@ fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
         )
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", get(session))
+        .route("/sessions/{id}/messages/{sequence}", get(message))
         // Query strings can contain user-supplied private values. Keep request
         // spans useful without recording the URI in server diagnostics.
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -362,29 +412,113 @@ fn select_options(values: Vec<String>, selected: Option<&str>) -> Vec<FilterOpti
 async fn session(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
+    let section = bounded_page(query.section, "validate transcript section")?;
     let show_origin = show_origins(&state.pool).await?;
-    let row = sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
-               (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (s.model IS NULL OR s.model NOT LIKE ?)
-    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(&state.pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)?;
-    let messages = sqlx::query_as::<_, MessageRow>(
-        "SELECT sequence,timestamp,role,content FROM messages WHERE session_id=? ORDER BY sequence",
+    let row = load_session(&state.pool, id).await?;
+    let mut messages = sqlx::query_as::<_, MessageRow>(
+        "SELECT sequence,timestamp,role,substr(content,1,?) content,length(content)>? content_truncated \
+         FROM messages WHERE session_id=? ORDER BY sequence LIMIT ? OFFSET ?",
     )
+    .bind(MESSAGE_PREVIEW_CHARS)
+    .bind(MESSAGE_PREVIEW_CHARS)
     .bind(id)
+    .bind((TRANSCRIPT_SECTION_SIZE + 1) as i64)
+    .bind(i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64)
     .fetch_all(&state.pool)
     .await
-    .map_err(|error| WebError::database("load transcript", error))?;
+    .map_err(|error| WebError::database("load transcript section", error))?;
+    let has_next = messages.len() > TRANSCRIPT_SECTION_SIZE;
+    messages.truncate(TRANSCRIPT_SECTION_SIZE);
+    let pagination = Pagination {
+        page: section,
+        previous_href: (section > 1).then(|| transcript_href(id, section - 1)),
+        next_href: (has_next && section < MAX_SESSION_PAGE)
+            .then(|| transcript_href(id, section + 1)),
+    };
     Ok(Html(
         SessionTemplate {
             session: row,
-            segments: group_transcript(messages),
+            segments: group_transcript_section(messages, section > 1),
             show_origin,
+            pagination,
         }
         .render()
         .map_err(|error| WebError::template("render transcript", error))?,
     ))
+}
+
+async fn load_session(pool: &SqlitePool, id: i64) -> Result<SessionRow, WebError> {
+    sqlx::query_as::<_, SessionRow>(r#"
+        SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
+               (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
+        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (s.model IS NULL OR s.model NOT LIKE ?)
+    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)
+}
+
+async fn message(
+    State(state): State<AppState>,
+    Path((id, sequence)): Path<(i64, i64)>,
+    Query(query): Query<MessageQuery>,
+) -> Result<Html<String>, WebError> {
+    let part = bounded_page(query.part, "validate message part")?;
+    load_session(&state.pool, id).await?;
+    let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
+    let message = sqlx::query_as::<_, MessageChunk>(
+        "SELECT sequence,timestamp,role,substr(content,? + 1,?) content,length(content) total_chars \
+         FROM messages WHERE session_id=? AND sequence=?",
+    )
+    .bind(offset)
+    .bind(MESSAGE_CHUNK_CHARS)
+    .bind(id)
+    .bind(sequence)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| WebError::database("load message part", error))?
+    .ok_or_else(WebError::not_found)?;
+    if part > 1 && offset >= message.total_chars {
+        return Err(WebError::invalid_pagination("validate message part"));
+    }
+    let preceding: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM messages WHERE session_id=? AND sequence<?")
+            .bind(id)
+            .bind(sequence)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|error| WebError::database("locate message section", error))?;
+    let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    let pagination = Pagination {
+        page: part,
+        previous_href: (part > 1).then(|| message_href(id, sequence, part - 1)),
+        next_href: (offset + MESSAGE_CHUNK_CHARS < message.total_chars && part < MAX_SESSION_PAGE)
+            .then(|| message_href(id, sequence, part + 1)),
+    };
+    Ok(Html(
+        MessageTemplate {
+            message,
+            transcript_href: transcript_href(id, section as u32),
+            pagination,
+        }
+        .render()
+        .map_err(|error| WebError::template("render message part", error))?,
+    ))
+}
+
+fn bounded_page(page: Option<u32>, operation: &'static str) -> Result<u32, WebError> {
+    let page = page.unwrap_or(1);
+    if page == 0 || page > MAX_SESSION_PAGE {
+        return Err(WebError::invalid_pagination(operation));
+    }
+    Ok(page)
+}
+
+fn transcript_href(id: i64, section: u32) -> String {
+    format!("/sessions/{id}?section={section}")
+}
+
+fn message_href(id: i64, sequence: i64, part: u32) -> String {
+    format!("/sessions/{id}/messages/{sequence}?part={part}")
 }
 
 struct WebError {
@@ -406,10 +540,14 @@ impl WebError {
     }
 
     fn invalid_page() -> Self {
+        Self::invalid_pagination("validate session page")
+    }
+
+    fn invalid_pagination(operation: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             public_message: "invalid page",
-            operation: "validate session page",
+            operation,
             error_kind: "invalid_input",
             error_code: None,
         }
@@ -502,6 +640,7 @@ mod tests {
             "/",
             "/sessions",
             "/sessions/1",
+            "/sessions/1/messages/0",
             "/sessions/invalid",
             "/missing",
         ] {
@@ -605,6 +744,7 @@ mod tests {
             },
             segments: group_transcript(messages),
             show_origin: true,
+            pagination: no_pagination(),
         }
         .render()
         .expect("template should render");
@@ -647,6 +787,7 @@ mod tests {
                 },
                 segments: group_transcript(messages),
                 show_origin: true,
+                pagination: no_pagination(),
             }
             .render()
             .expect("transcript should render");
@@ -732,24 +873,28 @@ mod tests {
                 timestamp: Some("2026-01-01T00:00:00Z".into()),
                 role: "user".into(),
                 content: "question".into(),
+                content_truncated: false,
             },
             MessageRow {
                 sequence: 11,
                 timestamp: Some("2026-01-01T00:00:01Z".into()),
                 role: "assistant".into(),
                 content: "first reply".into(),
+                content_truncated: false,
             },
             MessageRow {
                 sequence: 12,
                 timestamp: Some("2026-01-01T00:00:02Z".into()),
                 role: "assistant".into(),
                 content: "second reply".into(),
+                content_truncated: false,
             },
             MessageRow {
                 sequence: 13,
                 timestamp: None,
                 role: "user".into(),
                 content: "follow-up".into(),
+                content_truncated: false,
             },
         ];
 
@@ -758,6 +903,17 @@ mod tests {
         assert_eq!(segments[1].role, "assistant");
         assert_eq!(segments[1].paragraphs, ["first reply", "second reply"]);
         assert_eq!(segments[2].paragraphs, ["follow-up"]);
+    }
+
+    #[test]
+    fn later_sections_do_not_reclassify_conversation_as_initial_setup() {
+        let segments = group_transcript_section(
+            vec![message(50, "user", "You are seeing ordinary conversation")],
+            true,
+        );
+
+        assert_eq!(segments[0].title, "user");
+        assert!(segments[0].initially_open);
     }
 
     #[test]
@@ -872,6 +1028,15 @@ mod tests {
             timestamp: None,
             role: role.into(),
             content: content.into(),
+            content_truncated: false,
+        }
+    }
+
+    fn no_pagination() -> Pagination {
+        Pagination {
+            page: 1,
+            previous_href: None,
+            next_href: None,
         }
     }
 }
