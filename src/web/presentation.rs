@@ -1,4 +1,4 @@
-use super::queries::{FilterValues, MessageRow};
+use super::queries::{FilterValues, MessageRow, SessionFilters};
 
 pub(super) struct TranscriptSegment {
     pub(super) sequence: i64,
@@ -76,21 +76,21 @@ pub(super) struct FilterOptions {
     pub(super) users: Vec<FilterOption>,
     pub(super) models: Vec<FilterOption>,
     pub(super) statuses: Vec<FilterOption>,
+    pub(super) agents: Vec<FilterOption>,
+    pub(super) projects: Vec<FilterOption>,
+    pub(super) archives: Vec<FilterOption>,
 }
 
 impl FilterOptions {
-    pub(super) fn new(
-        values: FilterValues,
-        host: Option<&str>,
-        user: Option<&str>,
-        model: Option<&str>,
-        status: Option<&str>,
-    ) -> Self {
+    pub(super) fn new(values: FilterValues, selected: &SessionFilters<'_>) -> Self {
         Self {
-            hosts: select_options(values.hosts, host),
-            users: select_options(values.users, user),
-            models: select_options(values.models, model),
-            statuses: select_options(values.statuses, status),
+            hosts: select_options(values.hosts, selected.host),
+            users: select_options(values.users, selected.user),
+            models: select_options(values.models, selected.model),
+            statuses: select_options(values.statuses, selected.status),
+            agents: select_options(values.agents, selected.agent),
+            projects: select_options(values.projects, selected.project),
+            archives: select_options(values.archives, selected.archive),
         }
     }
 }
@@ -111,19 +111,18 @@ pub(super) struct Pagination {
     pub(super) next_href: Option<String>,
 }
 
-pub(super) fn sessions_href(
-    host: Option<&str>,
-    user: Option<&str>,
-    model: Option<&str>,
-    status: Option<&str>,
-    page: u32,
-) -> String {
+pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
     let mut pairs = Vec::new();
     for (name, value) in [
-        ("host", host),
-        ("user", user),
-        ("model", model),
-        ("status", status),
+        ("host", filters.host),
+        ("user", filters.user),
+        ("model", filters.model),
+        ("status", filters.status),
+        ("agent", filters.agent),
+        ("project", filters.project),
+        ("archive", filters.archive),
+        ("from", filters.from),
+        ("to", filters.to),
     ] {
         if let Some(value) = value {
             pairs.push(format!("{name}={}", percent_encode(value)));

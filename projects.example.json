@@ -1,0 +1,16 @@
+{
+  "timezone": "+00:00",
+  "projects": [
+    {
+      "name": "Example project",
+      "host": "example-host",
+      "root": "/srv/example-project",
+      "subprojects": [
+        {
+          "name": "Web",
+          "path": "apps/web"
+        }
+      ]
+    }
+  ]
+}

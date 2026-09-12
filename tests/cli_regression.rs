@@ -8,6 +8,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .current_dir(root)
         .env_remove("AGENT_LENS_DB")
         .env_remove("AGENT_LENS_AUTH_FILE")
+        .env_remove("AGENT_LENS_PROJECTS_FILE")
         .args(args)
         .output()
         .unwrap()
@@ -22,6 +23,35 @@ fn serve_help_documents_loopback_port_and_authentication_options() {
     assert!(output.contains("127.0.0.1:3001"));
     assert!(output.contains("--auth-file"));
     assert!(output.contains("AGENT_LENS_AUTH_FILE"));
+    assert!(output.contains("--projects-file"));
+    assert!(output.contains("AGENT_LENS_PROJECTS_FILE"));
+}
+
+#[test]
+fn invalid_project_configuration_fails_before_opening_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("auth.json"),
+        r#"{"username":"synthetic","password":"password"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("projects.json"),
+        r#"{"timezone":"named/zone"}"#,
+    )
+    .unwrap();
+    let result = run(
+        dir.path(),
+        &[
+            "serve",
+            "--auth-file",
+            "auth.json",
+            "--projects-file",
+            "projects.json",
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
 }
 
 #[test]
@@ -268,7 +298,7 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
     let pool = sqlx::SqlitePool::connect_with(options.clone())
         .await
         .unwrap();
-    sqlx::raw_sql("DROP INDEX idx_agent_instances_source_key; DROP INDEX idx_sessions_stable_id; ALTER TABLE agent_instances DROP COLUMN source_key; ALTER TABLE sessions DROP COLUMN stable_id; ALTER TABLE sessions DROP COLUMN derived_title; ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version; ALTER TABLE ingest_runs DROP COLUMN source_layout;").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP INDEX idx_agent_instances_source_key; DROP INDEX idx_sessions_activity_stable; DROP INDEX idx_sessions_stable_id; ALTER TABLE agent_instances DROP COLUMN source_key; ALTER TABLE sessions DROP COLUMN stable_id; ALTER TABLE sessions DROP COLUMN derived_title; ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version; ALTER TABLE ingest_runs DROP COLUMN source_layout;").execute(&pool).await.unwrap();
     pool.close().await;
     let result = run(dir.path(), &args);
     assert!(

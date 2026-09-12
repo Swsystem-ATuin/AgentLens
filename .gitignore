@@ -7,3 +7,5 @@
 
 /auth.local.json
 /auth.local.json.*
+/projects.local.json
+/projects.local.json.*

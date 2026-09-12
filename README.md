@@ -12,10 +12,11 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
 - Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes remain distinct. Session lists show readable titles from valid Codex advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).
+- Groups working directories into optional host-aware projects and subprojects at request time. The sessions browser includes agent, project, archive-state, and inclusive activity-date filters alongside host, user, model, and status; it displays last observed activity and uses stable activity/public-ID ordering. See [project navigation and date semantics](docs/projects.md).
 - Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Streams each rollout in two record-at-a-time passes while batching index writes transactionally, bounding memory to individual record size instead of total transcript size. See [bounded rollout ingestion](docs/ingestion-memory.md).
-- Provides a sessions list with known host, user, model, and status values as dropdown filters and 50-session pages with stable newest-first navigation that preserves active filters. The [bounded transcript reader](docs/transcript-sections.md) loads 50-message sections, lazily chunks unusually large messages, minimizes recognized initialization sections, and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
+- Provides a sessions list with known filter values and 50-session pages with stable last-activity navigation that preserves every active filter. The [bounded transcript reader](docs/transcript-sections.md) loads 50-message sections, lazily chunks unusually large messages, minimizes recognized initialization sections, and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
 - Derives each session's coarse lifecycle status from source-record order. Later completion or interruption events win; subsequent turn or user activity resets an earlier terminal outcome to `unknown`, which does not imply the copied session is currently running. See [session status semantics](docs/session-status.md).
 
 Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidden from the sessions list, model dropdown, and direct transcript URLs. Their indexed data is retained. Restart the server after updating; no refresh or rebuild is required for this visibility rule.
@@ -72,9 +73,18 @@ Start the web server:
 cargo run -- serve
 ```
 
+To enable project grouping, copy and edit the safe example, then pass it when serving:
+
+```bash
+cp projects.example.json projects.local.json
+cargo run -- serve --projects-file projects.local.json
+```
+
+`AGENT_LENS_PROJECTS_FILE` provides the same override. Project configuration is loaded only by the web server, never written into copied agent homes, and does not require a refresh or rebuild. Restart the server after editing it.
+
 The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>. Use `--bind` to select another address. Your browser will prompt for the configured username and password before any page is accessible.
 
-Authentication is required for every route, including direct transcript URLs. Missing, malformed, or empty credentials prevent startup. Responses use `Cache-Control: no-store`. Credentials are loaded at startup; restart after changing them. Browsers may retain Basic authentication credentials until closed; there is no application logout button.
+Authentication is required for every route, including direct transcript URLs. Missing, malformed, or empty credentials prevent startup. Responses use `Cache-Control: no-store`. Credentials and optional project configuration are loaded at startup; restart after changing them. Browsers may retain Basic authentication credentials until closed; there is no application logout button.
 
 To use a file outside the checkout, pass `--auth-file /path/to/auth.json` after `serve`, or set `AGENT_LENS_AUTH_FILE`. Protect that file with owner-only permissions and keep it out of source control. Refresh and rebuild commands do not require credentials. The checkpoint schema upgrade is automatic; no manual migration is needed.
 

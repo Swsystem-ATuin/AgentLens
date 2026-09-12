@@ -72,6 +72,60 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
     (dir, app)
 }
 
+async fn navigation_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Codex'),(2,'other-agent','Other agent');
+        INSERT INTO hosts VALUES(1,'linux'),(2,'windows');
+        INSERT INTO users VALUES(1,1,'user'),(2,2,'user');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home,source_key) VALUES
+          (1,1,1,'linux-home','source-linux'),(2,2,2,'windows-home','source-windows');
+        INSERT INTO ingest_runs(id,finished_at,status,source_layout) VALUES(1,CURRENT_TIMESTAMP,'complete','host-user');
+        INSERT INTO source_files(id,instance_id,ingest_run_id,path,kind,parse_status) VALUES
+          (1,1,1,'active-one','sessions','ok'),
+          (2,1,1,'archived-two','archived_sessions','ok'),
+          (3,2,1,'active-three','sessions','ok'),
+          (4,2,1,'active-four','sessions','ok'),
+          (5,1,1,'active-offset','sessions','ok');
+        INSERT INTO sessions(id,instance_id,source_file_id,external_id,stable_id,title,started_at,ended_at,cwd,model,status) VALUES
+          (1,1,1,'one','session-one','Root work','2026-01-01T22:00:00Z','2026-01-01T23:30:00Z','/work/mono/docs','model-a','complete'),
+          (2,1,2,'two','session-two','API work','2026-01-02T10:00:00Z',NULL,'/work/mono/services/api/src','model-a','complete'),
+          (3,2,3,'three','session-z','Windows newest Z','2026-01-03T12:00:00Z',NULL,'C:\Work\Repo\Apps\UI\src','model-b','unknown'),
+          (4,2,4,'four','session-a','Windows newest A','2026-01-03T12:00:00Z',NULL,'c:/work/repo/other','model-b','unknown'),
+          (5,2,NULL,'five','session-missing','Missing metadata',NULL,NULL,NULL,NULL,NULL),
+          (6,1,5,'six','session-offset','Offset timestamp','2026-01-03T13:00:00+02:00',NULL,'/work/mono/offset','model-a','complete');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let projects_path = dir.path().join("projects.json");
+    std::fs::write(
+        &projects_path,
+        r#"{
+          "timezone":"+01:00",
+          "projects":[
+            {"name":"Mono","host":"linux","root":"/work/mono","subprojects":[{"name":"API","path":"services/api"}]},
+            {"name":"Windows Repo","host":"windows","root":"C:\\Work\\Repo","subprojects":[{"name":"UI","path":"Apps\\UI"}]}
+          ]
+        }"#,
+    )
+    .unwrap();
+    let projects = crate::projects::ProjectConfig::load(Some(&projects_path)).unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router_with_projects(
+        pool,
+        crate::auth::Credentials::load(&auth).unwrap(),
+        projects,
+    );
+    (dir, app)
+}
+
 async fn paginated_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -96,7 +150,7 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
         )
         .bind(id)
         .bind(format!("session-{id}"))
-        .bind(id.to_string())
+        .bind(format!("{id:03}"))
         .bind(format!("Session {id}"))
         .execute(&mut *transaction)
         .await
@@ -228,6 +282,83 @@ async fn filters_query_real_rows_individually_together_and_with_literal_input() 
 }
 
 #[tokio::test]
+async fn projects_dates_archives_and_agents_filter_rendered_sessions() {
+    let (_dir, app) = navigation_app().await;
+    let (status, all) = get(&app, "/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(all.contains("<td>Mono</td>"));
+    assert!(all.contains("<td>Mono / API</td>"));
+    assert!(all.contains("<td>Windows Repo / UI</td>"));
+    assert!(all.contains("<option value=\"Mono / API\">Mono / API</option>"));
+    assert!(all.contains("Missing metadata"));
+    assert!(all.contains("Dates in UTC+01:00"));
+    assert!(all.find("/sessions/session-z").unwrap() < all.find("/sessions/session-a").unwrap());
+    assert!(all.find("/sessions/session-a").unwrap() < all.find("/sessions/session-two").unwrap());
+    assert!(
+        all.find("/sessions/session-a").unwrap() < all.find("/sessions/session-offset").unwrap(),
+        "sorting must compare timestamp instants rather than raw offsets"
+    );
+    assert!(
+        all.contains("2026-01-01T23:30:00Z"),
+        "last activity must render"
+    );
+
+    for (query, expected, absent) in [
+        ("?project=Mono", "session-one", "session-two"),
+        ("?project=Mono%20%2F%20API", "session-two", "session-one"),
+        ("?archive=archived", "session-two", "session-one"),
+        (
+            "?agent=other-agent&archive=active",
+            "session-z",
+            "session-one",
+        ),
+        (
+            "?host=windows&project=Windows%20Repo%20%2F%20UI&agent=other-agent&archive=active",
+            "session-z",
+            "session-a",
+        ),
+        ("?from=2026-01-02&to=2026-01-02", "session-two", "session-z"),
+    ] {
+        let (status, html) = get(&app, &format!("/sessions{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert!(
+            html.contains(&format!("/sessions/{expected}")),
+            "{query}: {html}"
+        );
+        assert!(
+            !html.contains(&format!("/sessions/{absent}")),
+            "{query}: {html}"
+        );
+    }
+    let (_, local_boundary) = get(&app, "/sessions?from=2026-01-02&to=2026-01-02").await;
+    assert!(
+        local_boundary.contains("/sessions/session-one"),
+        "23:30Z belongs to the next date at UTC+01:00"
+    );
+    assert!(!local_boundary.contains("Missing metadata"));
+
+    let (_, empty) = get(&app, "/sessions?project=does-not-exist").await;
+    assert!(empty.contains("No sessions match these filters."));
+    for query in [
+        "?from=2026-02-30",
+        "?to=not-a-date",
+        "?from=2026-02-02&to=2026-02-01",
+    ] {
+        assert_eq!(
+            get(&app, &format!("/sessions{query}")).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+
+    let (status, transcript) = get(&app, "/sessions/session-z").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(transcript.contains("Windows Repo / UI"));
+    assert!(transcript.contains("other-agent"));
+    assert!(transcript.contains("active"));
+}
+
+#[tokio::test]
 async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
     let (_dir, app) = paginated_app().await;
 
@@ -240,24 +371,25 @@ async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
         first.len()
     );
     assert_session_order(&first, (56..=105).rev());
-    assert!(!first.contains("href=\"/sessions/55\""));
+    assert!(!first.contains("href=\"/sessions/055\""));
     assert!(!first.contains("rel=\"prev\""));
     assert!(first.contains("rel=\"next\" href=\"/sessions?page=2\""));
     assert!(first.contains("Page 1"));
 
-    let encoded_filter = "model=model%20%26%2F%2B";
+    let encoded_filter = "host=host%20name&user=user%2Fname&model=model%20%26%2F%2B&agent=codex&archive=unknown&from=2026-01-01&to=2026-01-01";
+    let escaped_filter = encoded_filter.replace('&', "&#38;");
     let (status, second) = get(&app, &format!("/sessions?{encoded_filter}&page=2")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second.matches("<a href=\"/sessions/").count(), 50);
     assert_session_order(&second, (6..=55).rev());
     assert!(
         second.contains(&format!(
-            "rel=\"prev\" href=\"/sessions?{encoded_filter}&#38;page=1\""
+            "rel=\"prev\" href=\"/sessions?{escaped_filter}&#38;page=1\""
         )),
         "{second}"
     );
     assert!(second.contains(&format!(
-        "rel=\"next\" href=\"/sessions?{encoded_filter}&#38;page=3\""
+        "rel=\"next\" href=\"/sessions?{escaped_filter}&#38;page=3\""
     )));
     assert!(second.contains("<option value=\"model &#38;/+\" selected>"));
     assert!(second.contains("Page 2"));
@@ -283,7 +415,7 @@ fn assert_session_order(html: &str, expected: impl IntoIterator<Item = i64>) {
     let mut previous = None;
     for id in expected {
         let position = html
-            .find(&format!("href=\"/sessions/{id}\""))
+            .find(&format!("href=\"/sessions/{id:03}\""))
             .unwrap_or_else(|| panic!("missing session {id}"));
         assert!(
             previous.is_none_or(|last| last < position),
@@ -454,10 +586,12 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 external_id: "synthetic".into(),
                 title: "Synthetic title".into(),
                 started_at: None,
-                ended_at: None,
+                last_activity: None,
                 model: None,
                 status: None,
                 cwd: None,
+                project: None,
+                archive_state: "unknown".into(),
                 hostname: "host".into(),
                 os_user: "user".into(),
                 message_count: 4,

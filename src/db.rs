@@ -119,6 +119,10 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .execute(&mut *migration)
         .await
         .context("index session identities")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_activity_stable ON sessions(julianday(COALESCE(ended_at,started_at)) DESC,stable_id DESC)")
+        .execute(&mut *migration)
+        .await
+        .context("index stable session activity order")?;
     migration.commit().await?;
     Ok(pool)
 }

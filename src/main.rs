@@ -3,6 +3,7 @@ mod db;
 mod fingerprint;
 mod identity;
 mod ingest;
+mod projects;
 mod sources;
 mod web;
 
@@ -37,6 +38,9 @@ enum Command {
         bind: String,
         #[arg(long, env = "AGENT_LENS_AUTH_FILE", default_value = "auth.local.json")]
         auth_file: PathBuf,
+        /// Optional project roots and display timezone JSON file.
+        #[arg(long, env = "AGENT_LENS_PROJECTS_FILE")]
+        projects_file: Option<PathBuf>,
     },
 }
 
@@ -88,10 +92,15 @@ async fn main() -> Result<()> {
                 report.removed_files
             );
         }
-        Command::Serve { bind, auth_file } => {
+        Command::Serve {
+            bind,
+            auth_file,
+            projects_file,
+        } => {
             let credentials = auth::Credentials::load(&auth_file)?;
+            let projects = projects::ProjectConfig::load(projects_file.as_deref())?;
             let pool = db::open(&cli.database).await?;
-            web::serve(pool, &bind, credentials).await?;
+            web::serve(pool, &bind, credentials, projects).await?;
         }
     }
     Ok(())

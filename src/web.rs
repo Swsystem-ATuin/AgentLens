@@ -34,6 +34,7 @@ const MAX_SESSION_PAGE: u32 = 100_000;
 #[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
+    projects: crate::projects::ProjectConfig,
 }
 
 #[cfg(test)]
@@ -47,6 +48,11 @@ struct Filters {
     user: Option<String>,
     model: Option<String>,
     status: Option<String>,
+    agent: Option<String>,
+    project: Option<String>,
+    archive: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
     page: Option<u32>,
 }
 
@@ -57,6 +63,10 @@ struct SessionsTemplate {
     options: FilterOptions,
     show_origins: bool,
     pagination: Pagination,
+    from: Option<String>,
+    to: Option<String>,
+    timezone: String,
+    empty_message: &'static str,
 }
 
 #[derive(Template)]
@@ -86,7 +96,16 @@ struct MessageTemplate {
     pagination: Pagination,
 }
 
+#[cfg(test)]
 fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
+    router_with_projects(pool, credentials, crate::projects::ProjectConfig::default())
+}
+
+fn router_with_projects(
+    pool: SqlitePool,
+    credentials: crate::auth::Credentials,
+    projects: crate::projects::ProjectConfig,
+) -> Router {
     Router::new()
         .route(
             "/",
@@ -102,7 +121,7 @@ fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
                 tracing::info_span!("http_request", method = %request.method())
             },
         ))
-        .with_state(AppState { pool })
+        .with_state(AppState { pool, projects })
         .layer(axum::middleware::from_fn_with_state(
             credentials,
             crate::auth::require_auth,
@@ -113,8 +132,9 @@ pub async fn serve(
     pool: SqlitePool,
     bind: &str,
     credentials: crate::auth::Credentials,
+    projects: crate::projects::ProjectConfig,
 ) -> Result<()> {
-    let app = router(pool, credentials);
+    let app = router_with_projects(pool, credentials, projects);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
@@ -128,6 +148,7 @@ async fn sessions(
     Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
+    filters.validate()?;
     let page = filters.page_number()?;
     let show_origins = queries::show_origins(&state.pool)
         .await
@@ -136,20 +157,15 @@ async fn sessions(
         filters.host = None;
         filters.user = None;
     }
-    let values = queries::filter_values(&state.pool, show_origins)
+    let values = queries::filter_values(&state.pool, show_origins, &state.projects)
         .await
         .map_err(|error| WebError::database("load filter options", error))?;
-    let options = FilterOptions::new(
-        values,
-        filters.host.as_deref(),
-        filters.user.as_deref(),
-        filters.model.as_deref(),
-        filters.status.as_deref(),
-    );
     let query_filters = filters.as_query();
+    let options = FilterOptions::new(values, &query_filters);
     let mut rows = queries::sessions(
         &state.pool,
         &query_filters,
+        &state.projects,
         i64::from(page - 1) * SESSION_PAGE_SIZE as i64,
     )
     .await
@@ -167,6 +183,16 @@ async fn sessions(
             options,
             show_origins,
             pagination,
+            from: filters.from.clone(),
+            to: filters.to.clone(),
+            timezone: state.projects.timezone().to_owned(),
+            empty_message: if page > 1 {
+                "No sessions on this page."
+            } else if filters.has_active() {
+                "No sessions match these filters."
+            } else {
+                "No sessions have been indexed."
+            },
         }
         .render()
         .map_err(|error| WebError::template("render sessions", error))?,
@@ -180,11 +206,48 @@ impl Filters {
             &mut self.user,
             &mut self.model,
             &mut self.status,
+            &mut self.agent,
+            &mut self.project,
+            &mut self.archive,
+            &mut self.from,
+            &mut self.to,
         ] {
             if value.as_deref().is_some_and(str::is_empty) {
                 *value = None;
             }
         }
+    }
+
+    fn validate(&self) -> Result<(), WebError> {
+        for value in [self.from.as_deref(), self.to.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !valid_date(value) {
+                return Err(WebError::invalid_filters());
+            }
+        }
+        if self
+            .from
+            .as_deref()
+            .zip(self.to.as_deref())
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(WebError::invalid_filters());
+        }
+        Ok(())
+    }
+
+    fn has_active(&self) -> bool {
+        self.host.is_some()
+            || self.user.is_some()
+            || self.model.is_some()
+            || self.status.is_some()
+            || self.agent.is_some()
+            || self.project.is_some()
+            || self.archive.is_some()
+            || self.from.is_some()
+            || self.to.is_some()
     }
 
     fn page_number(&self) -> Result<u32, WebError> {
@@ -201,18 +264,51 @@ impl Filters {
             user: self.user.as_deref(),
             model: self.model.as_deref(),
             status: self.status.as_deref(),
+            agent: self.agent.as_deref(),
+            project: self.project.as_deref(),
+            archive: self.archive.as_deref(),
+            from: self.from.as_deref(),
+            to: self.to.as_deref(),
         }
     }
 
     fn href(&self, page: u32) -> String {
-        sessions_href(
-            self.host.as_deref(),
-            self.user.as_deref(),
-            self.model.as_deref(),
-            self.status.as_deref(),
-            page,
-        )
+        sessions_href(&self.as_query(), page)
     }
+}
+
+fn valid_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| !matches!(index, 4 | 7) && !byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let number = |start: usize, end: usize| {
+        value[start..end]
+            .parse::<u32>()
+            .expect("validated ASCII digits")
+    };
+    let year = number(0, 4);
+    let month = number(5, 7);
+    let day = number(8, 10);
+    if year == 0 {
+        return false;
+    }
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day != 0 && day <= days
 }
 
 async fn session(
@@ -224,7 +320,7 @@ async fn session(
     let show_origin = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
-    let row = load_session(&state.pool, &stable_id).await?;
+    let row = load_session(&state.pool, &stable_id, &state.projects).await?;
     let mut messages = queries::transcript_section(
         &state.pool,
         row.id,
@@ -253,8 +349,12 @@ async fn session(
     ))
 }
 
-async fn load_session(pool: &SqlitePool, stable_id: &str) -> Result<SessionRow, WebError> {
-    queries::session(pool, stable_id)
+async fn load_session(
+    pool: &SqlitePool,
+    stable_id: &str,
+    projects: &crate::projects::ProjectConfig,
+) -> Result<SessionRow, WebError> {
+    queries::session(pool, stable_id, projects)
         .await
         .map_err(|error| WebError::database("load session", error))?
         .ok_or_else(WebError::not_found)
@@ -266,7 +366,7 @@ async fn message(
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
     let part = bounded_page(query.part, "validate message part")?;
-    let session = load_session(&state.pool, &stable_id).await?;
+    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
     let message = queries::message_chunk(&state.pool, session.id, sequence, offset)
         .await
@@ -324,6 +424,16 @@ impl WebError {
 
     fn invalid_page() -> Self {
         Self::invalid_pagination("validate session page")
+    }
+
+    fn invalid_filters() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            public_message: "invalid filters",
+            operation: "validate session filters",
+            error_kind: "invalid_input",
+            error_code: None,
+        }
     }
 
     fn invalid_pagination(operation: &'static str) -> Self {
@@ -520,10 +630,12 @@ mod tests {
                 external_id: "redacted-session".into(),
                 title: "Redacted title".into(),
                 started_at: None,
-                ended_at: None,
+                last_activity: None,
                 model: None,
                 status: None,
                 cwd: None,
+                project: None,
+                archive_state: "unknown".into(),
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
                 message_count: 5,
@@ -566,10 +678,12 @@ mod tests {
                     external_id: "synthetic-session".into(),
                     title: "Synthetic title".into(),
                     started_at: None,
-                    ended_at: None,
+                    last_activity: None,
                     model: None,
                     status: None,
                     cwd: None,
+                    project: None,
+                    archive_state: "unknown".into(),
                     hostname: "synthetic-host".into(),
                     os_user: "synthetic-user".into(),
                     message_count: messages.len() as i64,
@@ -732,10 +846,12 @@ mod tests {
                 external_id: "redacted-session".into(),
                 title: "Redacted title".into(),
                 started_at: None,
-                ended_at: None,
+                last_activity: None,
                 model: Some("fixture-model".into()),
                 status: Some("complete".into()),
                 cwd: None,
+                project: Some("Fixture project".into()),
+                archive_state: "active".into(),
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
                 message_count: 2,
@@ -745,6 +861,9 @@ mod tests {
                 users: select_options(vec!["fixture-user".into()], None),
                 models: select_options(vec!["fixture-model".into()], None),
                 statuses: select_options(vec!["complete".into()], None),
+                agents: select_options(vec!["synthetic".into()], None),
+                projects: select_options(vec!["Fixture project".into()], None),
+                archives: select_options(vec!["active".into()], None),
             },
             show_origins: true,
             pagination: Pagination {
@@ -752,6 +871,10 @@ mod tests {
                 previous_href: None,
                 next_href: None,
             },
+            from: None,
+            to: None,
+            timezone: "+00:00".into(),
+            empty_message: "No sessions have been indexed.",
         }
         .render()
         .expect("template should render");
@@ -770,7 +893,7 @@ mod tests {
             user: Some(String::new()),
             model: Some(String::new()),
             status: Some(String::new()),
-            page: None,
+            ..Filters::default()
         };
 
         filters.normalize();
@@ -788,12 +911,17 @@ mod tests {
             user: Some("user/name".into()),
             model: Some("model &+".into()),
             status: Some("完了".into()),
+            agent: Some("codex".into()),
+            project: Some("project one".into()),
+            archive: Some("active".into()),
+            from: Some("2026-01-01".into()),
+            to: Some("2026-01-31".into()),
             page: Some(2),
         };
 
         assert_eq!(
             filters.href(3),
-            "/sessions?host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&page=3"
+            "/sessions?host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&from=2026-01-01&to=2026-01-31&page=3"
         );
     }
 
@@ -811,6 +939,7 @@ mod tests {
                     model: None,
                     status: None,
                     page,
+                    ..Filters::default()
                 }
                 .page_number()
                 .ok(),
@@ -824,11 +953,29 @@ mod tests {
                 model: None,
                 status: None,
                 page: Some(page),
+                ..Filters::default()
             }
             .page_number()
             .unwrap_err();
             assert_eq!(error.status, StatusCode::BAD_REQUEST);
             assert_eq!(error.public_message, "invalid page");
+        }
+    }
+
+    #[test]
+    fn date_filters_validate_real_gregorian_dates() {
+        for date in ["2024-02-29", "2026-01-01", "9999-12-31"] {
+            assert!(valid_date(date), "{date}");
+        }
+        for date in [
+            "0000-01-01",
+            "1900-02-29",
+            "2026-00-01",
+            "2026-04-31",
+            "2026-01-00",
+            "2026-1-01",
+        ] {
+            assert!(!valid_date(date), "{date}");
         }
     }
 
