@@ -4,7 +4,7 @@ pub(super) struct TranscriptSegment {
     pub(super) sequence: i64,
     pub(super) timestamp: Option<String>,
     pub(super) role: String,
-    pub(super) paragraphs: Vec<String>,
+    pub(super) contents: Vec<String>,
     pub(super) truncated_sequences: Vec<i64>,
     pub(super) title: String,
     pub(super) initially_open: bool,
@@ -37,7 +37,9 @@ pub(super) fn group_transcript_section(
             && previous.role == "assistant"
             && previous.initially_open
         {
-            previous.paragraphs.push(message.content);
+            previous
+                .contents
+                .push(super::markdown::render(&message.content));
             if message.content_truncated {
                 previous.truncated_sequences.push(message.sequence);
             }
@@ -59,7 +61,7 @@ pub(super) fn group_transcript_section(
                 .as_ref()
                 .is_none_or(|presentation| presentation.initially_open),
             role: message.role,
-            paragraphs: vec![message.content],
+            contents: vec![super::markdown::render(&message.content)],
             truncated_sequences,
         });
     }

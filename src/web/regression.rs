@@ -58,7 +58,15 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
         INSERT INTO messages(session_id,sequence,role,content) VALUES
           (1,3,'assistant','second reply'),
           (1,0,'developer','<multi_agent_role>ordinarymatch setup</multi_agent_role>'),
-          (1,4,'user','<script>needle & unsafe</script>'),
+          (1,4,'user','**bold** <script>needle & unsafe</script> [bad](javascript:alert(1)) ![remote](https://example.invalid/pixel.png)
+
+| A | B |
+| - | - |
+| one | two |
+
+```rust
+fn demo() {}
+```'),
           (1,2,'assistant','first reply'),
           (1,1,'user','synthetic request ordinarymatch');
     ",
@@ -197,7 +205,9 @@ async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
             "assistant"
         };
         let content = if sequence == 0 {
-            format!("<skills_instructions>needle {}TAIL", "x".repeat(20_000))
+            format!("<skills_instructions>needle {}TAIL", "&".repeat(20_000))
+        } else if sequence == 50 {
+            "**message-50**".to_owned()
         } else {
             format!("message-{sequence}")
         };
@@ -232,6 +242,12 @@ async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
         .await
         .unwrap();
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY)
+    );
+    assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
     let status = response.status();
     let body = String::from_utf8(
         to_bytes(response.into_body(), 1024 * 1024)
@@ -534,6 +550,7 @@ async fn long_transcripts_use_bounded_sections_and_lazy_message_parts() {
     let (status, second) = get(&app, "/sessions/1?section=2").await;
     assert_eq!(status, StatusCode::OK);
     assert!(second.find("message-50").unwrap() < second.find("message-99").unwrap());
+    assert!(second.contains("<strong>message-50</strong>"));
     assert!(!second.contains("message-100"));
     assert!(second.contains("rel=\"prev\" href=\"/sessions/1?section=1\""));
     assert!(second.contains("rel=\"next\" href=\"/sessions/1?section=3\""));
@@ -596,6 +613,16 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
         "synthetic HTML: {html}"
     );
     assert!(!html.contains("<script>"));
+    assert!(html.contains("<strong>bold</strong>"));
+    assert!(html.contains("<table>"));
+    assert!(html.contains("<code class=\"language-rust\">fn demo() {}"));
+    assert!(!html.contains("<img"));
+    assert!(!html.contains("href=\"javascript:"));
+    let (_, message_html) = get(&app, "/sessions/1/messages/4").await;
+    assert!(message_html.contains("<strong>bold</strong>"));
+    assert!(message_html.contains("<table>"));
+    assert!(!message_html.contains("<img"));
+    assert!(!message_html.contains("href=\"javascript:"));
     assert_eq!(get(&app, "/sessions/999").await.0, StatusCode::NOT_FOUND);
     assert_eq!(
         get(&app, "/sessions/invalid").await.0,

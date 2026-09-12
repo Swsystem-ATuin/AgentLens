@@ -11,6 +11,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 
+mod markdown;
 mod presentation;
 mod queries;
 #[cfg(test)]
@@ -94,6 +95,7 @@ struct MessageQuery {
 #[template(path = "message.html")]
 struct MessageTemplate {
     message: MessageChunk,
+    content_html: String,
     transcript_href: String,
     pagination: Pagination,
 }
@@ -432,6 +434,7 @@ async fn message(
     };
     Ok(Html(
         MessageTemplate {
+            content_html: markdown::render(&message.content),
             message,
             transcript_href: transcript_href(&stable_id, section as u32),
             pagination,
@@ -853,8 +856,8 @@ mod tests {
         let segments = group_transcript(messages);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[1].role, "assistant");
-        assert_eq!(segments[1].paragraphs, ["first reply", "second reply"]);
-        assert_eq!(segments[2].paragraphs, ["follow-up"]);
+        assert_eq!(segments[1].contents.len(), 2);
+        assert_eq!(segments[2].contents.len(), 1);
     }
 
     #[test]
