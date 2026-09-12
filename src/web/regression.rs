@@ -50,11 +50,11 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
         INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host-a'),(2,'host-b');
         INSERT INTO users VALUES(1,1,'user-a'),(2,2,'user-b');
-        INSERT INTO agent_instances VALUES(1,1,1,'synthetic-a'),(2,1,2,'synthetic-b');
-        INSERT INTO sessions(id,instance_id,external_id,started_at,model,status,cwd) VALUES
-          (1,1,'session-a','2026-01-01','model-a','complete','/synthetic/a'),
-          (2,2,'session-b','2026-01-02','model-b','aborted','/synthetic/b'),
-          (3,1,'session-c','2026-01-03','model-b','unknown','/synthetic/c');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'synthetic-a'),(2,1,2,'synthetic-b');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,started_at,model,status,cwd) VALUES
+          (1,1,'session-a','1','Session A','2026-01-01','model-a','complete','/synthetic/a'),
+          (2,2,'session-b','2','Session B','2026-01-02','model-b','aborted','/synthetic/b'),
+          (3,1,'session-c','3','Session C','2026-01-03','model-b','unknown','/synthetic/c');
         INSERT INTO messages(session_id,sequence,role,content) VALUES
           (1,3,'assistant','second reply'),
           (1,0,'developer','<multi_agent_role>synthetic setup</multi_agent_role>'),
@@ -82,7 +82,7 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
         INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host name');
         INSERT INTO users VALUES(1,1,'user/name');
-        INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'synthetic');
         ",
     )
     .execute(&pool)
@@ -91,11 +91,13 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
     let mut transaction = pool.begin().await.unwrap();
     for id in 1..=105_i64 {
         sqlx::query(
-            "INSERT INTO sessions(id,instance_id,external_id,started_at,model,status,cwd) \
-             VALUES(?,1,?,'2026-01-01','model &/+','complete','/synthetic')",
+            "INSERT INTO sessions(id,instance_id,external_id,stable_id,title,started_at,model,status,cwd) \
+             VALUES(?,1,?,?,?,'2026-01-01','model &/+','complete','/synthetic')",
         )
         .bind(id)
         .bind(format!("session-{id}"))
+        .bind(id.to_string())
+        .bind(format!("Session {id}"))
         .execute(&mut *transaction)
         .await
         .unwrap();
@@ -117,9 +119,9 @@ async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
         INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host');
         INSERT INTO users VALUES(1,1,'user');
-        INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
-        INSERT INTO sessions(id,instance_id,external_id,started_at,model,status,cwd)
-          VALUES(1,1,'long-session','2026-01-01','model','complete','/synthetic');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'synthetic');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,started_at,model,status,cwd)
+          VALUES(1,1,'long-session','1','Long session','2026-01-01','model','complete','/synthetic');
         ",
     )
     .execute(&pool)
@@ -360,6 +362,7 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     let (_dir, app) = seeded_app().await;
     let (status, html) = get(&app, "/sessions/1").await;
     assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("<h1>Session A</h1>"));
     assert_eq!(html.matches("<details class=\"message").count(), 4);
     assert_eq!(html.matches(" open>").count(), 3);
     assert!(html.contains(
@@ -379,7 +382,7 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     assert_eq!(get(&app, "/sessions/999").await.0, StatusCode::NOT_FOUND);
     assert_eq!(
         get(&app, "/sessions/invalid").await.0,
-        StatusCode::BAD_REQUEST
+        StatusCode::NOT_FOUND
     );
     let (status, html) = get(&app, "/sessions/2").await;
     assert_eq!(status, StatusCode::OK);
@@ -402,7 +405,7 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
     crate::ingest::ingest_data_root(&pool, &dir.path().join("single/.codex"))
         .await
         .unwrap();
-    let id: i64 = sqlx::query_scalar("SELECT id FROM sessions")
+    let id: String = sqlx::query_scalar("SELECT stable_id FROM sessions")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -418,6 +421,11 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
     assert!(list.contains(&format!("href=\"/sessions/{id}\"")), "{list}");
     let (_, transcript) = get(&app, &format!("/sessions/{id}")).await;
     assert!(!transcript.contains("<span> / </span>"), "{transcript}");
+    assert_eq!(
+        get(&app, "/sessions/1").await.0,
+        StatusCode::NOT_FOUND,
+        "rebuildable SQLite row IDs must not be public routes"
+    );
 }
 
 #[test]
@@ -441,8 +449,10 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
         let html = SessionTemplate {
             session: SessionRow {
                 id: 1,
+                stable_id: "stable-session".into(),
                 agent_kind: "codex".into(),
                 external_id: "synthetic".into(),
+                title: "Synthetic title".into(),
                 started_at: None,
                 ended_at: None,
                 model: None,
@@ -518,7 +528,7 @@ async fn refreshed_deletions_disappear_from_lists_and_direct_transcript_urls() {
     crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
         .await
         .unwrap();
-    let id: i64 = sqlx::query_scalar("SELECT id FROM sessions")
+    let id: String = sqlx::query_scalar("SELECT stable_id FROM sessions")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -632,9 +642,11 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
         (6, None),
         (7, Some("ordinary-codex-auto-review")),
     ] {
-        sqlx::query("INSERT INTO sessions(id,instance_id,external_id,model) VALUES(?,1,?,?)")
+        sqlx::query("INSERT INTO sessions(id,instance_id,external_id,stable_id,title,model) VALUES(?,1,?,?,?,?)")
             .bind(id)
             .bind(format!("synthetic-{id}"))
+            .bind(id.to_string())
+            .bind(format!("Synthetic {id}"))
             .bind(model)
             .execute(&pool)
             .await
@@ -669,9 +681,9 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
     sqlx::raw_sql(
         "
         INSERT INTO agents VALUES(2,'other-agent','Other agent');
-        INSERT INTO agent_instances VALUES(3,2,1,'other-agent-home');
-        INSERT INTO sessions(id,instance_id,external_id,model)
-          VALUES(8,3,'other-session','codex-auto-review');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(3,2,1,'other-agent-home');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,model)
+          VALUES(8,3,'other-session','8','Other session','codex-auto-review');
         ",
     )
     .execute(&pool)

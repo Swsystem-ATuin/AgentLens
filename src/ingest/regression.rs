@@ -510,6 +510,137 @@ fn message(text: &str) -> Value {
 }
 
 #[tokio::test]
+async fn stable_session_links_survive_rebuilds_and_scope_duplicate_native_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sources");
+    for host in ["host-a", "host-b"] {
+        let sessions = root.join(host).join("user/.codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("same.jsonl"),
+            [meta("same-native-id"), message("Synthetic request")]
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+    }
+    let database = dir.path().join("index.sqlite");
+
+    let first_rebuild = crate::db::begin_rebuild(&database).await.unwrap();
+    ingest_data_root(first_rebuild.pool(), &root).await.unwrap();
+    let first: Vec<(String, String)> = sqlx::query_as(
+        "SELECT h.name,s.stable_id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id ORDER BY h.name",
+    )
+    .fetch_all(first_rebuild.pool())
+    .await
+    .unwrap();
+    first_rebuild.publish().await.unwrap();
+
+    let second_rebuild = crate::db::begin_rebuild(&database).await.unwrap();
+    ingest_data_root(second_rebuild.pool(), &root)
+        .await
+        .unwrap();
+    let second: Vec<(String, String)> = sqlx::query_as(
+        "SELECT h.name,s.stable_id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id ORDER BY h.name",
+    )
+    .fetch_all(second_rebuild.pool())
+    .await
+    .unwrap();
+    second_rebuild.publish().await.unwrap();
+
+    assert_eq!(first, second, "rebuilds must reproduce public session IDs");
+    assert_eq!(first.len(), 2);
+    assert_ne!(
+        first[0].1, first[1].1,
+        "the same native ID from separate sources must not collide"
+    );
+    assert!(first.iter().all(|(_, id)| id.starts_with("ses_")));
+}
+
+#[tokio::test]
+async fn advisory_titles_override_bounded_conversation_and_native_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_source(
+        root,
+        "sessions",
+        "named.jsonl",
+        &[
+            meta("named"),
+            message("<skills_instructions>synthetic setup</skills_instructions>"),
+            message("Conversation fallback"),
+        ],
+    );
+    let long_fallback = "x".repeat(100);
+    write_source(
+        root,
+        "sessions",
+        "derived.jsonl",
+        &[meta("derived"), message(&long_fallback)],
+    );
+    write_source(root, "sessions", "native.jsonl", &[meta("native")]);
+    let home = root.join("synthetic-host/synthetic-user/.codex");
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        concat!(
+            "not json\n",
+            "{\"id\":\"named\",\"thread_name\":\"  Advisory   title  \"}\n",
+            "{\"id\":\"missing-rollout\",\"thread_name\":\"Must not discover\"}\n",
+            "{\"id\":\"named\",\"thread_name\":\"Final advisory title\"}\n",
+            "{\"id\":\"named\",\"thread_name\":\"invalid\\u0001title\"}\n",
+            "{\"id\":\"partial"
+        ),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    ingest_data_root(&pool, root).await.unwrap();
+    let titles: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT external_id,title,derived_title FROM sessions ORDER BY external_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        titles,
+        [
+            ("derived".into(), "x".repeat(80), Some("x".repeat(80))),
+            (
+                "named".into(),
+                "Final advisory title".into(),
+                Some("Conversation fallback".into())
+            ),
+            ("native".into(), "native".into(), None),
+        ]
+    );
+
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        "malformed\n{\"id\":\"unknown\",\"thread_name\":\"Ignored\"}",
+    )
+    .unwrap();
+    let refresh = ingest_data_root(&pool, root).await.unwrap();
+    assert_eq!(refresh.skipped, 3);
+    let refreshed: Vec<(String, String)> =
+        sqlx::query_as("SELECT external_id,title FROM sessions ORDER BY external_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        refreshed,
+        [
+            ("derived".into(), "x".repeat(80)),
+            ("named".into(), "Conversation fallback".into()),
+            ("native".into(), "native".into()),
+        ],
+        "advisory removal must restore indexed fallbacks without reimporting rollouts"
+    );
+}
+
+#[tokio::test]
 async fn refresh_skips_verified_files_and_reimports_missing_hashes_and_parser_versions() {
     let dir = tempfile::tempdir().unwrap();
     write_source(

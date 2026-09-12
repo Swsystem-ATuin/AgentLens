@@ -60,7 +60,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
         .last_insert_rowid();
     let mut report = IngestReport::default();
     for home in discovered.homes {
-        let instance = ensure_instance(
+        let (instance, source_key) = ensure_instance(
             &mut transaction,
             codex::KIND,
             codex::DISPLAY_NAME,
@@ -92,8 +92,15 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
                 {
                     report.files_seen += 1;
                     let mut file_transaction = transaction.begin().await?;
-                    match ingest_rollout(&mut file_transaction, run, instance, entry.path(), area)
-                        .await
+                    match ingest_rollout(
+                        &mut file_transaction,
+                        run,
+                        instance,
+                        &source_key,
+                        entry.path(),
+                        area,
+                    )
+                    .await
                     {
                         Ok(None) => {
                             file_transaction.commit().await?;
@@ -126,6 +133,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
                 }
             }
         }
+        apply_titles(&mut transaction, instance, &home.path).await?;
     }
     (report.removed_sessions, report.removed_files) =
         prune_missing_sources(&mut transaction, root, discovered.layout).await?;
@@ -204,7 +212,7 @@ async fn ensure_instance(
     host: &str,
     user: &str,
     home: &Path,
-) -> Result<i64> {
+) -> Result<(i64, String)> {
     sqlx::query("INSERT OR IGNORE INTO agents(kind,display_name) VALUES(?,?)")
         .bind(agent_kind)
         .bind(display_name)
@@ -233,26 +241,30 @@ async fn ensure_instance(
         .fetch_one(&mut *connection)
         .await?;
     let source = home.to_string_lossy();
+    let source_key = crate::identity::source_id(agent_kind, host, user, source.as_ref());
     sqlx::query(
-        "INSERT OR IGNORE INTO agent_instances(agent_id,user_id,source_home) VALUES(?,?,?)",
+        "INSERT INTO agent_instances(agent_id,user_id,source_home,source_key) VALUES(?,?,?,?) ON CONFLICT(source_home) DO UPDATE SET source_key=excluded.source_key",
     )
     .bind(agent_id)
     .bind(user_id)
     .bind(source.as_ref())
+    .bind(&source_key)
     .execute(&mut *connection)
     .await?;
-    Ok(
+    Ok((
         sqlx::query_scalar("SELECT id FROM agent_instances WHERE source_home=?")
             .bind(source.as_ref())
             .fetch_one(&mut *connection)
             .await?,
-    )
+        source_key,
+    ))
 }
 
 async fn ingest_rollout(
     connection: &mut SqliteConnection,
     run: i64,
     instance: i64,
+    source_key: &str,
     path: &Path,
     kind: &str,
 ) -> Result<Option<ImportedRollout>> {
@@ -300,8 +312,13 @@ async fn ingest_rollout(
         .bind(&summary.external_id)
         .execute(&mut *connection)
         .await?;
-    let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,started_at,ended_at,cwd,model,status,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,raw_metadata=excluded.raw_metadata RETURNING id")
-        .bind(instance).bind(source_id).bind(&summary.external_id).bind(summary.started_at.as_deref()).bind(summary.ended_at.as_deref()).bind(summary.cwd.as_deref()).bind(summary.model.as_deref()).bind(summary.status).bind(&summary.raw_metadata).fetch_one(&mut *connection).await?;
+    let stable_id = crate::identity::session_id(source_key, &summary.external_id);
+    let fallback_title = summary
+        .derived_title
+        .as_deref()
+        .unwrap_or(&summary.external_id);
+    let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,stable_id,started_at,ended_at,cwd,model,status,title,derived_title,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,stable_id=excluded.stable_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,title=excluded.title,derived_title=excluded.derived_title,raw_metadata=excluded.raw_metadata RETURNING id")
+        .bind(instance).bind(source_id).bind(&summary.external_id).bind(stable_id).bind(summary.started_at.as_deref()).bind(summary.ended_at.as_deref()).bind(summary.cwd.as_deref()).bind(summary.model.as_deref()).bind(summary.status).bind(fallback_title).bind(summary.derived_title.as_deref()).bind(&summary.raw_metadata).fetch_one(&mut *connection).await?;
     if existing.is_some() {
         for table in ["messages", "tool_calls", "usage_events"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
@@ -334,6 +351,32 @@ async fn ingest_rollout(
         tool_calls: tools,
         malformed_lines: summary.malformed_lines,
     }))
+}
+
+async fn apply_titles(connection: &mut SqliteConnection, instance: i64, home: &Path) -> Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET title=coalesce(derived_title,external_id) WHERE instance_id=? AND title IS NOT coalesce(derived_title,external_id)",
+    )
+    .bind(instance)
+    .execute(&mut *connection)
+    .await
+    .context("reset session titles to indexed fallbacks")?;
+    let Some(mut advisory_titles) = codex::AdvisoryTitles::open(home) else {
+        return Ok(());
+    };
+    while let Some((external_id, title)) = advisory_titles.next_title() {
+        sqlx::query(
+            "UPDATE sessions SET title=? WHERE instance_id=? AND external_id=? AND title IS NOT ?",
+        )
+        .bind(&title)
+        .bind(instance)
+        .bind(&external_id)
+        .bind(&title)
+        .execute(&mut *connection)
+        .await
+        .context("apply advisory session title")?;
+    }
+    Ok(())
 }
 
 async fn import_rollout_records(

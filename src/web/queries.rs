@@ -8,8 +8,10 @@ pub(super) const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 #[derive(FromRow)]
 pub(super) struct SessionRow {
     pub(super) id: i64,
+    pub(super) stable_id: String,
     pub(super) agent_kind: String,
     pub(super) external_id: String,
+    pub(super) title: String,
     pub(super) started_at: Option<String>,
     pub(super) ended_at: Option<String>,
     pub(super) model: Option<String>,
@@ -59,7 +61,7 @@ pub(super) async fn sessions(
 ) -> Result<Vec<SessionRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
     sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
+        SELECT s.id,s.stable_id,a.kind agent_kind,s.external_id,s.title,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
         WHERE (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
@@ -114,13 +116,16 @@ pub(super) async fn show_origins(pool: &SqlitePool) -> Result<bool, sqlx::Error>
     Ok(layout.as_deref() != Some("direct-codex-home"))
 }
 
-pub(super) async fn session(pool: &SqlitePool, id: i64) -> Result<Option<SessionRow>, sqlx::Error> {
+pub(super) async fn session(
+    pool: &SqlitePool,
+    stable_id: &str,
+) -> Result<Option<SessionRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
     sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
+        SELECT s.id,s.stable_id,a.kind agent_kind,s.external_id,s.title,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)
-    "#).bind(id).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).fetch_optional(pool).await
+        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)
+    "#).bind(stable_id).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).fetch_optional(pool).await
 }
 
 pub(super) async fn transcript_section(

@@ -12,7 +12,7 @@ use std::{
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 2;
+pub(crate) const PARSER_VERSION: i64 = 3;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -29,6 +29,7 @@ pub(crate) struct RolloutSummary {
     pub(crate) model: Option<String>,
     pub(crate) status: &'static str,
     pub(crate) raw_metadata: String,
+    pub(crate) derived_title: Option<String>,
     pub(crate) malformed_lines: usize,
     pub(crate) parse_error: Option<String>,
 }
@@ -41,6 +42,47 @@ pub(crate) struct RolloutRecords<'a> {
     malformed_lines: usize,
     finished: bool,
     line: Vec<u8>,
+}
+
+pub(crate) struct AdvisoryTitles {
+    reader: BufReader<File>,
+    line: Vec<u8>,
+    finished: bool,
+}
+
+impl AdvisoryTitles {
+    pub(crate) fn open(home: &Path) -> Option<Self> {
+        let file = File::open(home.join("session_index.jsonl")).ok()?;
+        Some(Self {
+            reader: BufReader::new(file),
+            line: Vec::new(),
+            finished: false,
+        })
+    }
+
+    pub(crate) fn next_title(&mut self) -> Option<(String, String)> {
+        while !self.finished {
+            self.line.clear();
+            match self.reader.read_until(b'\n', &mut self.line) {
+                Ok(0) | Err(_) => {
+                    self.finished = true;
+                    return None;
+                }
+                Ok(_) => {}
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(&self.line) else {
+                continue;
+            };
+            let (Some(id), Some(title)) = (value["id"].as_str(), value["thread_name"].as_str())
+            else {
+                continue;
+            };
+            if let Some(title) = sanitized_title(title, 160) {
+                return Some((id.to_owned(), title));
+            }
+        }
+        None
+    }
 }
 
 impl<'a> RolloutRecords<'a> {
@@ -216,6 +258,8 @@ pub(crate) fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
     let mut saw_turn_context = false;
     let mut ended_at = None;
     let mut status = "unknown";
+    let mut derived_title = None;
+    let mut conversation_started = false;
     let mut diagnostics = ParseDiagnostics::default();
     let mut line = Vec::new();
     let mut line_number = 0usize;
@@ -243,6 +287,24 @@ pub(crate) fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
                     ended_at = Some(timestamp.to_owned());
                 }
                 status = next_session_status(status, &value);
+                let payload = &value["payload"];
+                if value["type"] == "response_item"
+                    && payload["type"] == "message"
+                    && payload["role"] == "user"
+                    && derived_title.is_none()
+                {
+                    let content = message_content(payload);
+                    let presentation = classify_message("user", &content, !conversation_started);
+                    if presentation
+                        .as_ref()
+                        .is_none_or(|presentation| presentation.initially_open)
+                    {
+                        conversation_started = true;
+                    }
+                    if presentation.is_none() {
+                        derived_title = sanitized_title(&content, 80);
+                    }
+                }
                 if capture_session_metadata {
                     session_metadata = Some(value);
                 }
@@ -272,9 +334,41 @@ pub(crate) fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
         model,
         status,
         raw_metadata: meta.to_string(),
+        derived_title,
         malformed_lines: diagnostics.malformed_lines,
         parse_error: diagnostics.message(),
     })
+}
+
+fn sanitized_title(value: &str, max_chars: usize) -> Option<String> {
+    if value
+        .chars()
+        .any(|character| character.is_control() && !character.is_whitespace())
+    {
+        return None;
+    }
+    let mut normalized = String::new();
+    let mut characters = 0usize;
+    for word in value.split_whitespace() {
+        if characters != 0 {
+            normalized.push(' ');
+            characters += 1;
+        }
+        for character in word.chars() {
+            if characters == max_chars {
+                return Some(normalized);
+            }
+            normalized.push(character);
+            characters += 1;
+        }
+        if characters == max_chars {
+            return Some(normalized);
+        }
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn normalize_record(value: Value) -> Option<NormalizedRecord> {

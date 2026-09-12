@@ -133,12 +133,12 @@ pub(super) fn sessions_href(
     format!("/sessions?{}", pairs.join("&"))
 }
 
-pub(super) fn transcript_href(id: i64, section: u32) -> String {
-    format!("/sessions/{id}?section={section}")
+pub(super) fn transcript_href(stable_id: &str, section: u32) -> String {
+    format!("/sessions/{stable_id}?section={section}")
 }
 
-pub(super) fn message_href(id: i64, sequence: i64, part: u32) -> String {
-    format!("/sessions/{id}/messages/{sequence}?part={part}")
+pub(super) fn message_href(stable_id: &str, sequence: i64, part: u32) -> String {
+    format!("/sessions/{stable_id}/messages/{sequence}?part={part}")
 }
 
 fn percent_encode(value: &str) -> String {

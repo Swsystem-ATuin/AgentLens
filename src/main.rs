@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod fingerprint;
+mod identity;
 mod ingest;
 mod sources;
 mod web;

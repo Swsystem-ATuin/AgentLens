@@ -268,7 +268,7 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
     let pool = sqlx::SqlitePool::connect_with(options.clone())
         .await
         .unwrap();
-    sqlx::raw_sql("ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version; ALTER TABLE ingest_runs DROP COLUMN source_layout;").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP INDEX idx_agent_instances_source_key; DROP INDEX idx_sessions_stable_id; ALTER TABLE agent_instances DROP COLUMN source_key; ALTER TABLE sessions DROP COLUMN stable_id; ALTER TABLE sessions DROP COLUMN derived_title; ALTER TABLE source_files DROP COLUMN content_hash; ALTER TABLE source_files DROP COLUMN parser_version; ALTER TABLE ingest_runs DROP COLUMN source_layout;").execute(&pool).await.unwrap();
     pool.close().await;
     let result = run(dir.path(), &args);
     assert!(
@@ -283,9 +283,11 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
         "skipped 1 unchanged files; 0 errors; partial files: 0; malformed lines: 0; 1 files seen"
     ));
     let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-    let row: (i64, i64, String) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),content_hash FROM source_files").fetch_one(&pool).await.unwrap();
+    let row: (i64, i64, String, String, String) = sqlx::query_as("SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM messages),content_hash,(SELECT stable_id FROM sessions),(SELECT title FROM sessions) FROM source_files").fetch_one(&pool).await.unwrap();
     assert_eq!((row.0, row.1), (1, 2));
     assert_eq!(row.2, format!("blake3:{}", blake3::hash(fixture).to_hex()));
+    assert!(row.3.starts_with("ses_"));
+    assert!(!row.4.is_empty());
     assert_eq!(
         std::fs::read(source.join("rollout.jsonl")).unwrap(),
         fixture

@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Transcript URLs now use reproducible source-scoped session IDs instead of disposable SQLite row IDs, remaining stable across rebuilds while preventing collisions between copied homes with the same native session ID. Session pages and lists show readable titles from streamed optional Codex advisory metadata, bounded conversation text, or native IDs, with automatic legacy-index migration.
+
 - Long transcripts now load in 50-message sections. Large message bodies use bounded previews and lazy 16,384-character parts, keeping transcript database reads and rendered responses bounded while retaining access to all indexed content.
 
 - The sessions list now uses 50-row pages with deterministic newest-first ordering and previous/next links that preserve active filters. Queries fetch at most 51 session rows to determine whether another page exists.

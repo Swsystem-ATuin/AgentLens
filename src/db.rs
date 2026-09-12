@@ -57,6 +57,68 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .await
         .context("upgrade ingest source-layout schema")?;
     }
+    let instance_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_instances')")
+            .fetch_all(&mut *migration)
+            .await?;
+    if !instance_columns.iter().any(|name| name == "source_key") {
+        sqlx::query("ALTER TABLE agent_instances ADD COLUMN source_key TEXT")
+            .execute(&mut *migration)
+            .await
+            .context("upgrade source identity schema")?;
+    }
+    let instances: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT i.id,a.kind,h.name,u.os_user,i.source_home FROM agent_instances i JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE i.source_key IS NULL",
+    )
+    .fetch_all(&mut *migration)
+    .await
+    .context("load source identities for upgrade")?;
+    for (id, kind, host, user, source_home) in instances {
+        let source_key = crate::identity::source_id(&kind, &host, &user, &source_home);
+        sqlx::query("UPDATE agent_instances SET source_key=? WHERE id=?")
+            .bind(source_key)
+            .bind(id)
+            .execute(&mut *migration)
+            .await
+            .context("backfill source identity")?;
+    }
+    let session_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+            .fetch_all(&mut *migration)
+            .await?;
+    for (column, definition) in [("stable_id", "TEXT"), ("derived_title", "TEXT")] {
+        if !session_columns.iter().any(|name| name == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE sessions ADD COLUMN {column} {definition}"
+            ))
+            .execute(&mut *migration)
+            .await
+            .context("upgrade session identity schema")?;
+        }
+    }
+    let sessions: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT s.id,i.source_key,s.external_id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id WHERE s.stable_id IS NULL",
+    )
+    .fetch_all(&mut *migration)
+    .await
+    .context("load session identities for upgrade")?;
+    for (id, source_key, native_id) in sessions {
+        let stable_id = crate::identity::session_id(&source_key, &native_id);
+        sqlx::query("UPDATE sessions SET stable_id=?,title=coalesce(title,external_id) WHERE id=?")
+            .bind(stable_id)
+            .bind(id)
+            .execute(&mut *migration)
+            .await
+            .context("backfill session identity")?;
+    }
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_instances_source_key ON agent_instances(source_key)")
+        .execute(&mut *migration)
+        .await
+        .context("index source identities")?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_stable_id ON sessions(stable_id)")
+        .execute(&mut *migration)
+        .await
+        .context("index session identities")?;
     migration.commit().await?;
     Ok(pool)
 }

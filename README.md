@@ -11,6 +11,7 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 - Discovers Codex homes at `data/{hostname}/{os_user}/.codex/`, or accepts one `.codex/` directory directly.
 - Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
 - Normalizes sessions, messages, tool calls, token usage, source files, and ingest runs into SQLite.
+- Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes remain distinct. Session lists show readable titles from valid Codex advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).
 - Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
 - Streams each rollout in two record-at-a-time passes while batching index writes transactionally, bounding memory to individual record size instead of total transcript size. See [bounded rollout ingestion](docs/ingestion-memory.md).
@@ -44,7 +45,7 @@ Refresh checksums every source file, including files with unchanged sizes or tim
 
 Source directories may be symbolic links to nightly backups, including the data root, host/user folders, `.codex`, and session subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
 
-Existing databases are upgraded automatically: files without hashes are reimported once. No full rebuild is required. Checksums and normalized records are committed together; failed or partial replacements retain the previous transcript and are retried on the next refresh. New partial files still expose their valid records. See [refresh behavior and verification](docs/refresh.md) for archive moves, duplicate identities, source publication, and limitations.
+Existing databases are upgraded automatically: files without hashes are reimported once, and source/session identities are backfilled. No full rebuild is required. Run one refresh after updating to derive conversation titles and apply optional `session_index.jsonl` names; the parser-version change reimports existing rollouts once. Checksums and normalized records are committed together; failed or partial replacements retain the previous transcript and are retried on the next refresh. New partial files still expose their valid records. See [refresh behavior and verification](docs/refresh.md) for archive moves, duplicate identities, source publication, and limitations.
 
 Explicitly discard and rebuild the index from raw data (this also stores BLAKE3 hashes for subsequent refreshes):
 

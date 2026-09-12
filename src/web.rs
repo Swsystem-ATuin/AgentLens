@@ -217,17 +217,17 @@ impl Filters {
 
 async fn session(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(stable_id): Path<String>,
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
     let section = bounded_page(query.section, "validate transcript section")?;
     let show_origin = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
-    let row = load_session(&state.pool, id).await?;
+    let row = load_session(&state.pool, &stable_id).await?;
     let mut messages = queries::transcript_section(
         &state.pool,
-        id,
+        row.id,
         i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64,
     )
     .await
@@ -236,9 +236,9 @@ async fn session(
     messages.truncate(TRANSCRIPT_SECTION_SIZE);
     let pagination = Pagination {
         page: section,
-        previous_href: (section > 1).then(|| transcript_href(id, section - 1)),
+        previous_href: (section > 1).then(|| transcript_href(&stable_id, section - 1)),
         next_href: (has_next && section < MAX_SESSION_PAGE)
-            .then(|| transcript_href(id, section + 1)),
+            .then(|| transcript_href(&stable_id, section + 1)),
     };
     let segments = group_transcript_section(messages, &row.agent_kind, section > 1);
     Ok(Html(
@@ -253,8 +253,8 @@ async fn session(
     ))
 }
 
-async fn load_session(pool: &SqlitePool, id: i64) -> Result<SessionRow, WebError> {
-    queries::session(pool, id)
+async fn load_session(pool: &SqlitePool, stable_id: &str) -> Result<SessionRow, WebError> {
+    queries::session(pool, stable_id)
         .await
         .map_err(|error| WebError::database("load session", error))?
         .ok_or_else(WebError::not_found)
@@ -262,33 +262,33 @@ async fn load_session(pool: &SqlitePool, id: i64) -> Result<SessionRow, WebError
 
 async fn message(
     State(state): State<AppState>,
-    Path((id, sequence)): Path<(i64, i64)>,
+    Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
     let part = bounded_page(query.part, "validate message part")?;
-    load_session(&state.pool, id).await?;
+    let session = load_session(&state.pool, &stable_id).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
-    let message = queries::message_chunk(&state.pool, id, sequence, offset)
+    let message = queries::message_chunk(&state.pool, session.id, sequence, offset)
         .await
         .map_err(|error| WebError::database("load message part", error))?
         .ok_or_else(WebError::not_found)?;
     if part > 1 && offset >= message.total_chars {
         return Err(WebError::invalid_pagination("validate message part"));
     }
-    let preceding = queries::preceding_message_count(&state.pool, id, sequence)
+    let preceding = queries::preceding_message_count(&state.pool, session.id, sequence)
         .await
         .map_err(|error| WebError::database("locate message section", error))?;
     let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
     let pagination = Pagination {
         page: part,
-        previous_href: (part > 1).then(|| message_href(id, sequence, part - 1)),
+        previous_href: (part > 1).then(|| message_href(&stable_id, sequence, part - 1)),
         next_href: (offset + MESSAGE_CHUNK_CHARS < message.total_chars && part < MAX_SESSION_PAGE)
-            .then(|| message_href(id, sequence, part + 1)),
+            .then(|| message_href(&stable_id, sequence, part + 1)),
     };
     Ok(Html(
         MessageTemplate {
             message,
-            transcript_href: transcript_href(id, section as u32),
+            transcript_href: transcript_href(&stable_id, section as u32),
             pagination,
         }
         .render()
@@ -515,8 +515,10 @@ mod tests {
         let html = SessionTemplate {
             session: SessionRow {
                 id: 1,
+                stable_id: "stable-session".into(),
                 agent_kind: "codex".into(),
                 external_id: "redacted-session".into(),
+                title: "Redacted title".into(),
                 started_at: None,
                 ended_at: None,
                 model: None,
@@ -559,8 +561,10 @@ mod tests {
             let html = SessionTemplate {
                 session: SessionRow {
                     id: 1,
+                    stable_id: "stable-session".into(),
                     agent_kind: "codex".into(),
                     external_id: "synthetic-session".into(),
+                    title: "Synthetic title".into(),
                     started_at: None,
                     ended_at: None,
                     model: None,
@@ -723,8 +727,10 @@ mod tests {
         let html = SessionsTemplate {
             sessions: vec![SessionRow {
                 id: 1,
+                stable_id: "stable-session".into(),
                 agent_kind: "synthetic".into(),
                 external_id: "redacted-session".into(),
+                title: "Redacted title".into(),
                 started_at: None,
                 ended_at: None,
                 model: Some("fixture-model".into()),
@@ -751,6 +757,7 @@ mod tests {
         .expect("template should render");
 
         assert!(html.contains("<th>Host</th><th>User</th>"));
+        assert!(html.contains("href=\"/sessions/stable-session\">Redacted title</a>"));
         assert!(html.contains("<option value=\"fixture-host\" selected>fixture-host</option>"));
         assert!(html.contains("<option value=\"fixture-user\">fixture-user</option>"));
         assert!(html.contains("<td>fixture-host</td><td>fixture-user</td>"));
