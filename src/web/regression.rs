@@ -47,7 +47,7 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
         .unwrap();
     sqlx::raw_sql(
         "
-        INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+        INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host-a'),(2,'host-b');
         INSERT INTO users VALUES(1,1,'user-a'),(2,2,'user-b');
         INSERT INTO agent_instances VALUES(1,1,1,'synthetic-a'),(2,1,2,'synthetic-b');
@@ -79,7 +79,7 @@ async fn paginated_app() -> (tempfile::TempDir, Router) {
         .unwrap();
     sqlx::raw_sql(
         "
-        INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+        INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host name');
         INSERT INTO users VALUES(1,1,'user/name');
         INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
@@ -114,7 +114,7 @@ async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
         .unwrap();
     sqlx::raw_sql(
         "
-        INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+        INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
         INSERT INTO hosts VALUES(1,'host');
         INSERT INTO users VALUES(1,1,'user');
         INSERT INTO agent_instances VALUES(1,1,1,'synthetic');
@@ -441,6 +441,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
         let html = SessionTemplate {
             session: SessionRow {
                 id: 1,
+                agent_kind: "codex".into(),
                 external_id: "synthetic".into(),
                 started_at: None,
                 ended_at: None,
@@ -665,8 +666,19 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(!html.contains("synthetic conversation"));
     }
+    sqlx::raw_sql(
+        "
+        INSERT INTO agents VALUES(2,'other-agent','Other agent');
+        INSERT INTO agent_instances VALUES(3,2,1,'other-agent-home');
+        INSERT INTO sessions(id,instance_id,external_id,model)
+          VALUES(8,3,'other-session','codex-auto-review');
+        ",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let (_, html) = get(&app, "/sessions").await;
-    for id in [1, 2, 3, 6, 7] {
+    for id in [1, 2, 3, 6, 7, 8] {
         assert!(
             html.contains(&format!("href=\"/sessions/{id}\"")),
             "ordinary or unknown model must remain visible"
@@ -676,12 +688,15 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
             StatusCode::OK
         );
     }
+    let (_, filtered) = get(&app, "/sessions?model=codex-auto-review").await;
+    assert!(filtered.contains("href=\"/sessions/8\""));
+    assert!(filtered.contains("<option value=\"codex-auto-review\" selected>"));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
             .fetch_one(&pool)
             .await
             .unwrap(),
-        7,
+        8,
         "visibility must not remove indexed data"
     );
 }

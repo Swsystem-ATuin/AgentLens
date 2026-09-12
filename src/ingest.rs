@@ -1,40 +1,14 @@
-use crate::fingerprint::{HashingReader, ensure_unchanged, hash_file};
-use anyhow::{Context, Result, ensure};
-use serde_json::Value;
-use sqlx::{Acquire, SqliteConnection, SqlitePool};
-use std::{
-    fs::{File, Metadata},
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+use crate::{
+    fingerprint::hash_file,
+    sources::{NormalizedRecord, SourceLayout, codex},
 };
+use anyhow::{Context, Result, ensure};
+use sqlx::{Acquire, SqliteConnection, SqlitePool};
+use std::{fs::Metadata, path::Path};
 use walkdir::WalkDir;
 
 #[cfg(test)]
 mod regression;
-
-// Bump when normalized parsing semantics change so refresh replaces old projections.
-const PARSER_VERSION: i64 = 2;
-const MAX_PARSE_DIAGNOSTICS: usize = 20;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SourceLayout {
-    HostUser,
-    DirectCodexHome,
-}
-
-impl SourceLayout {
-    fn database_value(self) -> &'static str {
-        match self {
-            Self::HostUser => "host-user",
-            Self::DirectCodexHome => "direct-codex-home",
-        }
-    }
-}
-
-struct DiscoveredSources {
-    layout: SourceLayout,
-    homes: Vec<(String, String, PathBuf)>,
-}
 
 #[derive(sqlx::FromRow)]
 struct SourceCheckpoint {
@@ -64,54 +38,8 @@ struct ImportedRollout {
     malformed_lines: usize,
 }
 
-struct RolloutSummary {
-    metadata: Metadata,
-    content_hash: String,
-    external_id: String,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    cwd: Option<String>,
-    model: Option<String>,
-    status: &'static str,
-    raw_metadata: String,
-    malformed_lines: usize,
-    parse_error: Option<String>,
-}
-
-#[derive(Default)]
-struct ParseDiagnostics {
-    malformed_lines: usize,
-    examples: Vec<String>,
-}
-
-impl ParseDiagnostics {
-    fn record(&mut self, line_number: usize) -> Result<()> {
-        self.malformed_lines = self
-            .malformed_lines
-            .checked_add(1)
-            .context("malformed-line count exceeds supported range")?;
-        if self.examples.len() < MAX_PARSE_DIAGNOSTICS {
-            self.examples
-                .push(format!("line {line_number}: invalid JSON or UTF-8"));
-        }
-        Ok(())
-    }
-
-    fn message(&self) -> Option<String> {
-        if self.malformed_lines == 0 {
-            return None;
-        }
-        let mut message = self.examples.join("; ");
-        let omitted = self.malformed_lines - self.examples.len();
-        if omitted != 0 {
-            message.push_str(&format!("; {omitted} additional malformed lines omitted"));
-        }
-        Some(message)
-    }
-}
-
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
-    let discovered = discover_homes(root)?;
+    let discovered = codex::discover(root)?;
     let mut transaction = pool.begin().await?;
     let previous_layout: Option<String> = sqlx::query_scalar(
         "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
@@ -122,20 +50,28 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
     ensure!(
         previous_layout
             .as_deref()
-            .is_none_or(|previous| previous == discovered.layout.database_value()),
+            .is_none_or(|previous| previous == discovered.database_layout),
         "source layout does not match the previous rebuild or refresh; run rebuild to change between a direct .codex home and host/user data"
     );
     let run = sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running',?)")
-        .bind(discovered.layout.database_value())
+        .bind(discovered.database_layout)
         .execute(&mut *transaction)
         .await?
         .last_insert_rowid();
     let mut report = IngestReport::default();
-    for (host, user, home) in discovered.homes {
-        let instance = ensure_instance(&mut transaction, &host, &user, &home).await?;
-        for area in ["sessions", "archived_sessions"] {
-            let dir = home.join(area);
-            if !optional_source_directory(&dir)? {
+    for home in discovered.homes {
+        let instance = ensure_instance(
+            &mut transaction,
+            codex::KIND,
+            codex::DISPLAY_NAME,
+            &home.host,
+            &home.user,
+            &home.path,
+        )
+        .await?;
+        for area in codex::SOURCE_AREAS {
+            let dir = home.path.join(area);
+            if !codex::optional_directory(&dir)? {
                 continue;
             }
             for entry in WalkDir::new(&dir).follow_links(true).into_iter() {
@@ -199,69 +135,6 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
     Ok(report)
 }
 
-// Missing optional directories indicate removal; inspection failures never do.
-// Inspect the link itself first: a dangling backup link is a failure, not removal.
-fn optional_source_directory(path: &Path) -> Result<bool> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let metadata = if metadata.file_type().is_symlink() {
-                std::fs::metadata(path).context("resolve source directory symbolic link")?
-            } else {
-                metadata
-            };
-            ensure!(
-                metadata.is_dir(),
-                "expected a source directory or symbolic link to a directory"
-            );
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("inspect source directory"),
-    }
-}
-
-fn discover_homes(root: &Path) -> Result<DiscoveredSources> {
-    ensure!(
-        optional_source_directory(root)?,
-        "source root is missing; refresh cancelled"
-    );
-    if root.file_name() == Some(std::ffi::OsStr::new(".codex")) {
-        return Ok(DiscoveredSources {
-            layout: SourceLayout::DirectCodexHome,
-            // The relational schema retains one internal identity for a direct
-            // home. Its empty values are never presented by the web UI.
-            homes: vec![(String::new(), String::new(), root.to_path_buf())],
-        });
-    }
-    let mut homes = Vec::new();
-    for host in std::fs::read_dir(root).context("read source root")? {
-        let host = host.context("read source root entry")?;
-        let kind = host.file_type().context("inspect host entry")?;
-        if !(kind.is_dir() || kind.is_symlink() && optional_source_directory(&host.path())?) {
-            continue;
-        }
-        for user in std::fs::read_dir(host.path()).context("read source host directory")? {
-            let user = user.context("read source host entry")?;
-            let kind = user.file_type().context("inspect user entry")?;
-            if !(kind.is_dir() || kind.is_symlink() && optional_source_directory(&user.path())?) {
-                continue;
-            }
-            let home = user.path().join(".codex");
-            if optional_source_directory(&home)? {
-                homes.push((
-                    host.file_name().to_string_lossy().into(),
-                    user.file_name().to_string_lossy().into(),
-                    home,
-                ));
-            }
-        }
-    }
-    Ok(DiscoveredSources {
-        layout: SourceLayout::HostUser,
-        homes,
-    })
-}
-
 async fn prune_missing_sources(
     connection: &mut SqliteConnection,
     root: &Path,
@@ -269,7 +142,7 @@ async fn prune_missing_sources(
 ) -> Result<(u64, u64)> {
     // Recheck the root before deleting: an unavailable root is not an empty snapshot.
     ensure!(
-        optional_source_directory(root)?,
+        codex::optional_directory(root)?,
         "source root disappeared; refresh cancelled"
     );
     let mut cursor = 0i64;
@@ -278,28 +151,16 @@ async fn prune_missing_sources(
     loop {
         // Bound path buffering even when a database contains many source roots.
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
-            "SELECT source_files.id,source_files.path,agent_instances.source_home FROM source_files JOIN agent_instances ON agent_instances.id=source_files.instance_id JOIN agents ON agents.id=agent_instances.agent_id WHERE source_files.id>? AND agents.kind='codex' ORDER BY source_files.id LIMIT 256")
-            .bind(cursor).fetch_all(&mut *connection).await.context("query source removal candidates")?;
+            "SELECT source_files.id,source_files.path,agent_instances.source_home FROM source_files JOIN agent_instances ON agent_instances.id=source_files.instance_id JOIN agents ON agents.id=agent_instances.agent_id WHERE source_files.id>? AND agents.kind=? ORDER BY source_files.id LIMIT 256")
+            .bind(cursor).bind(codex::KIND).fetch_all(&mut *connection).await.context("query source removal candidates")?;
         if rows.is_empty() {
             break;
         }
         for (id, path, home) in rows {
             cursor = id;
             let home = Path::new(&home);
-            match layout {
-                SourceLayout::DirectCodexHome if home != root => continue,
-                SourceLayout::DirectCodexHome => {}
-                SourceLayout::HostUser => {
-                    let Ok(relative) = home.strip_prefix(root) else {
-                        continue;
-                    };
-                    // Only the exact root/host/user/.codex contract belongs to this run.
-                    if relative.components().count() != 3
-                        || relative.file_name() != Some(std::ffi::OsStr::new(".codex"))
-                    {
-                        continue;
-                    }
-                }
+            if !codex::home_belongs_to_root(home, root, layout) {
+                continue;
             }
             ensure!(
                 Path::new(&path).starts_with(home),
@@ -338,11 +199,15 @@ async fn prune_missing_sources(
 
 async fn ensure_instance(
     connection: &mut SqliteConnection,
+    agent_kind: &str,
+    display_name: &str,
     host: &str,
     user: &str,
     home: &Path,
 ) -> Result<i64> {
-    sqlx::query("INSERT OR IGNORE INTO agents(kind,display_name) VALUES('codex','Codex')")
+    sqlx::query("INSERT OR IGNORE INTO agents(kind,display_name) VALUES(?,?)")
+        .bind(agent_kind)
+        .bind(display_name)
         .execute(&mut *connection)
         .await?;
     sqlx::query("INSERT OR IGNORE INTO hosts(name) VALUES(?)")
@@ -363,7 +228,8 @@ async fn ensure_instance(
         .bind(user)
         .fetch_one(&mut *connection)
         .await?;
-    let agent_id: i64 = sqlx::query_scalar("SELECT id FROM agents WHERE kind='codex'")
+    let agent_id: i64 = sqlx::query_scalar("SELECT id FROM agents WHERE kind=?")
+        .bind(agent_kind)
         .fetch_one(&mut *connection)
         .await?;
     let source = home.to_string_lossy();
@@ -395,14 +261,14 @@ async fn ingest_rollout(
         .bind(path.to_string_lossy().as_ref()).fetch_optional(&mut *connection).await?;
     if let Some(checkpoint) = &previous
         && checkpoint.has_session
-        && checkpoint.parser_version == Some(PARSER_VERSION)
+        && checkpoint.parser_version == Some(codex::PARSER_VERSION)
         && checkpoint.parse_status == "ok"
         && let Some(hash) = &checkpoint.content_hash
         && hash_file(path)? == *hash
     {
         return Ok(None);
     }
-    let summary = scan_rollout(path)?;
+    let summary = codex::scan_rollout(path)?;
     if previous.as_ref().is_some_and(|row| row.has_session) {
         ensure!(
             summary.malformed_lines == 0,
@@ -459,7 +325,7 @@ async fn ingest_rollout(
         .bind(parse_status)
         .bind(summary.parse_error.as_deref())
         .bind(&summary.content_hash)
-        .bind(PARSER_VERSION)
+        .bind(codex::PARSER_VERSION)
         .bind(source_id)
         .execute(&mut *connection)
         .await?;
@@ -470,191 +336,60 @@ async fn ingest_rollout(
     }))
 }
 
-fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
-    let file = File::open(path).context("open rollout")?;
-    let metadata = file.metadata().context("inspect rollout")?;
-    let mut reader = BufReader::new(HashingReader::new(file));
-    let mut session_metadata = None;
-    let mut model = None;
-    let mut saw_turn_context = false;
-    let mut ended_at = None;
-    let mut status = "unknown";
-    let mut diagnostics = ParseDiagnostics::default();
-    let mut line = Vec::new();
-    let mut line_number = 0usize;
-    loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .context("read rollout line")?
-            == 0
-        {
-            break;
-        }
-        line_number = line_number
-            .checked_add(1)
-            .context("rollout line count exceeds supported range")?;
-        match serde_json::from_slice::<Value>(&line) {
-            Ok(value) => {
-                let capture_session_metadata =
-                    session_metadata.is_none() && value["type"] == "session_meta";
-                if !saw_turn_context && value["type"] == "turn_context" {
-                    saw_turn_context = true;
-                    model = value["payload"]["model"].as_str().map(str::to_owned);
-                }
-                if let Some(timestamp) = value["timestamp"].as_str() {
-                    ended_at = Some(timestamp.to_owned());
-                }
-                status = next_session_status(status, &value);
-                if capture_session_metadata {
-                    session_metadata = Some(value);
-                }
-            }
-            // Never retain malformed source content in diagnostics.
-            Err(_) => diagnostics.record(line_number)?,
-        }
-    }
-    ensure_unchanged(path, &metadata)?;
-    let content_hash = reader.get_ref().fingerprint();
-    let meta = session_metadata.context("missing session_meta")?;
-    let payload = &meta["payload"];
-    let external_id = payload["id"]
-        .as_str()
-        .context("session_meta missing id")?
-        .to_owned();
-    let started_at = payload["timestamp"]
-        .as_str()
-        .or_else(|| meta["timestamp"].as_str())
-        .map(str::to_owned);
-    Ok(RolloutSummary {
-        metadata,
-        content_hash,
-        external_id,
-        started_at,
-        ended_at,
-        cwd: payload["cwd"].as_str().map(str::to_owned),
-        model,
-        status,
-        raw_metadata: meta.to_string(),
-        malformed_lines: diagnostics.malformed_lines,
-        parse_error: diagnostics.message(),
-    })
-}
-
 async fn import_rollout_records(
     connection: &mut SqliteConnection,
     path: &Path,
     metadata: &Metadata,
     session_id: i64,
 ) -> Result<(usize, usize, usize)> {
-    ensure_unchanged(path, metadata)?;
-    let file = File::open(path).context("reopen rollout for record import")?;
-    let mut reader = BufReader::new(file);
+    let mut records = codex::RolloutRecords::open(path, metadata)?;
     let mut messages = 0usize;
     let mut tools = 0usize;
-    let mut malformed_lines = 0usize;
-    let mut sequence = 0i64;
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .context("read rollout record for import")?
-            == 0
-        {
-            break;
-        }
-        let value = match serde_json::from_slice::<Value>(&line) {
-            Ok(value) => value,
-            Err(_) => {
-                malformed_lines = malformed_lines
-                    .checked_add(1)
-                    .context("malformed-line count exceeds supported range")?;
-                continue;
+    while let Some((sequence, record)) = records.next_record()? {
+        match record {
+            NormalizedRecord::Message {
+                timestamp,
+                role,
+                content,
+                raw_json,
+            } => {
+                sqlx::query("INSERT INTO messages(session_id,sequence,timestamp,role,content,raw_json) VALUES(?,?,?,?,?,?)")
+                        .bind(session_id).bind(sequence).bind(timestamp).bind(role).bind(content).bind(raw_json).execute(&mut *connection).await?;
+                messages += 1;
             }
-        };
-        let typ = value["type"].as_str().unwrap_or("");
-        let payload = &value["payload"];
-        if typ == "response_item" && payload["type"] == "message" {
-            sqlx::query("INSERT INTO messages(session_id,sequence,timestamp,role,content,raw_json) VALUES(?,?,?,?,?,?)")
-                .bind(session_id).bind(sequence).bind(value["timestamp"].as_str()).bind(payload["role"].as_str().unwrap_or("unknown")).bind(message_content(payload)).bind(value.to_string()).execute(&mut *connection).await?;
-            messages += 1;
-        } else if typ == "response_item"
-            && matches!(
-                payload["type"].as_str(),
-                Some("function_call" | "custom_tool_call")
-            )
-        {
-            let call_id = payload["call_id"]
-                .as_str()
-                .or_else(|| payload["id"].as_str())
-                .unwrap_or("");
-            sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json) VALUES(?,?,?,?,?,?,'called',?)")
-                .bind(session_id).bind(sequence).bind(value["timestamp"].as_str()).bind(call_id).bind(payload["name"].as_str()).bind(payload["arguments"].as_str().or_else(|| payload["input"].as_str())).bind(value.to_string()).execute(&mut *connection).await?;
-            tools += 1;
-        } else if typ == "response_item"
-            && matches!(
-                payload["type"].as_str(),
-                Some("function_call_output" | "custom_tool_call_output")
-            )
-        {
-            if let Some(call_id) = payload["call_id"].as_str() {
+            NormalizedRecord::ToolCall {
+                timestamp,
+                call_id,
+                tool_name,
+                arguments,
+                raw_json,
+            } => {
+                sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json) VALUES(?,?,?,?,?,?,'called',?)")
+                        .bind(session_id).bind(sequence).bind(timestamp).bind(call_id).bind(tool_name).bind(arguments).bind(raw_json).execute(&mut *connection).await?;
+                tools += 1;
+            }
+            NormalizedRecord::ToolOutput { call_id, output } => {
                 sqlx::query("UPDATE tool_calls SET output=?,status='complete' WHERE id=(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? ORDER BY sequence DESC LIMIT 1)")
-                    .bind(payload["output"].as_str())
+                    .bind(output)
                     .bind(session_id)
-                    .bind(call_id)
+                    .bind(&call_id)
                     .execute(&mut *connection)
                     .await?;
             }
-        } else if typ == "event_msg"
-            && payload["type"] == "token_count"
-            && !payload["info"].is_null()
-        {
-            let usage = &payload["info"]["total_token_usage"];
-            sqlx::query("INSERT INTO usage_events(session_id,timestamp,input_tokens,output_tokens,cached_input_tokens,total_tokens,raw_json) VALUES(?,?,?,?,?,?,?)")
-                .bind(session_id).bind(value["timestamp"].as_str()).bind(usage["input_tokens"].as_i64()).bind(usage["output_tokens"].as_i64()).bind(usage["cached_input_tokens"].as_i64()).bind(usage["total_tokens"].as_i64()).bind(value.to_string()).execute(&mut *connection).await?;
+            NormalizedRecord::Usage {
+                timestamp,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                total_tokens,
+                raw_json,
+            } => {
+                sqlx::query("INSERT INTO usage_events(session_id,timestamp,input_tokens,output_tokens,cached_input_tokens,total_tokens,raw_json) VALUES(?,?,?,?,?,?,?)")
+                        .bind(session_id).bind(timestamp).bind(input_tokens).bind(output_tokens).bind(cached_input_tokens).bind(total_tokens).bind(raw_json).execute(&mut *connection).await?;
+            }
         }
-        sequence = sequence
-            .checked_add(1)
-            .context("rollout record count exceeds supported range")?;
     }
-    ensure_unchanged(path, metadata)?;
-    Ok((messages, tools, malformed_lines))
-}
-
-fn message_content(payload: &Value) -> String {
-    let Some(parts) = payload["content"].as_array() else {
-        return String::new();
-    };
-    let mut content = String::new();
-    let mut has_text = false;
-    for text in parts.iter().filter_map(|part| part["text"].as_str()) {
-        if has_text {
-            content.push('\n');
-        }
-        content.push_str(text);
-        has_text = true;
-    }
-    content
-}
-
-/// Advance the lifecycle outcome in source-record order. `unknown` means that
-/// no terminal outcome has been observed for the latest opened turn; it does
-/// not claim that a copied session is currently running.
-fn next_session_status(status: &'static str, value: &Value) -> &'static str {
-    let record_type = value["type"].as_str();
-    let payload = &value["payload"];
-    match (record_type, payload["type"].as_str()) {
-        (Some("event_msg"), Some("task_complete")) => "complete",
-        (Some("event_msg"), Some("turn_aborted")) => "aborted",
-        (Some("event_msg"), Some("task_started" | "user_message")) | (Some("turn_context"), _) => {
-            "unknown"
-        }
-        (Some("response_item"), Some("message")) if payload["role"].as_str() == Some("user") => {
-            "unknown"
-        }
-        _ => status,
-    }
+    Ok((messages, tools, records.malformed_lines()))
 }
 
 async fn record_file_error(
@@ -673,18 +408,6 @@ async fn record_file_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn discovers_contract_homes() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("host/user/.codex/sessions")).unwrap();
-        let homes = discover_homes(tmp.path()).unwrap();
-        assert_eq!(homes.layout, SourceLayout::HostUser);
-        assert_eq!(
-            (homes.homes[0].0.as_str(), homes.homes[0].1.as_str()),
-            ("host", "user")
-        );
-    }
-
     #[tokio::test]
     async fn indexes_redacted_rollout_fixture() {
         let temp = tempfile::tempdir().unwrap();

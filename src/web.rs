@@ -14,8 +14,6 @@ use tower_http::trace::TraceLayer;
 #[cfg(test)]
 mod regression;
 
-// Presentation policy only: retain these sessions in the rebuildable index.
-const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const SESSION_PAGE_SIZE: usize = 50;
 const MAX_SESSION_PAGE: u32 = 100_000;
 const TRANSCRIPT_SECTION_SIZE: usize = 50;
@@ -30,6 +28,7 @@ struct AppState {
 #[derive(FromRow)]
 struct SessionRow {
     id: i64,
+    agent_kind: String,
     external_id: String,
     started_at: Option<String>,
     ended_at: Option<String>,
@@ -61,35 +60,32 @@ struct TranscriptSegment {
 
 #[cfg(test)]
 fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
-    group_transcript_section(messages, false)
+    group_transcript_section(messages, crate::sources::codex::KIND, false)
 }
 
 fn group_transcript_section(
     messages: Vec<MessageRow>,
+    source_kind: &str,
     mut conversation_started: bool,
 ) -> Vec<TranscriptSegment> {
     let mut segments: Vec<TranscriptSegment> = Vec::new();
     for message in messages {
-        let initialization_title =
-            (message.role == "user" || message.role == "developer" || message.role == "system")
-                .then(|| initialization_title(&message.content, !conversation_started))
-                .flatten();
-        let notice_title = match message.role.as_str() {
-            "user" | "developer" | "system"
-                if message.content.trim_start().starts_with("<turn_aborted>") =>
-            {
-                Some("Turn interrupted")
-            }
-            "user" if message.content.trim_start().starts_with("<user_action>") => {
-                Some("User action")
-            }
-            _ => None,
-        };
-        if !conversation_started && message.role == "user" && initialization_title.is_none() {
+        let presentation = crate::sources::classify_message(
+            source_kind,
+            &message.role,
+            &message.content,
+            !conversation_started,
+        );
+        if !conversation_started
+            && message.role == "user"
+            && presentation
+                .as_ref()
+                .is_none_or(|presentation| presentation.initially_open)
+        {
             conversation_started = true;
         }
         if message.role == "assistant"
-            && initialization_title.is_none()
+            && presentation.is_none()
             && let Some(previous) = segments.last_mut()
             && previous.role == "assistant"
             && previous.initially_open
@@ -108,42 +104,19 @@ fn group_transcript_section(
         segments.push(TranscriptSegment {
             sequence: message.sequence,
             timestamp: message.timestamp,
-            title: initialization_title
-                .or(notice_title)
-                .map(str::to_owned)
+            title: presentation
+                .as_ref()
+                .map(|presentation| presentation.title.to_owned())
                 .unwrap_or_else(|| message.role.clone()),
-            initially_open: initialization_title.is_none(),
+            initially_open: presentation
+                .as_ref()
+                .is_none_or(|presentation| presentation.initially_open),
             role: message.role,
             paragraphs: vec![message.content],
             truncated_sequences,
         });
     }
     segments
-}
-
-fn initialization_title(content: &str, before_conversation: bool) -> Option<&'static str> {
-    let trimmed = content.trim_start();
-    if trimmed.starts_with("# AGENTS.md instructions for ") {
-        Some("Repository instructions")
-    } else if trimmed.starts_with("<permissions instructions>") {
-        Some("Permissions")
-    } else if trimmed.starts_with("<collaboration_mode>") {
-        Some("Collaboration mode")
-    } else if trimmed.starts_with("<model_switch>") {
-        Some("Model switch")
-    } else if trimmed.starts_with("<skills_instructions>") {
-        Some("Available skills")
-    } else if before_conversation && trimmed.starts_with("You are ") {
-        Some("Initial agent configuration")
-    } else if trimmed.starts_with("<multi_agent_mode>") {
-        Some("Multi-agent mode")
-    } else if trimmed.starts_with("<multi_agent_role>") {
-        Some("Multi-agent role")
-    } else if trimmed.starts_with("<environment_context>") {
-        Some("Environment context")
-    } else {
-        None
-    }
 }
 
 #[derive(Deserialize, Default)]
@@ -267,14 +240,15 @@ async fn sessions(
         filters.user = None;
     }
     let options = load_filter_options(&state.pool, &filters, show_origins).await?;
+    let model_exclusion = crate::sources::model_exclusion();
     let mut rows = sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
+        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
-        WHERE (s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
+        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id
+        WHERE (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) AND (? IS NULL OR h.name=?) AND (? IS NULL OR u.os_user=?) AND (? IS NULL OR s.model=?) AND (? IS NULL OR s.status=?)
         ORDER BY s.started_at DESC, s.id DESC
         LIMIT ? OFFSET ?
-    "#).bind(HIDDEN_MODEL_PATTERN).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).bind((SESSION_PAGE_SIZE + 1) as i64).bind(i64::from(page - 1) * SESSION_PAGE_SIZE as i64).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
+    "#).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).bind(&filters.host).bind(&filters.host).bind(&filters.user).bind(&filters.user).bind(&filters.model).bind(&filters.model).bind(&filters.status).bind(&filters.status).bind((SESSION_PAGE_SIZE + 1) as i64).bind(i64::from(page - 1) * SESSION_PAGE_SIZE as i64).fetch_all(&state.pool).await.map_err(|error| WebError::database("load sessions", error))?;
     let has_next = rows.len() > SESSION_PAGE_SIZE;
     rows.truncate(SESSION_PAGE_SIZE);
     let pagination = Pagination {
@@ -367,10 +341,12 @@ async fn load_filter_options(
     } else {
         (Vec::new(), Vec::new())
     };
+    let model_exclusion = crate::sources::model_exclusion();
     let models = sqlx::query_scalar(
-        "SELECT DISTINCT model FROM sessions WHERE model IS NOT NULL AND model <> '' AND model NOT LIKE ? ORDER BY model",
+        "SELECT DISTINCT s.model FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE s.model IS NOT NULL AND s.model <> '' AND (a.kind<>? OR s.model NOT LIKE ?) ORDER BY s.model",
     )
-    .bind(HIDDEN_MODEL_PATTERN)
+    .bind(model_exclusion.source_kind)
+    .bind(model_exclusion.pattern)
     .fetch_all(pool)
     .await
     .map_err(|error| WebError::database("load model filters", error))?;
@@ -437,10 +413,11 @@ async fn session(
         next_href: (has_next && section < MAX_SESSION_PAGE)
             .then(|| transcript_href(id, section + 1)),
     };
+    let segments = group_transcript_section(messages, &row.agent_kind, section > 1);
     Ok(Html(
         SessionTemplate {
             session: row,
-            segments: group_transcript_section(messages, section > 1),
+            segments,
             show_origin,
             pagination,
         }
@@ -450,11 +427,12 @@ async fn session(
 }
 
 async fn load_session(pool: &SqlitePool, id: i64) -> Result<SessionRow, WebError> {
+    let model_exclusion = crate::sources::model_exclusion();
     sqlx::query_as::<_, SessionRow>(r#"
-        SELECT s.id,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
+        SELECT s.id,a.kind agent_kind,s.external_id,s.started_at,s.ended_at,s.model,s.status,s.cwd,h.name hostname,u.os_user,
                (SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count
-        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (s.model IS NULL OR s.model NOT LIKE ?)
-    "#).bind(id).bind(HIDDEN_MODEL_PATTERN).fetch_optional(pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)
+        FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE s.id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)
+    "#).bind(id).bind(model_exclusion.source_kind).bind(model_exclusion.pattern).fetch_optional(pool).await.map_err(|error| WebError::database("load session", error))?.ok_or_else(WebError::not_found)
 }
 
 async fn message(
@@ -732,6 +710,7 @@ mod tests {
         let html = SessionTemplate {
             session: SessionRow {
                 id: 1,
+                agent_kind: "codex".into(),
                 external_id: "redacted-session".into(),
                 started_at: None,
                 ended_at: None,
@@ -775,6 +754,7 @@ mod tests {
             let html = SessionTemplate {
                 session: SessionRow {
                     id: 1,
+                    agent_kind: "codex".into(),
                     external_id: "synthetic-session".into(),
                     started_at: None,
                     ended_at: None,
@@ -909,6 +889,7 @@ mod tests {
     fn later_sections_do_not_reclassify_conversation_as_initial_setup() {
         let segments = group_transcript_section(
             vec![message(50, "user", "You are seeing ordinary conversation")],
+            crate::sources::codex::KIND,
             true,
         );
 
@@ -917,10 +898,27 @@ mod tests {
     }
 
     #[test]
+    fn source_specific_markers_are_ordinary_for_unknown_agents() {
+        let segments = group_transcript_section(
+            vec![message(
+                0,
+                "developer",
+                "<skills_instructions>generic content</skills_instructions>",
+            )],
+            "other-agent",
+            false,
+        );
+
+        assert_eq!(segments[0].title, "developer");
+        assert!(segments[0].initially_open);
+    }
+
+    #[test]
     fn sessions_page_renders_known_filter_values_and_separate_identity_columns() {
         let html = SessionsTemplate {
             sessions: vec![SessionRow {
                 id: 1,
+                agent_kind: "synthetic".into(),
                 external_id: "redacted-session".into(),
                 started_at: None,
                 ended_at: None,

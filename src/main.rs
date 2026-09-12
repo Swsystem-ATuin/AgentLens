@@ -2,6 +2,7 @@ mod auth;
 mod db;
 mod fingerprint;
 mod ingest;
+mod sources;
 mod web;
 
 use anyhow::Result;

@@ -1,5 +1,6 @@
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
+use std::{fs::File, path::PathBuf};
 
 fn write_source(root: &Path, area: &str, name: &str, records: &[Value]) -> PathBuf {
     let directory = root

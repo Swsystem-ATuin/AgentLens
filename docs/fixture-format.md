@@ -21,3 +21,5 @@ Parsing is intentionally tolerant: unknown fields and event types are retained i
 Resuming a session can append setup as ordinary message records: a user message beginning `# AGENTS.md instructions for `, a developer message beginning `<permissions instructions>`, and a user message beginning `<environment_context>`. Other observed setup prefixes are `<skills_instructions>`, `<multi_agent_mode>`, `<multi_agent_role>`, `<collaboration_mode>`, and `<model_switch>`. These can occur after conversation has begun. Display classification does not change their stored content or message counts.
 
 Messages beginning `<turn_aborted>` occur with user or developer roles and indicate interruptions. A user message beginning `<user_action>` can contain review activity with `<context>`, `<action>`, and `<results>` children. These notices remain expanded in the transcript. Display classification does not derive lifecycle status from message text.
+
+These raw-format and presentation rules are implemented only in the [Codex source adapter](source-adapters.md). Generic ingestion receives normalized records and does not inspect these Codex fields or markers.

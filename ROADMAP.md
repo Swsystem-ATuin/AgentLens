@@ -43,7 +43,7 @@ These five items retain the original TODO acceptance criteria. The regression su
 
 - [x] **R1.3 — Load long transcripts in sections.** Bound database reads and rendered response size while preserving message order and sensible grouping across section boundaries. Collapsed content should not require transferring the entire transcript upfront. Delivered with 50-message/51-row sections, bounded message previews, lazy message-part navigation, section-aware grouping, and [documented query and response limits](docs/transcript-sections.md).
 
-- [ ] **R1.4 — Separate source adapters from generic application logic.** Move Codex discovery, parsing, and setup-marker recognition into source-specific modules. Keep normalised events, indexing, queries, and presentation generic; preserve existing behavior with tests.
+- [x] **R1.4 — Separate source adapters from generic application logic.** Move Codex discovery, parsing, and setup-marker recognition into source-specific modules. Keep normalised events, indexing, queries, and presentation generic; preserve existing behavior with tests. Delivered with a source-neutral record/presentation contract, a dedicated Codex discovery and streaming parser module, agent-kind presentation dispatch, cross-source policy regressions, and [documented boundaries and performance verification](docs/source-adapters.md).
 
 - [ ] **R1.5 — Separate querying and transcript presentation from route handlers.** Extract focused modules as part of the source-boundary refactor, keeping handlers responsible for request extraction and responses.
 
