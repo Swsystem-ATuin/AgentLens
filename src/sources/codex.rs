@@ -1,6 +1,6 @@
 use super::{
-    DiscoveredHome, DiscoveredSources, LimitWindow, MessagePresentation, NormalizedRecord,
-    PressureSnapshot, SourceLayout, TokenUsage,
+    Adapter, DiscoveredHome, DiscoveredSources, LimitWindow, MessagePresentation, NormalizedRecord,
+    PressureSnapshot, SessionSummary, SourceLayout, TokenUsage,
 };
 use crate::fingerprint::{HashingReader, ensure_unchanged};
 use anyhow::{Context, Result, ensure};
@@ -19,21 +19,6 @@ pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-codex-home";
 const MAX_PARSE_DIAGNOSTICS: usize = 20;
-
-pub(crate) struct RolloutSummary {
-    pub(crate) metadata: Metadata,
-    pub(crate) content_hash: String,
-    pub(crate) external_id: String,
-    pub(crate) started_at: Option<String>,
-    pub(crate) ended_at: Option<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) status: &'static str,
-    pub(crate) raw_metadata: String,
-    pub(crate) derived_title: Option<String>,
-    pub(crate) malformed_lines: usize,
-    pub(crate) parse_error: Option<String>,
-}
 
 pub(crate) struct RolloutRecords<'a> {
     path: &'a Path,
@@ -185,6 +170,7 @@ pub(crate) fn discover(root: &Path) -> Result<DiscoveredSources> {
             layout: SourceLayout::DirectHome,
             database_layout: DIRECT_HOME_LAYOUT,
             homes: vec![DiscoveredHome {
+                adapter: Adapter::Codex,
                 host: String::new(),
                 user: String::new(),
                 path: root.to_path_buf(),
@@ -207,6 +193,7 @@ pub(crate) fn discover(root: &Path) -> Result<DiscoveredSources> {
             let path = user.path().join(".codex");
             if optional_directory(&path)? {
                 homes.push(DiscoveredHome {
+                    adapter: Adapter::Codex,
                     host: host.file_name().to_string_lossy().into(),
                     user: user.file_name().to_string_lossy().into(),
                     path,
@@ -240,17 +227,7 @@ pub(crate) fn optional_directory(path: &Path) -> Result<bool> {
     }
 }
 
-pub(crate) fn home_belongs_to_root(home: &Path, root: &Path, layout: SourceLayout) -> bool {
-    match layout {
-        SourceLayout::DirectHome => home == root,
-        SourceLayout::HostUser => home.strip_prefix(root).is_ok_and(|relative| {
-            relative.components().count() == 3
-                && relative.file_name() == Some(std::ffi::OsStr::new(".codex"))
-        }),
-    }
-}
-
-pub(crate) fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
+pub(crate) fn scan_rollout(path: &Path) -> Result<SessionSummary> {
     let file = File::open(path).context("open rollout")?;
     let metadata = file.metadata().context("inspect rollout")?;
     let mut reader = BufReader::new(HashingReader::new(file));
@@ -325,7 +302,7 @@ pub(crate) fn scan_rollout(path: &Path) -> Result<RolloutSummary> {
         .as_str()
         .or_else(|| meta["timestamp"].as_str())
         .map(str::to_owned);
-    Ok(RolloutSummary {
+    Ok(SessionSummary {
         metadata,
         content_hash,
         external_id,

@@ -21,6 +21,8 @@ Advisory names are normalized to single spaces and limited to 160 Unicode charac
 
 Rollouts remain authoritative for discovery. `session_index.jsonl` can rename an indexed session but cannot create one. Every refresh reapplies advisory names even when all rollout files are unchanged, so changing or removing the optional index updates titles without forcing transcript reimport.
 
+For Gemini CLI, a valid recording `summary` is the advisory title, followed by the first user message and then the native session ID. Gemini titles use the same whitespace normalization, 80-character conversation/summary bound, and control-character rejection. The source kind remains part of identity, so a Gemini chat and Codex rollout may safely share the same native ID.
+
 ## Ingestion and performance
 
 Identity hashing retains only fixed-size digest state. Conversation fallback construction stops at its character limit. The optional advisory file is read one record at a time and each matching title is applied with the existing `(instance_id, external_id)` session index; it is not retained as a file-sized application map. Refresh performs one indexed fallback-title update per discovered source instance and one indexed lookup per valid advisory record. Existing transaction and per-rollout savepoint boundaries are unchanged.

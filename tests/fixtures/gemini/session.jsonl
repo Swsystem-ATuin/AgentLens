@@ -1,0 +1,10 @@
+{"sessionId":"00000000-0000-0000-0000-000000000001","projectHash":"synthetic-project-hash","startTime":"2026-02-01T10:00:00Z","lastUpdated":"2026-02-01T10:05:00Z","kind":"main","directories":["/synthetic/project"],"unknownMetadata":true}
+{"id":"info-1","timestamp":"2026-02-01T10:00:00Z","type":"info","content":"Synthetic Gemini initialization","unknownField":true}
+{"id":"user-1","timestamp":"2026-02-01T10:01:00Z","type":"user","content":[{"text":"Synthetic Gemini request"},{"unknownPart":true}]}
+{"id":"gemini-1","timestamp":"2026-02-01T10:02:00Z","type":"gemini","content":[{"text":"Synthetic Gemini response"}],"model":"gemini-synthetic","tokens":{"input":100,"output":20,"cached":40,"thoughts":5,"tool":3,"total":120},"toolCalls":[{"id":"tool-1","name":"read_file","args":{"file_path":"/synthetic/project/file.txt"},"result":[{"text":"Synthetic tool output"}],"status":"success","timestamp":"2026-02-01T10:01:30Z","unknownToolField":true}]}
+{"id":"discarded","timestamp":"2026-02-01T10:03:00Z","type":"user","content":"This rewound message must not survive"}
+{"$rewindTo":"discarded"}
+{"$set":{"lastUpdated":"2026-02-01T10:05:00Z","summary":"Synthetic Gemini title","unknownUpdate":true}}
+{"id":"warning-1","timestamp":"2026-02-01T10:04:00Z","type":"warning","content":"Synthetic Gemini warning"}
+{"id":"info-2","timestamp":"2026-02-01T10:04:30Z","type":"info","content":"Synthetic resumed Gemini information"}
+{"id":"unknown-1","timestamp":"2026-02-01T10:05:00Z","type":"future-message-kind","content":"Unknown records are ignored"}

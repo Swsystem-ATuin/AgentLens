@@ -2,6 +2,30 @@ use super::*;
 use serde_json::{Value, json};
 use std::{fs::File, path::PathBuf};
 
+type MixedSessionRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+type FiveOptionalCounts = (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+type FiveOptionalCountsAndCount = (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+);
+
 fn write_source(root: &Path, area: &str, name: &str, records: &[Value]) -> PathBuf {
     let directory = root
         .join("synthetic-host/synthetic-user/.codex")
@@ -39,6 +63,192 @@ fn write_direct_source(home: &Path, name: &str, records: &[Value]) -> PathBuf {
 
 fn meta(id: &str) -> Value {
     json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"id":id,"future_field":true}})
+}
+
+fn write_gemini_fixture(root: &Path) -> PathBuf {
+    let directory = root.join("synthetic-host/synthetic-user/.gemini/tmp/project/chats");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("session-synthetic.jsonl");
+    std::fs::write(
+        &path,
+        include_bytes!("../../tests/fixtures/gemini/session.jsonl"),
+    )
+    .unwrap();
+    path
+}
+
+#[tokio::test]
+async fn codex_and_gemini_share_views_without_identity_or_projection_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir
+        .path()
+        .join("synthetic-host/synthetic-user/.codex/sessions");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("codex.jsonl"),
+        include_bytes!("../../tests/fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    write_gemini_fixture(dir.path());
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.sessions, report.messages, report.tool_calls),
+        (2, 7, 1)
+    );
+    let sessions: Vec<MixedSessionRow> = sqlx::query_as(
+            "SELECT a.kind,s.external_id,s.stable_id,s.model,s.cwd,s.title FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id ORDER BY a.kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].0, "codex");
+    assert_eq!(sessions[1].0, "gemini");
+    assert_eq!(
+        sessions[0].1, sessions[1].1,
+        "native IDs deliberately collide"
+    );
+    assert_ne!(
+        sessions[0].2, sessions[1].2,
+        "public identities stay source-scoped"
+    );
+    assert_eq!(
+        (&sessions[1].3, &sessions[1].4, sessions[1].5.as_str()),
+        (
+            &Some("gemini-synthetic".into()),
+            &Some("/synthetic/project".into()),
+            "Synthetic Gemini title"
+        )
+    );
+    let lifecycle: (String, Option<String>) = sqlx::query_as(
+        "SELECT status,ended_at FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE a.kind='gemini'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lifecycle, ("unknown".into(), None));
+    let gemini_session: i64 = sqlx::query_scalar(
+        "SELECT s.id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE a.kind='gemini'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let messages: Vec<(String, String)> =
+        sqlx::query_as("SELECT role,content FROM messages WHERE session_id=? ORDER BY sequence")
+            .bind(gemini_session)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        messages,
+        [
+            ("info".into(), "Synthetic Gemini initialization".into()),
+            ("user".into(), "Synthetic Gemini request".into()),
+            ("assistant".into(), "Synthetic Gemini response".into()),
+            ("warning".into(), "Synthetic Gemini warning".into()),
+            ("info".into(), "Synthetic resumed Gemini information".into()),
+        ]
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|(_, content)| !content.contains("rewound"))
+    );
+    let tool: (String, String, String) = sqlx::query_as(
+        "SELECT c.tool_name,r.output,r.outcome FROM tool_calls c JOIN tool_results r ON r.tool_call_id=c.id WHERE c.session_id=?",
+    )
+    .bind(gemini_session)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tool,
+        (
+            "read_file".into(),
+            "Synthetic tool output".into(),
+            "observed".into()
+        )
+    );
+    let usage: FiveOptionalCounts = sqlx::query_as(
+        "SELECT per_turn_input_tokens,per_turn_output_tokens,per_turn_cached_input_tokens,per_turn_reasoning_output_tokens,per_turn_total_tokens FROM usage_events WHERE session_id=?",
+    )
+    .bind(gemini_session)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(usage, (Some(100), Some(20), Some(40), Some(5), Some(120)));
+    let aggregate: FiveOptionalCountsAndCount = sqlx::query_as(
+        "SELECT input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,per_turn_observation_count FROM session_usage WHERE session_id=?",
+    )
+    .bind(gemini_session)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(aggregate, (None, None, None, None, None, 1));
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().skipped,
+        2
+    );
+
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+}
+
+#[tokio::test]
+async fn gemini_partial_files_retain_valid_records_and_retry_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let chat = dir
+        .path()
+        .join("synthetic-host/synthetic-user/.gemini/tmp/project/chats/session.jsonl");
+    std::fs::create_dir_all(chat.parent().unwrap()).unwrap();
+    std::fs::write(
+        &chat,
+        concat!(
+            "{\"sessionId\":\"gemini-partial\",\"projectHash\":\"synthetic\",\"startTime\":\"2026-01-01T00:00:00Z\"}\n",
+            "malformed synthetic line\n",
+            "{\"id\":\"message\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"user\",\"content\":\"retained synthetic message\"}\n"
+        ),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let first = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (
+            first.sessions,
+            first.messages,
+            first.errors,
+            first.partial_files,
+            first.malformed_lines,
+        ),
+        (1, 1, 0, 1, 1)
+    );
+    let diagnostic: (String, String) =
+        sqlx::query_as("SELECT parse_status,parse_error FROM source_files WHERE kind='chats'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        diagnostic,
+        ("partial".into(), "line 2: invalid JSON or UTF-8".into())
+    );
+
+    let retry = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((retry.sessions, retry.errors), (0, 1));
+    let content: String = sqlx::query_scalar("SELECT content FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(content, "retained synthetic message");
 }
 
 #[tokio::test]

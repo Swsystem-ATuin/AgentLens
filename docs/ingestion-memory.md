@@ -1,10 +1,12 @@
-# Bounded rollout ingestion
+# Ingestion memory
 
-Agent Lens imports each rollout in two streaming passes instead of retaining every decoded JSON record for the file.
+Agent Lens imports each Codex rollout in two streaming passes instead of retaining every decoded JSON record for the file.
 
 The first pass hashes the exact source bytes and derives only session-level metadata: native ID, timestamps, working directory, first turn-context model, lifecycle status, raw session metadata, and malformed-line diagnostics. The second pass reopens the unchanged file and writes messages, tool calls, outputs, and usage records one JSON value at a time. File metadata is checked before, between, and after the passes. Any failure rolls back the existing per-file savepoint, preserving the previous projection under the normal refresh rules.
 
 Memory now grows with the largest individual JSONL record and retained session-metadata record, rather than the total number of records in a rollout. Message content and raw JSON serialization are also bounded to the current record. Malformed-line totals remain exact, while at most 20 sanitised line examples are stored; additional lines are represented by an omitted-count suffix. Individual record size is not capped, so a single exceptionally large JSON record can still require substantial memory.
+
+Gemini CLI is deliberately different. Its upstream-compatible `$rewindTo`, repeated-ID replacement, and `$set.messages` checkpoint behavior requires retaining the final active message set, after which normalized events are queued for insertion. Gemini memory therefore grows with active transcript content and may briefly include both decoded messages and normalized event bodies. This limitation is explicit in the [Gemini adapter contract](gemini-adapter.md#capability-boundaries); it does not change Codex's bounded behavior.
 
 Tool calls and ordered results are inserted as they are read. Results pair to the latest preceding matching call through SQLite rather than an in-memory map. The supporting `(session_id, call_id, sequence)` index is created automatically whenever the database opens. Duplicate call IDs retain deterministic latest-preceding-call behavior, and unmatched outputs remain visible as orphan results. Turn reconstruction retains only the active pending turn and the last boundary state while writing evidence events in source order; completed summaries are inserted immediately. Usage accounting similarly retains only five counter states plus the current record. Nullable context/rate evidence is boxed on that normalized variant and written on the same usage row, avoiding a larger message/tool record enum or another event collection; see [ordered turn history](turn-history.md), [token accounting semantics](token-accounting.md), and [pressure diagnostics](diagnostics.md).
 

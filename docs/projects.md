@@ -22,7 +22,7 @@ Run the server with `--projects-file projects.local.json` or set `AGENT_LENS_PRO
 
 ## Path matching
 
-- `host` must exactly match the indexed host. Use an empty string for a direct `.codex` index, whose host is intentionally empty.
+- `host` must exactly match the indexed host. Use an empty string for a direct agent-home index, whose host is intentionally empty.
 - `root` must be an absolute POSIX path or an absolute drive-letter Windows path. Windows drive paths accept either slash style and compare ASCII case-insensitively; POSIX paths are case-sensitive.
 - A subproject path is relative to its parent root. Its displayed and filtered label is `Project / Subproject`.
 - Matching uses directory-component boundaries, so `/work/repo` does not match `/work/repository`. When configured roots overlap, the longest matching path wins.

@@ -1,6 +1,52 @@
-use std::path::PathBuf;
+use anyhow::{Result, ensure};
+use std::{
+    fs::Metadata,
+    path::{Path, PathBuf},
+};
 
 pub(crate) mod codex;
+pub(crate) mod gemini;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Adapter {
+    Codex,
+    Gemini,
+}
+
+impl Adapter {
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Self::Codex => codex::KIND,
+            Self::Gemini => gemini::KIND,
+        }
+    }
+
+    pub(crate) fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => codex::DISPLAY_NAME,
+            Self::Gemini => gemini::DISPLAY_NAME,
+        }
+    }
+
+    pub(crate) fn parser_version(self) -> i64 {
+        match self {
+            Self::Codex => codex::PARSER_VERSION,
+            Self::Gemini => gemini::PARSER_VERSION,
+        }
+    }
+
+    pub(crate) fn source_rank(self, kind: &str) -> usize {
+        match self {
+            Self::Codex => codex::SOURCE_AREAS
+                .iter()
+                .position(|candidate| *candidate == kind),
+            Self::Gemini => gemini::SOURCE_AREAS
+                .iter()
+                .position(|candidate| *candidate == kind),
+        }
+        .unwrap_or(usize::MAX)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceLayout {
@@ -9,15 +55,67 @@ pub(crate) enum SourceLayout {
 }
 
 pub(crate) struct DiscoveredHome {
+    pub(crate) adapter: Adapter,
     pub(crate) host: String,
     pub(crate) user: String,
     pub(crate) path: PathBuf,
+}
+
+pub(crate) struct SessionSummary {
+    pub(crate) metadata: Metadata,
+    pub(crate) content_hash: String,
+    pub(crate) external_id: String,
+    pub(crate) started_at: Option<String>,
+    pub(crate) ended_at: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) status: &'static str,
+    pub(crate) raw_metadata: String,
+    pub(crate) derived_title: Option<String>,
+    pub(crate) malformed_lines: usize,
+    pub(crate) parse_error: Option<String>,
 }
 
 pub(crate) struct DiscoveredSources {
     pub(crate) layout: SourceLayout,
     pub(crate) database_layout: &'static str,
     pub(crate) homes: Vec<DiscoveredHome>,
+}
+
+pub(crate) fn discover(root: &Path) -> Result<DiscoveredSources> {
+    ensure!(
+        codex::optional_directory(root)?,
+        "source root is missing; refresh cancelled"
+    );
+    if root.file_name() == Some(std::ffi::OsStr::new(".codex")) {
+        return codex::discover(root);
+    }
+    if root.file_name() == Some(std::ffi::OsStr::new(".gemini")) {
+        return gemini::discover(root);
+    }
+    let mut codex = codex::discover(root)?;
+    let gemini = gemini::discover(root)?;
+    codex.homes.extend(gemini.homes);
+    Ok(codex)
+}
+
+pub(crate) fn home_belongs_to_root(
+    adapter: Adapter,
+    home: &Path,
+    root: &Path,
+    layout: SourceLayout,
+) -> bool {
+    match layout {
+        SourceLayout::DirectHome => home == root,
+        SourceLayout::HostUser => home.strip_prefix(root).is_ok_and(|relative| {
+            relative.components().count() == 3
+                && relative.file_name()
+                    == Some(std::ffi::OsStr::new(match adapter {
+                        Adapter::Codex => ".codex",
+                        Adapter::Gemini => ".gemini",
+                    }))
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -145,6 +243,7 @@ pub(crate) fn classify_message(
 ) -> Option<MessagePresentation> {
     match source_kind {
         codex::KIND => codex::classify_message(role, content, before_conversation),
+        gemini::KIND => gemini::classify_message(role),
         _ => None,
     }
 }

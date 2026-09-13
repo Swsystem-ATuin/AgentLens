@@ -1642,6 +1642,97 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
 }
 
 #[tokio::test]
+async fn codex_and_gemini_render_together_with_adapter_specific_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir
+        .path()
+        .join("sources/synthetic-host/synthetic-user/.codex/sessions");
+    let gemini = dir
+        .path()
+        .join("sources/synthetic-host/synthetic-user/.gemini/tmp/project/chats");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::create_dir_all(&gemini).unwrap();
+    std::fs::write(
+        codex.join("codex.jsonl"),
+        include_bytes!("../../tests/fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    std::fs::write(
+        gemini.join("session.jsonl"),
+        include_str!("../../tests/fixtures/gemini/session.jsonl")
+            .replace("/synthetic/project", "/workspace/gemini"),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    crate::ingest::ingest_data_root(&pool, &dir.path().join("sources"))
+        .await
+        .unwrap();
+    let gemini_id: String = sqlx::query_scalar(
+        "SELECT s.stable_id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE a.kind='gemini'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let project_file = dir.path().join("projects.json");
+    std::fs::write(
+        &project_file,
+        r#"{"timezone":"UTC","projects":[{"name":"Shared","host":"synthetic-host","root":"/workspace"}]}"#,
+    )
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router_with_projects(
+        pool,
+        crate::auth::Credentials::load(&auth).unwrap(),
+        crate::projects::ProjectConfig::load(Some(&project_file)).unwrap(),
+    );
+
+    let (status, list) = get(&app, "/sessions?project=Shared").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.contains("Synthetic Gemini title"), "{list}");
+    assert!(list.contains("Redacted test request"), "{list}");
+    assert!(list.contains(">gemini</td>"), "{list}");
+    assert!(list.contains(">codex</td>"), "{list}");
+    assert_eq!(list.matches(">Shared</td>").count(), 2, "{list}");
+
+    let (status, transcript) = get(&app, &format!("/sessions/{gemini_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        transcript
+            .matches("<strong>Gemini information</strong>")
+            .count(),
+        2
+    );
+    assert!(
+        transcript.contains(
+            "<details class=\"message info\"><summary><strong>Gemini information</strong>"
+        ),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains(
+            "<details class=\"message warning\" open><summary><strong>Gemini warning</strong>"
+        ),
+        "{transcript}"
+    );
+    for ordinary in [
+        "Synthetic Gemini request",
+        "Synthetic Gemini response",
+        "Synthetic resumed Gemini information",
+        "read_file",
+        "Synthetic tool output",
+    ] {
+        assert!(
+            transcript.contains(ordinary),
+            "missing {ordinary}: {transcript}"
+        );
+    }
+    assert!(!transcript.contains("rewound message"), "{transcript}");
+}
+
+#[tokio::test]
 async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))

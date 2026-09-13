@@ -1,17 +1,17 @@
 # Agent Lens
 
-Agent Lens is a local, self-hosted Rust web application for indexing and browsing coding-agent activity. Codex is the first supported source, while the storage model uses generic agents, hosts, users, and instances so other agents can be added later.
+Agent Lens is a local, self-hosted Rust web application for indexing and browsing coding-agent activity from Codex and Gemini CLI. Its storage model uses generic agents, hosts, users, and instances so additional sources can be added without imposing Codex-specific concepts.
 
 Raw agent files are always the source of truth. The SQLite database is a disposable local index: it can be deleted and rebuilt without changing anything under `data/`.
 
-Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Codex discovery, JSONL interpretation, lifecycle rules, parser versioning, and presentation markers live in the Codex adapter; normalized database orchestration and web rendering remain source-neutral. The web application separately defines its [route, query, and presentation boundaries](docs/web-architecture.md).
+Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Discovery, raw-record interpretation, parser versioning, capabilities, and presentation markers live in Codex and Gemini modules; normalized database orchestration and web rendering remain source-neutral. The web application separately defines its [route, query, and presentation boundaries](docs/web-architecture.md).
 
 ## Current functionality
 
-- Discovers Codex homes at `data/{hostname}/{os_user}/.codex/`, or accepts one `.codex/` directory directly.
-- Reads rollout JSONL from `sessions/` and `archived_sessions/` recursively.
+- Discovers Codex and Gemini CLI homes at `data/{hostname}/{os_user}/{.codex,.gemini}/`, or accepts one `.codex/` or `.gemini/` directory directly.
+- Reads Codex rollout JSONL from `sessions/` and `archived_sessions/`, plus Gemini current JSONL and legacy JSON chats from `tmp/*/chats/`, recursively. See the [Gemini adapter contract](docs/gemini-adapter.md).
 - Normalizes sessions, ordered turns and model evidence, messages, tool calls and ordered results, token usage, source files, and ingest runs into SQLite.
-- Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes remain distinct. Session lists show readable titles from valid Codex advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).
+- Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes or agents remain distinct. Session lists show readable titles from valid source advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).
 - Groups working directories into optional host-aware projects and subprojects at request time. The sessions browser includes agent, project, archive-state, and inclusive activity-date filters alongside host, user, model, and status; it displays last observed activity and uses stable activity/public-ID ordering. See [project navigation and date semantics](docs/projects.md).
 - Searches readable titles, native IDs, configured projects, and transcript text from the sessions page. SQLite FTS5 provides bounded, safely highlighted transcript previews linked to complete messages while preserving filters and pagination. See [search semantics, limits, and rebuild overhead](docs/search.md).
 - Renders bounded transcript content as safe CommonMark with GFM tables, fenced code, strikethrough, and task lists. Raw HTML and unsafe link schemes are neutralized, remote images are reduced to alt text, and a restrictive Content Security Policy blocks automatic resource loads. Ordinary text retains its whitespace-preserving fallback. See [safe rich transcript rendering](docs/rich-transcripts.md).
@@ -24,8 +24,8 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 - Reduces cumulative token snapshots into deterministic per-field session totals without double-counting. The authenticated [historical usage dashboard](docs/usage-dashboard.md) groups observation-time deltas by day, week, or month and by session, model, project, host, user, or agent, with cache ratios, recent transcript drill-down, anomaly counts, and explicit partial/unavailable evidence. See [token accounting semantics](docs/token-accounting.md).
 - Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
 - Refreshes new or changed sources using BLAKE3 checksums, skipping unchanged successful imports and preserving previous records if an update fails.
-- Streams each rollout in two record-at-a-time passes while batching index writes transactionally, bounding memory to individual record size instead of total transcript size. See [bounded rollout ingestion](docs/ingestion-memory.md).
-- Provides a sessions list with known filter values and 50-session pages with stable last-activity navigation that preserves every active filter. The [bounded transcript reader](docs/transcript-sections.md) loads 50-message sections, lazily chunks unusually large messages, minimizes recognized initialization sections, and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct `.codex/` home.
+- Streams each Codex rollout in two record-at-a-time passes while batching index writes transactionally, bounding memory to individual record size instead of total transcript size. Gemini retains its final active message set to apply upstream checkpoint and rewind semantics. See [bounded rollout ingestion](docs/ingestion-memory.md) and the [Gemini capability boundaries](docs/gemini-adapter.md#capability-boundaries).
+- Provides a sessions list with known filter values and 50-session pages with stable last-activity navigation that preserves every active filter. The [bounded transcript reader](docs/transcript-sections.md) loads 50-message sections, lazily chunks unusually large messages, minimizes recognized initialization sections, and groups consecutive agent replies into one block with separate paragraphs. Host and user fields are omitted when the index was built from one direct agent home.
 - Derives each session's coarse lifecycle status from source-record order. Later completion or interruption events win; subsequent turn or user activity resets an earlier terminal outcome to `unknown`, which does not imply the copied session is currently running. See [session status semantics](docs/session-status.md).
 
 Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidden from the sessions list, model dropdown, and direct transcript URLs. Their indexed data is retained. Restart the server after updating; no refresh or rebuild is required for this visibility rule.
@@ -37,7 +37,7 @@ Transcript setup blocks are labeled and collapsed even after a session resumes, 
 ## Requirements
 
 - A recent stable Rust toolchain
-- Either copied Codex homes beneath `data/{hostname}/{os_user}/.codex/`, or one copied `.codex/` home
+- Copied Codex and/or Gemini CLI homes beneath `data/{hostname}/{os_user}/`, or one copied `.codex/` or `.gemini/` home
 
 Fixture data and generated SQLite indexes are intentionally excluded from Git.
 
@@ -49,13 +49,14 @@ Create or refresh the index from raw data:
 cargo run -- refresh --data data
 # Or index one home without host/user labels:
 cargo run -- refresh --data /path/to/.codex
+cargo run -- refresh --data /path/to/.gemini
 ```
 
-Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, hard file errors, partial files, malformed lines, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort and roll back projection changes while retaining only a fixed sanitised failure code and timing for health diagnostics. A direct `.codex` refresh is accepted for a new index or one whose previous successful rebuild/refresh also used direct-home mode. Changing between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
+Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, hard file errors, partial files, malformed lines, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort and roll back projection changes while retaining only a fixed sanitised failure code and timing for health diagnostics. A direct-agent refresh is accepted for a new index or one whose previous successful rebuild/refresh used the same direct-home adapter. Changing adapters or switching between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
 
 Refresh deterministically prefers active session files and then the lexically earliest logical path when duplicate source files claim one identity. It can replace an older noncanonical winner so repeated refresh and a fresh rebuild converge. For coherent periodic copies, publish a completed immutable versioned directory by atomically retargeting a stable directory symlink; the exact [snapshot, append-validation, retry, and duplicate rules](docs/refresh.md#snapshot-publication-contract) are documented with performance results.
 
-Source directories may be symbolic links to nightly backups, including the data root, host/user folders, `.codex`, and session subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
+Source directories may be symbolic links to nightly backups, including the data root, host/user folders, agent homes, and session/chat subdirectories. Keep the same link paths between refreshes and publish/retarget backups before starting refresh. Broken links or directory loops cancel refresh and preserve the existing index; links to individual files are unsupported. Update the binary and run refresh; no rebuild is needed.
 
 Existing databases are upgraded automatically: files without hashes are reimported once, source/session identities are backfilled, transcript FTS is built once when absent, and legacy paired tool outputs become order-unknown timeline results. No full rebuild is required. Run one refresh after updating; parser version 7 reimports existing rollouts once to recover exact tool-result order, calculate trustworthy token totals, reconstruct ordered turn/model history, and retain context/rate evidence while also deriving conversation titles and applying optional `session_index.jsonl` names. Legacy usage and tool rows remain preserved, but deliberately have no calculated summaries, pressure values, or invented turn associations until that refresh. Checksums, normalized records, and subsequent search-index updates are committed together; failed or partial replacements retain the previous transcript and are retried on the next refresh. New partial files still expose their valid records. See [refresh behavior and verification](docs/refresh.md) for archive moves, duplicate identities, source publication, and limitations.
 
@@ -65,6 +66,7 @@ Explicitly discard and rebuild the index from raw data (this also stores BLAKE3 
 cargo run -- rebuild --data data
 # Or rebuild from one home without host/user labels:
 cargo run -- rebuild --data /path/to/.codex
+cargo run -- rebuild --data /path/to/.gemini
 ```
 
 Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.

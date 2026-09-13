@@ -1,6 +1,6 @@
 use crate::{
     fingerprint::hash_file,
-    sources::{NormalizedRecord, SourceLayout, codex},
+    sources::{self, Adapter, NormalizedRecord, SourceLayout, codex, gemini},
 };
 use anyhow::{Context, Result, ensure};
 use sqlx::{Acquire, SqliteConnection, SqlitePool};
@@ -71,7 +71,7 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
 }
 
 async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Result<IngestReport> {
-    let discovered = codex::discover(root)?;
+    let discovered = sources::discover(root)?;
     let mut transaction = pool.begin().await?;
     let previous_layout: Option<String> = sqlx::query_scalar(
         "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
@@ -83,7 +83,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
         previous_layout
             .as_deref()
             .is_none_or(|previous| previous == discovered.database_layout),
-        "source layout does not match the previous rebuild or refresh; run rebuild to change between a direct .codex home and host/user data"
+        "source layout does not match the previous rebuild or refresh; run rebuild to change between a direct agent home and host/user data"
     );
     sqlx::query("UPDATE ingest_runs SET source_layout=? WHERE id=?")
         .bind(discovered.database_layout)
@@ -92,20 +92,33 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
         .await?;
     let mut report = IngestReport::default();
     for home in discovered.homes {
+        let adapter = home.adapter;
         let (instance, source_key) = ensure_instance(
             &mut transaction,
-            codex::KIND,
-            codex::DISPLAY_NAME,
+            adapter.kind(),
+            adapter.display_name(),
             &home.host,
             &home.user,
             &home.path,
         )
         .await?;
-        for area in codex::SOURCE_AREAS {
-            let dir = home.path.join(area);
-            if !codex::optional_directory(&dir)? {
-                continue;
+        let mut roots: Vec<(std::path::PathBuf, &'static str)> = Vec::new();
+        match adapter {
+            Adapter::Codex => {
+                for area in codex::SOURCE_AREAS {
+                    let path = home.path.join(area);
+                    if codex::optional_directory(&path)? {
+                        roots.push((path, area));
+                    }
+                }
             }
+            Adapter::Gemini => roots.extend(
+                gemini::chat_roots(&home.path)?
+                    .into_iter()
+                    .map(|path| (path, "chats")),
+            ),
+        }
+        for (dir, area) in roots {
             for entry in WalkDir::new(&dir)
                 .follow_links(true)
                 .sort_by_file_name()
@@ -124,12 +137,16 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                     "source traversal encountered an unsupported file symbolic link"
                 );
                 if entry.file_type().is_file()
-                    && entry.path().extension().is_some_and(|x| x == "jsonl")
+                    && match adapter {
+                        Adapter::Codex => entry.path().extension().is_some_and(|x| x == "jsonl"),
+                        Adapter::Gemini => gemini::is_session_file(entry.path()),
+                    }
                 {
                     report.files_seen += 1;
                     let mut file_transaction = transaction.begin().await?;
-                    match ingest_rollout(
+                    match ingest_source(
                         &mut file_transaction,
+                        adapter,
                         run,
                         instance,
                         &source_key,
@@ -169,7 +186,9 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                 }
             }
         }
-        apply_titles(&mut transaction, instance, &home.path).await?;
+        if adapter == Adapter::Codex {
+            apply_codex_titles(&mut transaction, instance, &home.path).await?;
+        }
     }
     (report.removed_sessions, report.removed_files) =
         prune_missing_sources(&mut transaction, root, discovered.layout).await?;
@@ -212,16 +231,21 @@ async fn prune_missing_sources(
     let mut files = 0;
     loop {
         // Bound path buffering even when a database contains many source roots.
-        let rows: Vec<(i64, String, String)> = sqlx::query_as(
-            "SELECT source_files.id,source_files.path,agent_instances.source_home FROM source_files JOIN agent_instances ON agent_instances.id=source_files.instance_id JOIN agents ON agents.id=agent_instances.agent_id WHERE source_files.id>? AND agents.kind=? ORDER BY source_files.id LIMIT 256")
-            .bind(cursor).bind(codex::KIND).fetch_all(&mut *connection).await.context("query source removal candidates")?;
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT source_files.id,source_files.path,agent_instances.source_home,agents.kind FROM source_files JOIN agent_instances ON agent_instances.id=source_files.instance_id JOIN agents ON agents.id=agent_instances.agent_id WHERE source_files.id>? ORDER BY source_files.id LIMIT 256")
+            .bind(cursor).fetch_all(&mut *connection).await.context("query source removal candidates")?;
         if rows.is_empty() {
             break;
         }
-        for (id, path, home) in rows {
+        for (id, path, home, agent_kind) in rows {
             cursor = id;
+            let adapter = match agent_kind.as_str() {
+                codex::KIND => Adapter::Codex,
+                gemini::KIND => Adapter::Gemini,
+                _ => continue,
+            };
             let home = Path::new(&home);
-            if !codex::home_belongs_to_root(home, root, layout) {
+            if !sources::home_belongs_to_root(adapter, home, root, layout) {
                 continue;
             }
             ensure!(
@@ -314,8 +338,9 @@ async fn ensure_instance(
     ))
 }
 
-async fn ingest_rollout(
+async fn ingest_source(
     connection: &mut SqliteConnection,
+    adapter: Adapter,
     run: i64,
     instance: i64,
     source_key: &str,
@@ -327,7 +352,7 @@ async fn ingest_rollout(
         .bind(path.to_string_lossy().as_ref()).fetch_optional(&mut *connection).await?;
     if let Some(checkpoint) = &previous
         && checkpoint.has_session
-        && checkpoint.parser_version == Some(codex::PARSER_VERSION)
+        && checkpoint.parser_version == Some(adapter.parser_version())
         && checkpoint.parse_status == "ok"
         && let Some(hash) = &checkpoint.content_hash
         && hash_file(path)? == *hash
@@ -339,7 +364,10 @@ async fn ingest_rollout(
             .context("record unchanged source observation")?;
         return Ok(None);
     }
-    let summary = codex::scan_rollout(path)?;
+    let summary = match adapter {
+        Adapter::Codex => codex::scan_rollout(path)?,
+        Adapter::Gemini => gemini::scan_session(path)?,
+    };
     if previous.as_ref().is_some_and(|row| row.has_session) {
         ensure!(
             summary.malformed_lines == 0,
@@ -360,7 +388,7 @@ async fn ingest_rollout(
                 || !Path::new(old_path)
                     .try_exists()
                     .context("inspect prior source location")?
-                || source_precedes(kind, path, old_kind, Path::new(old_path)),
+                || source_precedes(adapter, kind, path, old_kind, Path::new(old_path)),
             "duplicate session identity at another source; previous records retained"
         );
     }
@@ -395,7 +423,7 @@ async fn ingest_rollout(
         }
     }
     let (messages, tools, second_pass_malformed) =
-        import_rollout_records(connection, path, &summary.metadata, session_id).await?;
+        import_source_records(connection, adapter, path, &summary.metadata, session_id).await?;
     ensure!(
         second_pass_malformed == summary.malformed_lines,
         "source changed between parsing passes; retry refresh"
@@ -409,7 +437,7 @@ async fn ingest_rollout(
         .bind(parse_status)
         .bind(summary.parse_error.as_deref())
         .bind(&summary.content_hash)
-        .bind(codex::PARSER_VERSION)
+        .bind(adapter.parser_version())
         .bind(source_id)
         .execute(&mut *connection)
         .await?;
@@ -420,19 +448,24 @@ async fn ingest_rollout(
     }))
 }
 
-fn source_precedes(kind: &str, path: &Path, old_kind: &str, old_path: &Path) -> bool {
+fn source_precedes(
+    adapter: Adapter,
+    kind: &str,
+    path: &Path,
+    old_kind: &str,
+    old_path: &Path,
+) -> bool {
     // SOURCE_AREAS defines active-before-archived precedence; sorted logical paths
     // make the winner reproducible without trusting filesystem enumeration order.
-    let rank = |value: &str| {
-        codex::SOURCE_AREAS
-            .iter()
-            .position(|candidate| *candidate == value)
-            .unwrap_or(usize::MAX)
-    };
+    let rank = |value: &str| adapter.source_rank(value);
     (rank(kind), path.as_os_str()) < (rank(old_kind), old_path.as_os_str())
 }
 
-async fn apply_titles(connection: &mut SqliteConnection, instance: i64, home: &Path) -> Result<()> {
+async fn apply_codex_titles(
+    connection: &mut SqliteConnection,
+    instance: i64,
+    home: &Path,
+) -> Result<()> {
     sqlx::query(
         "UPDATE sessions SET title=coalesce(derived_title,external_id) WHERE instance_id=? AND title IS NOT coalesce(derived_title,external_id)",
     )
@@ -458,13 +491,38 @@ async fn apply_titles(connection: &mut SqliteConnection, instance: i64, home: &P
     Ok(())
 }
 
-async fn import_rollout_records(
+enum SourceRecords<'a> {
+    Codex(codex::RolloutRecords<'a>),
+    Gemini(gemini::SessionRecords),
+}
+
+impl SourceRecords<'_> {
+    fn next_record(&mut self) -> Result<Option<(i64, NormalizedRecord)>> {
+        match self {
+            Self::Codex(records) => records.next_record(),
+            Self::Gemini(records) => Ok(records.next_record()),
+        }
+    }
+
+    fn malformed_lines(&self) -> usize {
+        match self {
+            Self::Codex(records) => records.malformed_lines(),
+            Self::Gemini(records) => records.malformed_lines(),
+        }
+    }
+}
+
+async fn import_source_records(
     connection: &mut SqliteConnection,
+    adapter: Adapter,
     path: &Path,
     metadata: &Metadata,
     session_id: i64,
 ) -> Result<(usize, usize, usize)> {
-    let mut records = codex::RolloutRecords::open(path, metadata)?;
+    let mut records = match adapter {
+        Adapter::Codex => SourceRecords::Codex(codex::RolloutRecords::open(path, metadata)?),
+        Adapter::Gemini => SourceRecords::Gemini(gemini::SessionRecords::open(path, metadata)?),
+    };
     let mut messages = 0usize;
     let mut tools = 0usize;
     let mut usage_accounting = crate::usage::UsageAccounting::default();

@@ -32,3 +32,5 @@ Resuming a session can append setup as ordinary message records: a user message 
 Messages beginning `<turn_aborted>` occur with user or developer roles and indicate interruptions. A user message beginning `<user_action>` can contain review activity with `<context>`, `<action>`, and `<results>` children. These notices remain expanded in the transcript. Display classification does not derive lifecycle status from message text.
 
 These raw-format and presentation rules are implemented only in the [Codex source adapter](source-adapters.md). Generic ingestion receives normalized records and does not inspect these Codex fields or markers.
+
+Gemini CLI uses a separate, upstream-pinned [raw format and capability contract](gemini-adapter.md) with its own tiny synthetic fixture.
