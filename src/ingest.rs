@@ -74,7 +74,11 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
             if !codex::optional_directory(&dir)? {
                 continue;
             }
-            for entry in WalkDir::new(&dir).follow_links(true).into_iter() {
+            for entry in WalkDir::new(&dir)
+                .follow_links(true)
+                .sort_by_file_name()
+                .into_iter()
+            {
                 let entry = entry.map_err(|error| {
                     anyhow::anyhow!(
                         "source traversal failed: {}",
@@ -287,7 +291,7 @@ async fn ingest_rollout(
             "partial replacement; previous records retained; retry refresh"
         );
     }
-    let existing: Option<(i64, String)> = sqlx::query_as("SELECT sessions.id,source_files.path FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id WHERE sessions.instance_id=? AND external_id=?")
+    let existing: Option<(i64, String, String)> = sqlx::query_as("SELECT sessions.id,source_files.path,source_files.kind FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id WHERE sessions.instance_id=? AND external_id=?")
         .bind(instance).bind(&summary.external_id).fetch_optional(&mut *connection).await?;
     if existing.is_some() {
         ensure!(
@@ -295,12 +299,13 @@ async fn ingest_rollout(
             "partial replacement; previous records retained; retry refresh"
         );
     }
-    if let Some((_, old_path)) = &existing {
+    if let Some((_, old_path, old_kind)) = &existing {
         ensure!(
             Path::new(old_path) == path
                 || !Path::new(old_path)
                     .try_exists()
-                    .context("inspect prior source location")?,
+                    .context("inspect prior source location")?
+                || source_precedes(kind, path, old_kind, Path::new(old_path)),
             "duplicate session identity at another source; previous records retained"
         );
     }
@@ -358,6 +363,18 @@ async fn ingest_rollout(
         tool_calls: tools,
         malformed_lines: summary.malformed_lines,
     }))
+}
+
+fn source_precedes(kind: &str, path: &Path, old_kind: &str, old_path: &Path) -> bool {
+    // SOURCE_AREAS defines active-before-archived precedence; sorted logical paths
+    // make the winner reproducible without trusting filesystem enumeration order.
+    let rank = |value: &str| {
+        codex::SOURCE_AREAS
+            .iter()
+            .position(|candidate| *candidate == value)
+            .unwrap_or(usize::MAX)
+    };
+    (rank(kind), path.as_os_str()) < (rank(old_kind), old_path.as_os_str())
 }
 
 async fn apply_titles(connection: &mut SqliteConnection, instance: i64, home: &Path) -> Result<()> {

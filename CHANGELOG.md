@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Incremental refresh now traverses source directories deterministically and converges legacy duplicate winners on the active-area, lexically earliest logical source selected by a fresh rebuild. The snapshot publication, append validation, retry, I/O, memory, and performance contracts are documented and regression-tested.
+
 - Rebuild and refresh summaries now distinguish hard file errors, partial files, and malformed-line totals. Parser regressions verify valid-record survival, exact sanitised line diagnostics, unknown fields, schema variants, malformed JSON, and partial UTF-8.
 
 - Session lifecycle status now follows source-record order: later completion or interruption events replace earlier outcomes, while later turn/user activity reopens a terminal session to `unknown` without claiming it is currently running. Existing indexes are automatically reimported on refresh through a parser-version bump.

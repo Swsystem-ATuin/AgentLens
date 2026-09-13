@@ -26,11 +26,17 @@ The recorded hash certifies a successfully committed file projection only when i
 
 - Appends, truncations, and rewritten content replace the affected file's projection, including ordered turns/model evidence, tool results, usage, and context/rate observations. A replacement with a different native session ID removes that path's previous session.
 - A move to `archived_sessions` preserves the session when its former path no longer exists. The session points to its new source before cleanup removes the missing old source row.
-- Two existing files claiming the same session identity are conflicts. The already indexed source wins; on a fresh index the first successfully imported source wins. Conflicting files are reported as errors and retried. Divergent duplicate sources require resolution in the upstream copying process.
+- Two existing files claiming the same session identity are conflicts. Selection is deterministic: an active `sessions` source precedes an `archived_sessions` source, then the lexically earliest logical path wins within an area. Directory traversal sorts every level, and refresh can replace an older noncanonical winner so repeated refresh and a fresh rebuild converge. Losing files are retained as source errors and retried; divergent duplicates still require resolution in the upstream copying process.
 - Missing source files are removed from the index after discovery/import, including their sessions, turns/model evidence, messages, tool calls/results, usage records, and source checkpoints/errors. This also handles removal of an entire host, user, home, or sessions directory. Cleanup covers only the requested direct `.codex` home or `root/host/user/.codex` scope; other roots and agent kinds are untouched. The CLI reports the numbers of sessions and source rows removed.
 - A missing/unreadable root, directory inspection failure, traversal error, broken symbolic link, directory loop, or symbolic link to an individual file aborts the run and rolls back imports and deletions. A present, readable, empty root is an authoritative empty snapshot and removes its indexed sessions. Individual malformed files remain localized parse errors and do not block removal of unrelated missing files. Use a coherent, fully published copy; an empty mount point cannot be distinguished from an intentionally empty source tree.
 - Directory symbolic links are followed at the root, host, user, `.codex`, active/archive area, and nested session-directory levels. Relative targets work too. Logical paths through the links remain the indexed identities, so retargeting a stable link to the next nightly backup retains unchanged-file checkpoints. Targets may be outside the source root and are read only. Keep link targets available and unchanged throughout refresh; broken links cancel the whole run instead of being treated as removed directories. No schema migration or rebuild is needed.
 - Publish a coherent copied source tree before refreshing. Do not modify files in place during refresh. File size and modification time are checked around reading and again after importing; Unix also checks device, inode, and change time. Detected concurrent edits roll back the file and require retry. These checks do not provide a filesystem snapshot or prevent changes after the final check.
+
+### Snapshot publication contract
+
+For periodic copies, write each complete snapshot to a new versioned directory that AgentLens is not currently traversing. Finish and verify the copy before atomically retargeting a stable directory symbolic link to that immutable directory. Retarget before starting refresh, then keep both the link and selected target present and unchanged until refresh completes. Publishing by renaming a fully prepared directory into a previously absent path is also safe; replacing individual files one by one in the live tree is not an atomic snapshot.
+
+For a directly copied live `.codex` home, append-only writers are tolerated only when a complete read remains stable. AgentLens hashes the entire file, scans it again for normalized writes, and verifies metadata before, between, and after those passes. A partial JSON or UTF-8 tail is recorded on a new source and retried, while a partial replacement rolls back to the prior projection. A later append, truncation, or historical rewrite is detected by a full checksum read; no prefix checkpoint or size/mtime probe is trusted. Because per-file validation cannot make a multi-file tree atomic, use the immutable-directory protocol whenever additions, removals, and archive moves must appear as one coherent snapshot.
 
 Refresh can run while the server reads the same SQLite database: readers see committed data, and subsequent requests see the completed refresh. Run one importer at a time. Existing long-lived read transactions can continue seeing their earlier snapshot. Restart the server to load updated application code. Browser reloads do not run ingestion.
 
@@ -41,6 +47,8 @@ After refresh commits, new list and transcript requests cannot retrieve deleted 
 ## Regression verification
 
 Run `bash scripts/check.sh`. Tests use temporary synthetic sources and the small redacted fixture, never private `data/`. Coverage includes direct-home rebuild/refresh and rendered hostless pages, layout mismatch rollback, missing hashes, legacy schema migration and identity backfill, parser-version invalidation, stable public IDs across rebuilds, source-scoped native-ID collisions, repeated skips, advisory-title refresh, checksum correctness, same-size/same-timestamp edits, resumed completed sessions and turn history, truncation, changed identities, archive moves, duplicate conflicts, partial JSON/UTF-8, rollback of failed replacements and failed finalization, retries, source immutability, and normalized refresh/rebuild parity for messages, tools, turns, ordered usage evidence, and derived usage summaries.
+
+Duplicate coverage additionally seeds a noncanonical winner, publishes the lexically preferred source, and verifies that refresh switches to it. A repeated refresh and a clean rebuild then select the same path and produce the same normalized projection.
 
 Before implementation, the three initial refresh regressions failed on the existing duplicate-path/foreign-key behavior. They pass with transactional replacement and safe source-row updates.
 
@@ -62,6 +70,20 @@ The new full rebuild was about 5.3% slower; an unchanged refresh was about 48 ti
 Rebuild retains one batched transaction and reads each source once, hashing during the parse. Additional database work is constant per source: checkpoint/identity lookups, a savepoint, and checkpoint updates. The source-file session index avoids scanning all sessions for each lookup. Record insertion volume is unchanged. Unchanged refresh reads all source bytes once but performs no transcript parsing or message/tool/usage writes. A changed verified source is read twice; unchanged peers are read once. Source read volume follows these paths; physical disk I/O was not separately instrumented because the benchmark used warm caches.
 
 This section describes the initial checkpoint implementation. Its per-file decoded-record collection was subsequently replaced by the [bounded two-pass importer](ingestion-memory.md); the newer benchmark measures one large rollout specifically to expose the former memory growth.
+
+## R4.1 deterministic-order performance review (2026-09-13)
+
+Release builds at baseline commit `c42896b` and with deterministic traversal/duplicate convergence were measured on the same synthetic direct-home corpus: 40 sessions, 60,000 messages, and approximately 59.8 MB of source JSONL. Three sequential warm-cache runs per implementation covered a full rebuild, a refresh with all files unchanged, and a refresh after appending one synthetic record to one file. Elapsed time includes CLI startup and commit. A 5 ms `/proc` sampler measured resident memory and process I/O; no private fixture was used.
+
+| Operation | Before median | After median | Before peak RSS median | After peak RSS median |
+| --- | ---: | ---: | ---: | ---: |
+| Full rebuild | 6.135 s | 6.127 s | 13,856 KiB | 13,888 KiB |
+| Refresh, all unchanged | 0.138 s | 0.141 s | 9,836 KiB | 9,828 KiB |
+| Refresh, one file changed | 0.484 s | 0.492 s | 12,312 KiB | 12,256 KiB |
+
+The elapsed and memory ranges overlap, so the measurements do not establish a meaningful performance change. Linux reported zero physical `read_bytes` for every warm-cache run. Sampled process `rchar`, which also includes SQLite and runtime reads, was approximately 870 MB for rebuild, 57–60 MB for unchanged refresh, and 69–74 MB for changed refresh in both builds; short refreshes can finish between samples, so it is not an exact source-byte counter.
+
+Logical source I/O is unchanged and is the reliable contract: rebuild and new/unverified sources read each rollout twice, unchanged verified sources once, and changed verified sources three times. Sorting directory entries does not add source-file reads, normalized writes, or file-sized allocations. It buffers and sorts only the entries of the current directory; rollout records remain streamed. The existing large-rollout benchmark in [bounded rollout ingestion](ingestion-memory.md) covers the dominant memory behavior.
 
 ## Missing-source cleanup performance review (2026-09-10)
 

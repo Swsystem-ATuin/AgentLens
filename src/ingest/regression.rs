@@ -1449,6 +1449,62 @@ async fn refresh_append_truncate_replace_archive_and_duplicates_match_rebuild() 
 }
 
 #[tokio::test]
+async fn duplicate_resolution_converges_on_a_deterministic_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let later = write_source(
+        dir.path(),
+        "sessions",
+        "z-later.jsonl",
+        &[meta("duplicate"), message("later path")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+
+    let preferred = write_source(
+        dir.path(),
+        "sessions",
+        "a-preferred.jsonl",
+        &[meta("duplicate"), message("preferred path")],
+    );
+    let refresh = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((refresh.sessions, refresh.errors), (1, 1));
+    let selected: (String, String) = sqlx::query_as(
+        "SELECT source_files.path,messages.content FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id JOIN messages ON messages.session_id=sessions.id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        selected,
+        (preferred.to_string_lossy().into(), "preferred path".into())
+    );
+
+    let repeated = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((repeated.skipped, repeated.errors), (1, 1));
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    let rebuild = ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!((rebuild.sessions, rebuild.errors), (1, 1));
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_files.path FROM sessions JOIN source_files ON source_files.id=sessions.source_file_id",
+        )
+        .fetch_one(&rebuilt)
+        .await
+        .unwrap(),
+        preferred.to_string_lossy()
+    );
+    assert!(
+        later > preferred,
+        "fixture paths must exercise lexical ordering"
+    );
+}
+
+#[tokio::test]
 async fn refresh_partial_utf8_tail_is_retried_and_completed() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_source(
