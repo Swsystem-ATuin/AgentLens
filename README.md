@@ -118,7 +118,7 @@ Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP
 
 Internal web failures return a generic response. Server diagnostics record only an allowlisted operation, error category, optional database/IO code, HTTP status, and request method; they do not record request URIs, authorization headers, database error text, or transcript content. See [web error handling](docs/web-errors.md).
 
-Multiple application users are a planned requirement. The current shared username/password is interim; individual identities, access permissions, and persistent account storage are tracked in the roadmap and are not implemented yet.
+Multiple application users are a planned requirement. The [framework and authentication decision](docs/multi-user-framework-decision.md) retains Rust/Axum and selects locally provisioned identities with established server-side session and Argon2id components. The current shared username/password remains interim; individual login/logout, access permissions, and persistent account storage are tracked in M1-M3 and are not implemented yet.
 
 ```bash
 cargo fmt --check

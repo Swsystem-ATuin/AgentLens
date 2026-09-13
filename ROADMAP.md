@@ -1,6 +1,6 @@
 # AgentLens roadmap
 
-Updated 2026-09-13. This is the single backlog for planned features, architecture work, and conditional decisions. It incorporates every open item from the 2026-09-09 architecture TODO and the [feature comparison](docs/feature-comparison.md) of codex_viewer, codex-dash, and codex-blackbox. All unchecked items are unimplemented proposals; the multiple-user requirement is confirmed, while its visibility policy remains undecided.
+Updated 2026-09-14. This is the single backlog for planned features, architecture work, and conditional decisions. It incorporates every open item from the 2026-09-09 architecture TODO and the [feature comparison](docs/feature-comparison.md) of codex_viewer, codex-dash, and codex-blackbox. All unchecked items are unimplemented proposals; the multiple-user requirement is confirmed, while its visibility policy remains undecided.
 
 Keep IDs stable, check items when delivered, and link the implementing commit or documentation. Milestones express dependency order, not delivery dates. Retain Rust, SQLite, server-rendered HTML, immutable raw sources, and a completely rebuildable index. Performance benefits are hypotheses until measured.
 
@@ -103,7 +103,7 @@ These four requirements are carried forward from TODO. Timing and the visibility
 
 - [ ] **M3 — Persist accounts and permissions independently of the index.** Keep application identities distinct from the indexed operating-system users in the existing schema. Ensure rebuilds preserve accounts and permissions; permission mappings must not rely on disposable SQLite row IDs that can change or be reused. Document migrations and backup/restore procedures for persistent application state.
 
-- [ ] **M4 — Review the framework choice before implementing account management.** Compare continued Rust development with Django against the confirmed multi-user requirements and chosen identity integration. Record the decision; multiple users alone do not require a language or database change.
+- [x] **M4 — Review the framework choice before implementing account management.** Continue with Rust/Axum for M1-M3: established server-side session and Argon2id components can satisfy locally provisioned identities while preserving the tested importer, bounded query/UI layers, privacy controls, and single-service operations. Django offers a stronger built-in account/admin surface, but would still require custom source visibility, persistent/disposable database separation, and a wholesale regression-tested port. Reconsider only for a committed Django operating model, a substantially broader admin product, a blocked required identity integration, or measured deployment constraints; see the [framework, authentication, recovery, security, and reconsideration decision](docs/multi-user-framework-decision.md). This decision changes no runtime behavior.
 
 ## C — Conditional technology decisions
 

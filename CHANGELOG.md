@@ -81,6 +81,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- The pre-account-management framework gate retains Rust/Axum and selects established server-side session authentication with locally provisioned Argon2id-backed application identities. The decision records the Django comparison, separate persistent-state boundary, provisioning/recovery and revocation expectations, OIDC deferral, implementation security contract, and evidence that would trigger reconsideration; runtime authentication is unchanged until M1-M3 are implemented.
+
 - Web database reads and transcript/view-model construction now live in focused query and presentation modules. Route handlers are limited to request validation, orchestration, error mapping, and template responses without changing existing routes or rendering behavior.
 
 - Codex home discovery, rollout parsing, lifecycle interpretation, hidden-model policy, and transcript marker recognition now live behind a source adapter. Ingestion consumes source-neutral normalized records, and presentation policies dispatch by indexed agent kind without changing existing parser semantics.
