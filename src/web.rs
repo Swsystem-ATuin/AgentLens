@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use askama::Template;
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 
@@ -145,6 +145,51 @@ struct SessionTemplate {
     show_origin: bool,
     event_options: Vec<presentation::FilterOption>,
     pagination: Pagination,
+    live: LiveStatus,
+}
+
+#[derive(Serialize)]
+struct LiveStatus {
+    revision: i64,
+    connection: &'static str,
+    last_successful_import: Option<String>,
+    source_observed_at: Option<String>,
+    source_state: &'static str,
+    source_projection_status: &'static str,
+}
+
+impl From<queries::LiveStatusRow> for LiveStatus {
+    fn from(row: queries::LiveStatusRow) -> Self {
+        Self {
+            revision: row.revision,
+            connection: "connected",
+            last_successful_import: row.last_successful_import,
+            source_observed_at: row.source_observed_at,
+            source_state: match row.source_age_seconds {
+                Some(0..=120) => "recent",
+                Some(_) => "stale",
+                None => "unavailable",
+            },
+            source_projection_status: match row.source_status.as_str() {
+                "ok" => "ok",
+                "partial" => "partial",
+                "error" => "error",
+                _ => "unknown",
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_live_status() -> LiveStatus {
+    LiveStatus {
+        revision: 0,
+        connection: "connected",
+        last_successful_import: None,
+        source_observed_at: None,
+        source_state: "unavailable",
+        source_projection_status: "unknown",
+    }
 }
 
 #[derive(Template)]
@@ -210,11 +255,13 @@ fn router_with_projects(
         .route("/usage", get(usage))
         .route("/diagnostics", get(diagnostics))
         .route("/sessions/{id}", get(session))
+        .route("/sessions/{id}/live-status", get(live_status))
         .route("/sessions/{id}/turns", get(turn_history))
         .route("/sessions/{id}/postmortem/{format}", get(postmortem))
         .route("/sessions/{id}/messages/{sequence}", get(message))
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
         .route("/sessions/{id}/results/{sequence}", get(tool_result))
+        .route("/assets/live-reader.js", get(live_reader_script))
         // Query strings can contain user-supplied private values. Keep request
         // spans useful without recording the URI in server diagnostics.
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -631,6 +678,11 @@ async fn session(
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
     let row = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let live = queries::live_status(&state.pool, &stable_id)
+        .await
+        .map_err(|error| WebError::database("load live reader status", error))?
+        .ok_or_else(WebError::not_found)?
+        .into();
     let mut events = queries::timeline_section(
         &state.pool,
         row.id,
@@ -675,10 +727,34 @@ async fn session(
             show_origin,
             event_options,
             pagination,
+            live,
         }
         .render()
         .map_err(|error| WebError::template("render transcript", error))?,
     ))
+}
+
+async fn live_status(
+    State(state): State<AppState>,
+    Path(stable_id): Path<String>,
+) -> Result<Json<LiveStatus>, WebError> {
+    Ok(Json(
+        queries::live_status(&state.pool, &stable_id)
+            .await
+            .map_err(|error| WebError::database("load live reader status", error))?
+            .ok_or_else(WebError::not_found)?
+            .into(),
+    ))
+}
+
+async fn live_reader_script() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../assets/live-reader.js"),
+    )
 }
 
 async fn turn_history(
@@ -1055,10 +1131,12 @@ mod tests {
             "/usage",
             "/diagnostics",
             "/sessions/1",
+            "/sessions/1/live-status",
             "/sessions/1/turns",
             "/sessions/1/postmortem/json",
             "/sessions/1/postmortem/md",
             "/sessions/1/messages/0",
+            "/assets/live-reader.js",
             "/sessions/invalid",
             "/missing",
         ] {
@@ -1098,9 +1176,11 @@ mod tests {
             ("/usage", StatusCode::OK),
             ("/diagnostics", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
+            ("/sessions/1/live-status", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
             ("/sessions/1/postmortem/json", StatusCode::NOT_FOUND),
             ("/sessions/1/postmortem/md", StatusCode::NOT_FOUND),
+            ("/assets/live-reader.js", StatusCode::OK),
             ("/missing", StatusCode::NOT_FOUND),
         ] {
             let response = app
@@ -1176,6 +1256,7 @@ mod tests {
             event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
+            live: test_live_status(),
         }
         .render()
         .expect("template should render");
@@ -1227,6 +1308,7 @@ mod tests {
                 event_options: vec![],
                 show_origin: true,
                 pagination: no_pagination(),
+                live: test_live_status(),
             }
             .render()
             .expect("transcript should render");

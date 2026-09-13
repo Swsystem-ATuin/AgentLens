@@ -6,6 +6,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{
     io::Write,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tower::ServiceExt;
@@ -405,6 +406,53 @@ async fn postmortem_app() -> (tempfile::TempDir, Router) {
     std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
     let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
     (dir, app)
+}
+
+fn write_live_rollout(path: &Path, with_result: bool) {
+    let mut records = vec![
+        serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"id":"live-session"}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"message","role":"user","content":[{"text":"synthetic request"}]}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"function_call","call_id":"live-call","name":"synthetic_tool","arguments":"{}"}}),
+    ];
+    if with_result {
+        records.push(serde_json::json!({"type":"response_item","timestamp":"2026-01-01T00:00:03Z","payload":{"type":"function_call_output","call_id":"live-call","output":"synthetic result"}}));
+    }
+    std::fs::write(
+        path,
+        records
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+}
+
+async fn live_app() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    SqlitePool,
+    Router,
+    String,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("source/.codex");
+    let active = home.join("sessions/live.jsonl");
+    std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+    write_live_rollout(&active, false);
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    crate::ingest::ingest_data_root(&pool, &home).await.unwrap();
+    let stable_id: String = sqlx::query_scalar("SELECT stable_id FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool.clone(), crate::auth::Credentials::load(&auth).unwrap());
+    (dir, home, active, pool, app, stable_id)
 }
 
 async fn paginated_app() -> (tempfile::TempDir, Router) {
@@ -1079,6 +1127,97 @@ async fn postmortem_exports_are_deterministic_aggregate_only_and_redacted() {
 }
 
 #[tokio::test]
+async fn live_reader_observes_committed_bounded_replacements_and_archive_moves() {
+    let (_dir, home, active, pool, app, stable_id) = live_app().await;
+    let page_uri = format!("/sessions/{stable_id}?section=1&event=tools");
+    let (status, initial_html) = get(&app, &page_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    for expected in [
+        "data-live-reader",
+        "data-live-toggle",
+        "data-live-content",
+        "class=\"timeline-anchor\"",
+        "Last successful import:",
+        "Source observed:",
+        "Source projection:",
+        "value=\"tools\" selected",
+        "src=\"/assets/live-reader.js\"",
+    ] {
+        assert!(initial_html.contains(expected), "missing {expected}");
+    }
+    assert!(initial_html.len() < 128 * 1024);
+
+    let status_uri = format!("/sessions/{stable_id}/live-status");
+    let (status, initial_json) = get(&app, &status_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(initial_json.len() < 1024);
+    let initial: serde_json::Value = serde_json::from_str(&initial_json).unwrap();
+    assert_eq!(initial["connection"], "connected");
+    assert_eq!(initial["source_state"], "recent");
+    assert_eq!(initial["source_projection_status"], "ok");
+    assert!(initial["last_successful_import"].is_string());
+    assert!(initial["source_observed_at"].is_string());
+
+    sqlx::query("UPDATE source_files SET observed_at=datetime('now','-10 minutes')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stale: serde_json::Value = serde_json::from_str(&get(&app, &status_uri).await.1).unwrap();
+    assert_eq!(stale["source_state"], "stale");
+
+    write_live_rollout(&active, true);
+    let refresh = crate::ingest::ingest_data_root(&pool, &home);
+    let readers = async {
+        for _ in 0..12 {
+            let (status, html) = get(&app, &page_uri).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(html.contains("Tool request: synthetic_tool"));
+            if html.contains("Tool result: synthetic_tool") {
+                assert!(html.contains("requested · output observed"));
+            }
+            assert!(html.len() < 128 * 1024);
+        }
+    };
+    let (refresh, ()) = tokio::join!(refresh, readers);
+    assert_eq!(refresh.unwrap().sessions, 1);
+    let (status, updated_html) = get(&app, &page_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(updated_html.contains("Tool result: synthetic_tool"));
+    assert!(updated_html.contains("requested · output observed"));
+    let updated: serde_json::Value = serde_json::from_str(&get(&app, &status_uri).await.1).unwrap();
+    assert!(updated["revision"].as_i64() > initial["revision"].as_i64());
+    assert_eq!(updated["source_state"], "recent");
+
+    let archived = home.join("archived_sessions/live.jsonl");
+    std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    std::fs::rename(&active, &archived).unwrap();
+    let moved = crate::ingest::ingest_data_root(&pool, &home).await.unwrap();
+    assert_eq!((moved.sessions, moved.removed_files), (1, 1));
+    let (status, archived_html) = get(&app, &page_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(archived_html.contains("<span>archived</span>"));
+    assert!(archived_html.contains("Tool result: synthetic_tool"));
+
+    let (status, script) = get(&app, "/assets/live-reader.js").await;
+    assert_eq!(status, StatusCode::OK);
+    for behavior in [
+        "window.location.href",
+        "details.message",
+        "openStates",
+        "window.scrollBy",
+        "sessionStorage",
+        "disconnected",
+        "schedule(RETRY_MS)",
+    ] {
+        assert!(
+            script.contains(behavior),
+            "client behavior missing {behavior}"
+        );
+    }
+    assert!(script.len() < 16 * 1024);
+}
+
+#[tokio::test]
 async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
     let (_dir, app) = paginated_app().await;
 
@@ -1549,6 +1688,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
             event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
+            live: test_live_status(),
         }
         .render()
         .unwrap();
@@ -1776,6 +1916,10 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
         let (status, html) = get(&app, &format!("/sessions/{id}")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(!html.contains("synthetic conversation"));
+        assert_eq!(
+            get(&app, &format!("/sessions/{id}/live-status")).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
     let (_, hidden_search) = get(&app, "/sessions?q=private-hidden-4").await;
     assert!(hidden_search.contains("No sessions match these filters."));

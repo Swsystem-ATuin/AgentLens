@@ -40,6 +40,8 @@ For a directly copied live `.codex` home, append-only writers are tolerated only
 
 Refresh can run while the server reads the same SQLite database: readers see committed data, and subsequent requests see the completed refresh. Run one importer at a time. Existing long-lived read transactions can continue seeing their earlier snapshot. Restart the server to load updated application code. Browser reloads do not run ingestion.
 
+Each committed candidate check records `source_files.observed_at`, including an unchanged checksum and a localized source error. The [opt-in live reader](live-reading.md) uses that observation separately from the newest completed ingest-run timestamp and the session lifecycle status. Existing indexes add the nullable column automatically; one refresh populates it.
+
 Both rebuild and refresh store BLAKE3 hashes during successful imports. Full rebuild remains available with `cargo run -- rebuild --data data`. It builds and validates a staging database before replacing the old index, so failures preserve the last usable index. Stop the server before rebuilding because publication refuses to replace an open SQLite database; see [safe full rebuilds](rebuild.md). Raw sources are never changed by either command. No manual migration or full rebuild is required for missing-source cleanup: update the binary and run refresh. Supporting indexes for tool/usage cascades are created automatically when the database opens.
 
 After refresh commits, new list and transcript requests cannot retrieve deleted sessions (direct URLs return 404). Already displayed browser pages are not remotely cleared. This is removal of indexed rows, not secure erasure of SQLite free pages, WAL files, or external backups.

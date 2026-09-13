@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Session pages now provide opt-in live reading through a lightweight authenticated revision probe and bounded server-rendered transcript replacement. The client preserves filters, sections, open blocks, and viewport position, retries disconnected probes, and displays import/source freshness separately from lifecycle status; synthetic concurrent-refresh, replacement, archive, and tool-pairing regressions cover the behavior.
+
 - Visible session pages now offer authenticated, deterministic Markdown and JSON postmortems containing aggregate turn, usage, model, tool, pressure, and evidence-gap facts. A fixed redaction profile excludes transcript and tool bodies, sensitive paths, credentials, native identifiers, and user annotations; adversarial synthetic regressions enforce the boundary.
 
 - An authenticated diagnostics page now retains and displays timestamped context-window and rate-limit snapshots, including rate-only events with missing token information, source scope, recent/stale/expired/unavailable states, and exact evidence links. Deterministic summaries explain interruptions, incomplete turns, accounting anomalies, and explicitly failed tools without inferring live allowances, task failure, or quality.

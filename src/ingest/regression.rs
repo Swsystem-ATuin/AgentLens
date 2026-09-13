@@ -1248,6 +1248,38 @@ async fn refresh_skips_verified_files_and_reimports_missing_hashes_and_parser_ve
 }
 
 #[tokio::test]
+async fn refresh_records_observation_time_for_unchanged_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "observed.jsonl",
+        &[meta("observed"), message("synthetic")],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+    sqlx::query("UPDATE source_files SET observed_at='2000-01-01 00:00:00'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!((report.skipped, report.sessions), (1, 0));
+    let observed: Option<String> = sqlx::query_scalar("SELECT observed_at FROM source_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        observed
+            .as_deref()
+            .is_some_and(|value| value > "2000-01-01 00:00:00"),
+        "a committed checksum observation must refresh source freshness"
+    );
+}
+
+#[tokio::test]
 async fn refresh_detects_same_metadata_edits_and_preserves_session_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_source(

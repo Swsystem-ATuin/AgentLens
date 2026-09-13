@@ -34,6 +34,15 @@ pub(super) struct SessionRow {
     pub(super) match_snippet: Option<String>,
 }
 
+#[derive(FromRow)]
+pub(super) struct LiveStatusRow {
+    pub(super) revision: i64,
+    pub(super) last_successful_import: Option<String>,
+    pub(super) source_observed_at: Option<String>,
+    pub(super) source_age_seconds: Option<i64>,
+    pub(super) source_status: String,
+}
+
 #[cfg(test)]
 #[derive(FromRow)]
 pub(super) struct MessageRow {
@@ -719,6 +728,27 @@ pub(super) async fn session(
         .build_query_as::<SessionRow>()
         .fetch_optional(pool)
         .await
+}
+
+pub(super) async fn live_status(
+    pool: &SqlitePool,
+    stable_id: &str,
+) -> Result<Option<LiveStatusRow>, sqlx::Error> {
+    let model_exclusion = crate::sources::model_exclusion();
+    sqlx::query_as(
+        "SELECT COALESCE((SELECT max(id) FROM ingest_runs WHERE status='complete'),0) revision, \
+         (SELECT finished_at FROM ingest_runs WHERE status='complete' AND errors=0 ORDER BY id DESC LIMIT 1) last_successful_import, \
+         sf.observed_at source_observed_at, \
+         CAST(unixepoch('now')-unixepoch(sf.observed_at) AS INTEGER) source_age_seconds, \
+         COALESCE(sf.parse_status,'unknown') source_status \
+         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id LEFT JOIN source_files sf ON sf.id=s.source_file_id \
+         WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)",
+    )
+    .bind(stable_id)
+    .bind(model_exclusion.source_kind)
+    .bind(model_exclusion.pattern)
+    .fetch_optional(pool)
+    .await
 }
 
 fn push_optional_equality<'a>(

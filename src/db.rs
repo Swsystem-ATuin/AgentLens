@@ -72,7 +72,11 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         sqlx::query_scalar("SELECT name FROM pragma_table_info('source_files')")
             .fetch_all(&mut *migration)
             .await?;
-    for (column, definition) in [("content_hash", "TEXT"), ("parser_version", "INTEGER")] {
+    for (column, definition) in [
+        ("content_hash", "TEXT"),
+        ("parser_version", "INTEGER"),
+        ("observed_at", "TEXT"),
+    ] {
         if !columns.iter().any(|name| name == column) {
             sqlx::query(&format!(
                 "ALTER TABLE source_files ADD COLUMN {column} {definition}"
@@ -715,6 +719,26 @@ mod tests {
             0,
             "legacy cumulative rows cannot be safely summed before a parser refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn opening_a_legacy_index_adds_source_observation_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let pool = super::open(&path).await.unwrap();
+        sqlx::query("ALTER TABLE source_files DROP COLUMN observed_at")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = super::open(&path).await.unwrap();
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('source_files')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|column| column == "observed_at"));
     }
 
     #[tokio::test]

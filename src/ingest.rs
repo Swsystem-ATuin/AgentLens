@@ -282,6 +282,11 @@ async fn ingest_rollout(
         && let Some(hash) = &checkpoint.content_hash
         && hash_file(path)? == *hash
     {
+        sqlx::query("UPDATE source_files SET observed_at=CURRENT_TIMESTAMP WHERE path=?")
+            .bind(path.to_string_lossy().as_ref())
+            .execute(&mut *connection)
+            .await
+            .context("record unchanged source observation")?;
         return Ok(None);
     }
     let summary = codex::scan_rollout(path)?;
@@ -350,7 +355,7 @@ async fn ingest_rollout(
     } else {
         "partial"
     };
-    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=?,content_hash=?,parser_version=? WHERE id=?")
+    sqlx::query("UPDATE source_files SET parse_status=?,parse_error=?,content_hash=?,parser_version=?,observed_at=CURRENT_TIMESTAMP WHERE id=?")
         .bind(parse_status)
         .bind(summary.parse_error.as_deref())
         .bind(&summary.content_hash)
@@ -679,7 +684,7 @@ async fn record_file_error(
     kind: &str,
     error: &str,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status,parse_error) VALUES(?,?,?,?,?,'error',?) ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,parse_status='error',parse_error=excluded.parse_error")
+    sqlx::query("INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,observed_at,parse_status,parse_error) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP,'error',?) ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,observed_at=CURRENT_TIMESTAMP,parse_status='error',parse_error=excluded.parse_error")
         .bind(instance).bind(run).bind(path.to_string_lossy().as_ref()).bind(kind).bind(std::fs::metadata(path).ok().map(|m| m.len() as i64)).bind(error).execute(&mut *connection).await?;
     Ok(())
 }
