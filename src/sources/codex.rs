@@ -1,5 +1,6 @@
 use super::{
     DiscoveredHome, DiscoveredSources, MessagePresentation, NormalizedRecord, SourceLayout,
+    TokenUsage,
 };
 use crate::fingerprint::{HashingReader, ensure_unchanged};
 use anyhow::{Context, Result, ensure};
@@ -12,7 +13,7 @@ use std::{
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 4;
+pub(crate) const PARSER_VERSION: i64 = 5;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -423,19 +424,28 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
             },
             raw_json: value.to_string(),
         })
-    } else if typ == "event_msg" && payload["type"] == "token_count" && !payload["info"].is_null() {
-        let usage = &payload["info"]["total_token_usage"];
+    } else if typ == "event_msg" && payload["type"] == "token_count" {
         Some(NormalizedRecord::Usage {
             timestamp: value["timestamp"].as_str().map(str::to_owned),
-            input_tokens: usage["input_tokens"].as_i64(),
-            output_tokens: usage["output_tokens"].as_i64(),
-            cached_input_tokens: usage["cached_input_tokens"].as_i64(),
-            total_tokens: usage["total_tokens"].as_i64(),
+            cumulative: token_usage(&payload["info"]["total_token_usage"]),
+            per_turn: token_usage(&payload["info"]["last_token_usage"]),
             raw_json: value.to_string(),
         })
     } else {
         None
     }
+}
+
+fn token_usage(value: &Value) -> Option<TokenUsage> {
+    value.as_object().map(|_| TokenUsage {
+        input_tokens: value["input_tokens"].as_i64(),
+        output_tokens: value["output_tokens"].as_i64(),
+        cached_input_tokens: value["cached_input_tokens"].as_i64(),
+        reasoning_output_tokens: value["reasoning_output_tokens"]
+            .as_i64()
+            .or_else(|| value["reasoning_tokens"].as_i64()),
+        total_tokens: value["total_tokens"].as_i64(),
+    })
 }
 
 fn json_text(value: Option<&Value>) -> Option<String> {

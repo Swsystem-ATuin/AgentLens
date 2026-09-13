@@ -217,13 +217,27 @@ async fn schema_variants_preserve_messages_tools_usage_and_raw_fields() {
             (10, "unmatched".into(), None, "ignored".into()),
         ]
     );
-    let usage: (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT input_tokens,output_tokens,cached_input_tokens,total_tokens FROM usage_events",
+    type UsageProjection = (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        bool,
+    );
+    let usage: Vec<UsageProjection> = sqlx::query_as(
+        "SELECT source_sequence,input_tokens,output_tokens,cached_input_tokens,total_tokens,has_missing FROM usage_events ORDER BY source_sequence",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(usage, (10, 5, 3, 15));
+    assert_eq!(
+        usage,
+        [
+            (11, None, None, None, None, true),
+            (12, Some(10), Some(5), Some(3), Some(15), false),
+        ]
+    );
     let source: (String, String) = sqlx::query_as("SELECT kind,parse_status FROM source_files")
         .fetch_one(&pool)
         .await
@@ -402,6 +416,130 @@ async fn tool_timeline_retains_questions_failures_structured_values_and_orphans(
                 true
             ),
         ]
+    );
+}
+
+#[tokio::test]
+async fn cumulative_usage_accounting_handles_resumes_duplicates_resets_and_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = |timestamp: &str, total: Value, last: Value| json!({"type":"event_msg","timestamp":timestamp,"payload":{"type":"token_count","info":{"total_token_usage":total,"last_token_usage":last}}});
+    write_source(
+        dir.path(),
+        "sessions",
+        "usage.jsonl",
+        &[
+            meta("usage-accounting"),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","info":null}}),
+            snapshot(
+                "2026-01-01T00:00:02Z",
+                json!({"input_tokens":100,"output_tokens":20,"cached_input_tokens":40,"reasoning_output_tokens":5,"total_tokens":120}),
+                json!({"input_tokens":100,"output_tokens":20,"cached_input_tokens":40,"reasoning_output_tokens":5,"total_tokens":120}),
+            ),
+            snapshot(
+                "2026-01-01T00:00:03Z",
+                json!({"input_tokens":100,"output_tokens":20,"cached_input_tokens":40,"reasoning_output_tokens":5,"total_tokens":120}),
+                Value::Null,
+            ),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:04Z","payload":{"type":"user_message"}}),
+            snapshot(
+                "2026-01-01T00:00:05Z",
+                json!({"input_tokens":130,"output_tokens":30,"cached_input_tokens":50,"reasoning_output_tokens":10,"total_tokens":160}),
+                json!({"input_tokens":30,"output_tokens":10,"cached_input_tokens":10,"reasoning_tokens":5,"total_tokens":40}),
+            ),
+            snapshot(
+                "2025-12-31T23:59:00Z",
+                json!({"input_tokens":5,"output_tokens":2,"cached_input_tokens":1,"reasoning_output_tokens":1,"total_tokens":7}),
+                Value::Null,
+            ),
+            snapshot(
+                "2026-01-01T00:00:07Z",
+                json!({"input_tokens":10,"cached_input_tokens":2}),
+                Value::Null,
+            ),
+            snapshot(
+                "2026-01-01T00:00:08Z",
+                json!({"input_tokens":15,"output_tokens":4,"cached_input_tokens":20,"reasoning_output_tokens":5,"total_tokens":99}),
+                Value::Null,
+            ),
+        ],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+
+    type UsageEvidence = (i64, Option<i64>, Option<i64>, bool, bool, bool, bool, bool);
+    let rows: Vec<UsageEvidence> = sqlx::query_as(
+        "SELECT source_sequence,delta_input_tokens,delta_total_tokens,is_duplicate,has_reset,has_missing,has_inconsistent,per_turn_present FROM usage_events ORDER BY source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (1, None, None, false, false, true, false, false),
+            (2, Some(100), Some(120), false, false, false, false, true),
+            (3, Some(0), Some(0), true, false, false, false, false),
+            (5, Some(30), Some(40), false, false, false, false, true),
+            (6, Some(5), Some(7), false, true, false, false, false),
+            (7, Some(5), None, false, false, true, false, false),
+            (8, Some(5), Some(92), false, false, false, true, false),
+        ]
+    );
+    type Summary = (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    );
+    let summary: Summary = sqlx::query_as(
+        "SELECT input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,snapshot_count,per_turn_observation_count,reset_count,duplicate_count,missing_count,inconsistent_count FROM session_usage",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        summary,
+        (
+            Some(145),
+            Some(34),
+            Some(70),
+            Some(15),
+            Some(259),
+            7,
+            2,
+            1,
+            1,
+            2,
+            1,
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT per_turn_reasoning_output_tokens FROM usage_events WHERE source_sequence=5"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        5,
+        "the source alias is normalized without adding reasoning to output or total"
+    );
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(
+        projection(&pool).await,
+        projection(&rebuilt).await,
+        "complex accounting evidence and totals must be repeatable across rebuilds"
     );
 }
 
@@ -951,7 +1089,8 @@ async fn projection(pool: &SqlitePool) -> Vec<String> {
         "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || source_sequence || ':' || sequence_known || ':' || coalesce(call_id,'') || ':' || coalesce(tool_call_id,'') || ':' || coalesce(output,'') || ':' || outcome || ':' || coalesce(tool_results.raw_json,'') FROM tool_results JOIN sessions ON sessions.id=tool_results.session_id ORDER BY external_id,source_sequence,tool_results.id",
-        "SELECT external_id || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,usage_events.raw_json",
+        "SELECT external_id || ':' || coalesce(source_sequence,-1) || ':' || sequence_known || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || coalesce(per_turn_input_tokens,-1) || ':' || coalesce(per_turn_output_tokens,-1) || ':' || coalesce(per_turn_cached_input_tokens,-1) || ':' || coalesce(per_turn_reasoning_output_tokens,-1) || ':' || coalesce(per_turn_total_tokens,-1) || ':' || coalesce(delta_input_tokens,-1) || ':' || coalesce(delta_output_tokens,-1) || ':' || coalesce(delta_cached_input_tokens,-1) || ':' || coalesce(delta_reasoning_output_tokens,-1) || ':' || coalesce(delta_total_tokens,-1) || ':' || cumulative_present || ':' || per_turn_present || ':' || is_duplicate || ':' || has_reset || ':' || has_missing || ':' || has_inconsistent || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,coalesce(source_sequence,usage_events.id)",
+        "SELECT external_id || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || snapshot_count || ':' || per_turn_observation_count || ':' || reset_count || ':' || duplicate_count || ':' || missing_count || ':' || inconsistent_count FROM session_usage JOIN sessions ON sessions.id=session_usage.session_id ORDER BY external_id",
     ] {
         out.extend(
             sqlx::query_scalar::<_, String>(query)
@@ -1140,7 +1279,13 @@ async fn refresh_removes_missing_sources_and_all_their_indexed_content() {
         .await
         .unwrap();
     ingest_data_root(&pool, dir.path()).await.unwrap();
-    for table in ["sessions", "messages", "tool_calls", "usage_events"] {
+    for table in [
+        "sessions",
+        "messages",
+        "tool_calls",
+        "usage_events",
+        "session_usage",
+    ] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
                 .fetch_one(&pool)
@@ -1157,6 +1302,7 @@ async fn refresh_removes_missing_sources_and_all_their_indexed_content() {
         "messages",
         "tool_calls",
         "usage_events",
+        "session_usage",
         "source_files",
     ] {
         assert_eq!(

@@ -143,6 +143,44 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             .await
             .context("upgrade tool timeline schema")?;
     }
+    let usage_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('usage_events')")
+            .fetch_all(&mut *migration)
+            .await?;
+    for (column, definition) in [
+        ("source_sequence", "INTEGER"),
+        ("sequence_known", "INTEGER NOT NULL DEFAULT 0"),
+        ("reasoning_output_tokens", "INTEGER"),
+        ("per_turn_input_tokens", "INTEGER"),
+        ("per_turn_output_tokens", "INTEGER"),
+        ("per_turn_cached_input_tokens", "INTEGER"),
+        ("per_turn_reasoning_output_tokens", "INTEGER"),
+        ("per_turn_total_tokens", "INTEGER"),
+        ("delta_input_tokens", "INTEGER"),
+        ("delta_output_tokens", "INTEGER"),
+        ("delta_cached_input_tokens", "INTEGER"),
+        ("delta_reasoning_output_tokens", "INTEGER"),
+        ("delta_total_tokens", "INTEGER"),
+        ("cumulative_present", "INTEGER NOT NULL DEFAULT 0"),
+        ("per_turn_present", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_duplicate", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_reset", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_missing", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_inconsistent", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !usage_columns.iter().any(|name| name == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE usage_events ADD COLUMN {column} {definition}"
+            ))
+            .execute(&mut *migration)
+            .await
+            .context("upgrade usage accounting schema")?;
+        }
+    }
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_session_sequence ON usage_events(session_id,source_sequence)")
+        .execute(&mut *migration)
+        .await
+        .context("index ordered usage observations")?;
     sqlx::query(
         "INSERT INTO tool_results(session_id,source_sequence,sequence_known,call_id,tool_call_id,output,outcome) \
          SELECT c.session_id,c.sequence,0,c.call_id,c.id,c.output,'observed' FROM tool_calls c \
@@ -509,6 +547,70 @@ mod tests {
             );
             pool.close().await;
         }
+    }
+
+    #[tokio::test]
+    async fn opening_a_legacy_index_adds_usage_accounting_without_inventing_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let pool = super::open(&path).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+             INSERT INTO hosts VALUES(1,'host');
+             INSERT INTO users VALUES(1,1,'user');
+             INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
+             INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'native','stable','title');
+             INSERT INTO usage_events(session_id,input_tokens,output_tokens,cached_input_tokens,total_tokens,raw_json) VALUES(1,10,5,3,15,'{}');
+             DROP INDEX idx_usage_events_session_sequence;
+             DROP TABLE session_usage;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for column in [
+            "source_sequence",
+            "sequence_known",
+            "reasoning_output_tokens",
+            "per_turn_input_tokens",
+            "per_turn_output_tokens",
+            "per_turn_cached_input_tokens",
+            "per_turn_reasoning_output_tokens",
+            "per_turn_total_tokens",
+            "delta_input_tokens",
+            "delta_output_tokens",
+            "delta_cached_input_tokens",
+            "delta_reasoning_output_tokens",
+            "delta_total_tokens",
+            "cumulative_present",
+            "per_turn_present",
+            "is_duplicate",
+            "has_reset",
+            "has_missing",
+            "has_inconsistent",
+        ] {
+            sqlx::query(&format!("ALTER TABLE usage_events DROP COLUMN {column}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+
+        let pool = super::open(&path).await.unwrap();
+        let legacy: (Option<i64>, bool, i64, i64) = sqlx::query_as(
+            "SELECT source_sequence,sequence_known,input_tokens,total_tokens FROM usage_events",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy, (None, false, 10, 15));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_usage")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "legacy cumulative rows cannot be safely summed before a parser refresh"
+        );
     }
 
     #[tokio::test]

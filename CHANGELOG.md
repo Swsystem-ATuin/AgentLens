@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Cumulative token snapshots now reduce into deterministic, per-field session totals without double-counting. Ordered raw observations retain cumulative and non-additive per-turn scopes, deltas, duplicate/reset/missing/inconsistent evidence, cached-input and reasoning-output subset semantics, and explicit `NULL` availability. Existing indexes upgrade safely, and one parser-version refresh computes summaries with rebuild parity.
+
 - Session pages now provide a source-ordered message/tool/question timeline with event-kind filters, per-event anchors, bounded previews, lazy argument/result details, retained orphan outputs, repeated-ID-safe pairing, and explicit observed/failed/unknown evidence labels. Existing indexes migrate automatically; one parser-version refresh recovers exact result order.
 
 - Transcript sections and lazy message pages now safely render bounded CommonMark with GFM tables, fenced code, strikethrough, and task lists. Raw HTML is escaped, unsafe links lose their anchors, images become alt text, ordinary text keeps its whitespace-preserving presentation, and a restrictive Content Security Policy prevents automatic remote resource loads while existing setup labels, grouping, notices, and pagination remain intact.

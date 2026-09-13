@@ -6,6 +6,7 @@ mod ingest;
 mod projects;
 mod search;
 mod sources;
+mod usage;
 mod web;
 
 use anyhow::Result;

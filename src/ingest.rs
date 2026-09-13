@@ -320,7 +320,7 @@ async fn ingest_rollout(
     let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,stable_id,started_at,ended_at,cwd,model,status,title,derived_title,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,stable_id=excluded.stable_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,title=excluded.title,derived_title=excluded.derived_title,raw_metadata=excluded.raw_metadata RETURNING id")
         .bind(instance).bind(source_id).bind(&summary.external_id).bind(stable_id).bind(summary.started_at.as_deref()).bind(summary.ended_at.as_deref()).bind(summary.cwd.as_deref()).bind(summary.model.as_deref()).bind(summary.status).bind(fallback_title).bind(summary.derived_title.as_deref()).bind(&summary.raw_metadata).fetch_one(&mut *connection).await?;
     if existing.is_some() {
-        for table in ["messages", "tool_calls", "usage_events"] {
+        for table in ["messages", "tool_calls", "usage_events", "session_usage"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
                 .bind(session_id)
                 .execute(&mut *connection)
@@ -388,6 +388,7 @@ async fn import_rollout_records(
     let mut records = codex::RolloutRecords::open(path, metadata)?;
     let mut messages = 0usize;
     let mut tools = 0usize;
+    let mut usage_accounting = crate::usage::UsageAccounting::default();
     while let Some((sequence, record)) = records.next_record()? {
         match record {
             NormalizedRecord::Message {
@@ -435,16 +436,71 @@ async fn import_rollout_records(
             }
             NormalizedRecord::Usage {
                 timestamp,
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-                total_tokens,
+                cumulative,
+                per_turn,
                 raw_json,
             } => {
-                sqlx::query("INSERT INTO usage_events(session_id,timestamp,input_tokens,output_tokens,cached_input_tokens,total_tokens,raw_json) VALUES(?,?,?,?,?,?,?)")
-                        .bind(session_id).bind(timestamp).bind(input_tokens).bind(output_tokens).bind(cached_input_tokens).bind(total_tokens).bind(raw_json).execute(&mut *connection).await?;
+                let processed = usage_accounting.observe(cumulative.as_ref(), per_turn.as_ref());
+                let cumulative = cumulative.unwrap_or_default();
+                let per_turn = per_turn.unwrap_or_default();
+                sqlx::query(
+                    "INSERT INTO usage_events( \
+                     session_id,source_sequence,sequence_known,timestamp, \
+                     input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens, \
+                     per_turn_input_tokens,per_turn_output_tokens,per_turn_cached_input_tokens,per_turn_reasoning_output_tokens,per_turn_total_tokens, \
+                     delta_input_tokens,delta_output_tokens,delta_cached_input_tokens,delta_reasoning_output_tokens,delta_total_tokens, \
+                     cumulative_present,per_turn_present,is_duplicate,has_reset,has_missing,has_inconsistent,raw_json \
+                     ) VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                )
+                .bind(session_id)
+                .bind(sequence)
+                .bind(timestamp)
+                .bind(cumulative.input_tokens)
+                .bind(cumulative.output_tokens)
+                .bind(cumulative.cached_input_tokens)
+                .bind(cumulative.reasoning_output_tokens)
+                .bind(cumulative.total_tokens)
+                .bind(per_turn.input_tokens)
+                .bind(per_turn.output_tokens)
+                .bind(per_turn.cached_input_tokens)
+                .bind(per_turn.reasoning_output_tokens)
+                .bind(per_turn.total_tokens)
+                .bind(processed.delta.input_tokens)
+                .bind(processed.delta.output_tokens)
+                .bind(processed.delta.cached_input_tokens)
+                .bind(processed.delta.reasoning_output_tokens)
+                .bind(processed.delta.total_tokens)
+                .bind(processed.cumulative_present)
+                .bind(processed.per_turn_present)
+                .bind(processed.duplicate)
+                .bind(processed.reset)
+                .bind(processed.missing)
+                .bind(processed.inconsistent)
+                .bind(raw_json)
+                .execute(&mut *connection)
+                .await?;
             }
         }
+    }
+    if usage_accounting.snapshot_count != 0 {
+        let summary = usage_accounting.summary();
+        sqlx::query(
+            "INSERT INTO session_usage(session_id,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,snapshot_count,per_turn_observation_count,reset_count,duplicate_count,missing_count,inconsistent_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(session_id)
+        .bind(summary.usage.input_tokens)
+        .bind(summary.usage.output_tokens)
+        .bind(summary.usage.cached_input_tokens)
+        .bind(summary.usage.reasoning_output_tokens)
+        .bind(summary.usage.total_tokens)
+        .bind(summary.snapshot_count)
+        .bind(summary.per_turn_observation_count)
+        .bind(summary.reset_count)
+        .bind(summary.duplicate_count)
+        .bind(summary.missing_count)
+        .bind(summary.inconsistent_count)
+        .execute(&mut *connection)
+        .await?;
     }
     Ok((messages, tools, records.malformed_lines()))
 }

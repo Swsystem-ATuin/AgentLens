@@ -6,7 +6,7 @@ The first pass hashes the exact source bytes and derives only session-level meta
 
 Memory now grows with the largest individual JSONL record and retained session-metadata record, rather than the total number of records in a rollout. Message content and raw JSON serialization are also bounded to the current record. Malformed-line totals remain exact, while at most 20 sanitised line examples are stored; additional lines are represented by an omitted-count suffix. Individual record size is not capped, so a single exceptionally large JSON record can still require substantial memory.
 
-Tool calls are inserted as they are read. Outputs update the latest preceding matching call through SQLite rather than an in-memory map. The supporting `(session_id, call_id, sequence)` index is created automatically whenever the database opens. Duplicate call IDs retain the previous latest-call behavior, and unmatched outputs remain ignored.
+Tool calls and ordered results are inserted as they are read. Results pair to the latest preceding matching call through SQLite rather than an in-memory map. The supporting `(session_id, call_id, sequence)` index is created automatically whenever the database opens. Duplicate call IDs retain deterministic latest-preceding-call behavior, and unmatched outputs remain visible as orphan results. Usage accounting similarly retains only five counter states plus the current record; see [token accounting semantics](token-accounting.md).
 
 ## File I/O and query behavior
 
@@ -14,7 +14,7 @@ Tool calls are inserted as they are read. Outputs update the latest preceding ma
 - A verified changed source is read three times: checkpoint verification, summary/hash validation, and normalized writes.
 - An unchanged verified source is read once for checksum verification and is not parsed.
 - Transaction and savepoint boundaries, normalized insert counts, and cleanup queries are unchanged.
-- Output pairing executes one update per output carrying a call ID. Its scalar lookup uses the supporting composite index instead of a file-sized in-memory map.
+- Output pairing executes one indexed result insert and compatibility update per output. Usage events execute one ordered insert with bounded delta reduction plus one summary insert per session. Their lookups and uniqueness checks use supporting sequence/call indexes instead of file-sized in-memory maps.
 
 The extra sequential read is the deliberate tradeoff for removing file-sized decoded-record retention. Raw sources remain immutable.
 
