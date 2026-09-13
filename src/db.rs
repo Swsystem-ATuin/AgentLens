@@ -214,6 +214,20 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("has_reset", "INTEGER NOT NULL DEFAULT 0"),
         ("has_missing", "INTEGER NOT NULL DEFAULT 0"),
         ("has_inconsistent", "INTEGER NOT NULL DEFAULT 0"),
+        ("context_window", "INTEGER"),
+        ("context_tokens", "INTEGER"),
+        ("rate_limit_id", "TEXT"),
+        ("rate_limit_name", "TEXT"),
+        ("primary_used_percent", "REAL"),
+        ("primary_window_minutes", "INTEGER"),
+        ("primary_resets_at", "INTEGER"),
+        ("primary_resets_in_seconds", "INTEGER"),
+        ("secondary_used_percent", "REAL"),
+        ("secondary_window_minutes", "INTEGER"),
+        ("secondary_resets_at", "INTEGER"),
+        ("secondary_resets_in_seconds", "INTEGER"),
+        ("plan_type", "TEXT"),
+        ("rate_limit_reached_type", "TEXT"),
     ] {
         if !usage_columns.iter().any(|name| name == column) {
             sqlx::query(&format!(
@@ -655,6 +669,20 @@ mod tests {
             "has_reset",
             "has_missing",
             "has_inconsistent",
+            "context_window",
+            "context_tokens",
+            "rate_limit_id",
+            "rate_limit_name",
+            "primary_used_percent",
+            "primary_window_minutes",
+            "primary_resets_at",
+            "primary_resets_in_seconds",
+            "secondary_used_percent",
+            "secondary_window_minutes",
+            "secondary_resets_at",
+            "secondary_resets_in_seconds",
+            "plan_type",
+            "rate_limit_reached_type",
         ] {
             sqlx::query(&format!("ALTER TABLE usage_events DROP COLUMN {column}"))
                 .execute(&pool)
@@ -671,6 +699,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(legacy, (None, false, 10, 15));
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>("SELECT context_window FROM usage_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            None,
+            "legacy rows do not contain pressure evidence"
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_usage")
                 .fetch_one(&pool)

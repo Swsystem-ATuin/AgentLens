@@ -6,6 +6,8 @@ pub(super) const TRANSCRIPT_SECTION_SIZE: usize = 50;
 pub(super) const USAGE_PAGE_SIZE: usize = 100;
 pub(super) const RECENT_USAGE_LIMIT: i64 = 20;
 pub(super) const TURN_PAGE_SIZE: usize = 50;
+pub(super) const DIAGNOSTIC_EVIDENCE_LIMIT: i64 = 20;
+pub(super) const PRESSURE_SNAPSHOT_LIMIT: i64 = 50;
 pub(super) const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
 pub(super) const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 const SEARCH_CANDIDATES_PER_SESSION: i64 = 8;
@@ -197,6 +199,53 @@ pub(super) struct TurnRow {
     pub(super) end_position: i64,
     pub(super) requested_model_position: i64,
     pub(super) observed_model_position: i64,
+}
+
+#[derive(FromRow)]
+pub(super) struct DiagnosticTotalsRow {
+    pub(super) interruption_count: i64,
+    pub(super) incomplete_count: i64,
+    pub(super) accounting_anomaly_count: i64,
+    pub(super) observed_failure_count: i64,
+}
+
+#[derive(FromRow)]
+pub(super) struct PressureRow {
+    pub(super) stable_id: String,
+    pub(super) title: String,
+    pub(super) agent_kind: String,
+    pub(super) hostname: String,
+    pub(super) os_user: String,
+    pub(super) source_sequence: i64,
+    pub(super) timestamp: Option<String>,
+    pub(super) context_window: Option<i64>,
+    pub(super) context_tokens: Option<i64>,
+    pub(super) rate_limit_id: Option<String>,
+    pub(super) rate_limit_name: Option<String>,
+    pub(super) primary_used_percent: Option<f64>,
+    pub(super) primary_window_minutes: Option<i64>,
+    pub(super) primary_resets_at: Option<i64>,
+    pub(super) primary_resets_in_seconds: Option<i64>,
+    pub(super) secondary_used_percent: Option<f64>,
+    pub(super) secondary_window_minutes: Option<i64>,
+    pub(super) secondary_resets_at: Option<i64>,
+    pub(super) secondary_resets_in_seconds: Option<i64>,
+    pub(super) plan_type: Option<String>,
+    pub(super) rate_limit_reached_type: Option<String>,
+    pub(super) evidence_position: i64,
+    pub(super) observation_age_seconds: Option<i64>,
+    pub(super) primary_reset_remaining_seconds: Option<i64>,
+    pub(super) secondary_reset_remaining_seconds: Option<i64>,
+}
+
+#[derive(FromRow)]
+pub(super) struct DiagnosticEvidenceRow {
+    pub(super) stable_id: String,
+    pub(super) title: String,
+    pub(super) timestamp: Option<String>,
+    pub(super) sequence: Option<i64>,
+    pub(super) ordinal: Option<i64>,
+    pub(super) position: i64,
 }
 
 pub(super) async fn sessions(
@@ -453,6 +502,59 @@ pub(super) async fn session_turns(
     .await
 }
 
+pub(super) async fn diagnostic_totals(
+    pool: &SqlitePool,
+) -> Result<DiagnosticTotalsRow, sqlx::Error> {
+    let exclusion = crate::sources::model_exclusion();
+    sqlx::query_as(
+        "WITH visible AS (SELECT s.id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') SELECT (SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='interrupted') interruption_count,(SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='unclosed') incomplete_count,(SELECT count(*) FROM usage_events u JOIN visible v ON v.id=u.session_id WHERE u.has_reset OR u.has_missing OR u.has_inconsistent) accounting_anomaly_count,(SELECT count(*) FROM tool_results r JOIN visible v ON v.id=r.session_id WHERE r.outcome='failed') observed_failure_count",
+    )
+    .bind(exclusion.source_kind)
+    .bind(exclusion.pattern)
+    .fetch_one(pool)
+    .await
+}
+
+pub(super) async fn pressure_snapshots(pool: &SqlitePool) -> Result<Vec<PressureRow>, sqlx::Error> {
+    let exclusion = crate::sources::model_exclusion();
+    sqlx::query_as(
+        "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,a.kind agent_kind,h.name hostname,usr.os_user,u.source_sequence,u.timestamp,u.context_window,u.context_tokens,u.rate_limit_id,u.rate_limit_name,u.primary_used_percent,u.primary_window_minutes,u.primary_resets_at,u.primary_resets_in_seconds,u.secondary_used_percent,u.secondary_window_minutes,u.secondary_resets_at,u.secondary_resets_in_seconds,u.plan_type,u.rate_limit_reached_type,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) evidence_position,unixepoch('now')-unixepoch(u.timestamp) observation_age_seconds,COALESCE(u.primary_resets_at-unixepoch('now'),u.primary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) primary_reset_remaining_seconds,COALESCE(u.secondary_resets_at-unixepoch('now'),u.secondary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) secondary_reset_remaining_seconds FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users usr ON usr.id=i.user_id JOIN hosts h ON h.id=usr.host_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL OR u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL OR u.rate_limit_id IS NOT NULL OR u.rate_limit_name IS NOT NULL OR u.rate_limit_reached_type IS NOT NULL) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?",
+    )
+    .bind(exclusion.source_kind)
+    .bind(exclusion.pattern)
+    .bind(PRESSURE_SNAPSHOT_LIMIT)
+    .fetch_all(pool)
+    .await
+}
+
+pub(super) async fn diagnostic_evidence(
+    pool: &SqlitePool,
+    kind: &str,
+) -> Result<Vec<DiagnosticEvidenceRow>, sqlx::Error> {
+    let sql = match kind {
+        "interruption" => {
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.end_timestamp timestamp,t.end_sequence sequence,t.ordinal,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.end_sequence) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='interrupted' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(t.end_timestamp) IS NULL,datetime(t.end_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
+        }
+        "incomplete" => {
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.start_timestamp timestamp,t.start_sequence sequence,t.ordinal,(SELECT count(*) FROM turns newer WHERE newer.session_id=t.session_id AND newer.ordinal>t.ordinal) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='unclosed' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(t.start_timestamp) IS NULL,datetime(t.start_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
+        }
+        "accounting" => {
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,u.timestamp,u.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) position FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.has_reset OR u.has_missing OR u.has_inconsistent) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?"
+        }
+        "failure" => {
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,r.timestamp,r.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM (SELECT c2.sequence,1 event_order FROM tool_calls c2 WHERE c2.session_id=r.session_id AND c2.kind!='user_input' UNION ALL SELECT r2.source_sequence,2 FROM tool_results r2 LEFT JOIN tool_calls c2 ON c2.id=r2.tool_call_id WHERE r2.session_id=r.session_id AND COALESCE(c2.kind,'tool')!='user_input') WHERE sequence<r.source_sequence OR sequence=r.source_sequence AND event_order<2) position FROM tool_results r JOIN sessions s ON s.id=r.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE r.outcome='failed' AND r.sequence_known AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(r.timestamp) IS NULL,datetime(r.timestamp) DESC,s.stable_id,r.source_sequence DESC LIMIT ?"
+        }
+        _ => return Ok(Vec::new()),
+    };
+    let exclusion = crate::sources::model_exclusion();
+    sqlx::query_as(sql)
+        .bind(exclusion.source_kind)
+        .bind(exclusion.pattern)
+        .bind(DIAGNOSTIC_EVIDENCE_LIMIT)
+        .fetch_all(pool)
+        .await
+}
+
 fn push_visible_model<'a>(query: &mut QueryBuilder<'a, Sqlite>) {
     let exclusion = crate::sources::model_exclusion();
     query
@@ -622,7 +724,10 @@ pub(super) async fn timeline_section(
     offset: i64,
 ) -> Result<Vec<TimelineRow>, sqlx::Error> {
     sqlx::query_as::<_, TimelineRow>(
-        "SELECT 'turn_event' event_type,e.source_sequence sequence,1 sequence_known,e.timestamp,NULL role,CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END content,length(CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END) total_chars,e.kind tool_name,substr(e.turn_id,1,160) call_id,CASE WHEN e.is_resumption THEN 'resumed' WHEN e.is_model_change THEN 'requested model changed' END outcome,-1 event_order \
+        "SELECT 'diagnostic_event' event_type,u.source_sequence sequence,u.sequence_known,u.timestamp,NULL role,trim(CASE WHEN u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL THEN 'Context: ' || COALESCE(u.context_tokens,'Unavailable') || ' / ' || COALESCE(u.context_window,'Unavailable') || char(10) ELSE '' END || CASE WHEN u.primary_used_percent IS NOT NULL THEN printf('Primary rate: %.1f%% used',u.primary_used_percent) || char(10) ELSE '' END || CASE WHEN u.secondary_used_percent IS NOT NULL THEN printf('Secondary rate: %.1f%% used',u.secondary_used_percent) || char(10) ELSE '' END || CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 'Accounting flags: ' || trim(CASE WHEN u.has_reset THEN 'reset ' ELSE '' END || CASE WHEN u.has_missing THEN 'missing ' ELSE '' END || CASE WHEN u.has_inconsistent THEN 'inconsistent' ELSE '' END) ELSE '' END) content,length(COALESCE(u.raw_json,'')) total_chars,CASE WHEN u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL OR u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL OR u.rate_limit_id IS NOT NULL OR u.rate_limit_name IS NOT NULL OR u.rate_limit_reached_type IS NOT NULL THEN 'pressure' ELSE 'accounting' END tool_name,NULL call_id,CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 'review evidence' END outcome,3 event_order \
+         FROM usage_events u WHERE u.session_id=? AND u.sequence_known AND u.source_sequence IS NOT NULL AND ?='diagnostics' \
+         UNION ALL \
+         SELECT 'turn_event' event_type,e.source_sequence sequence,1 sequence_known,e.timestamp,NULL role,CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END content,length(CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END) total_chars,e.kind tool_name,substr(e.turn_id,1,160) call_id,CASE WHEN e.is_resumption THEN 'resumed' WHEN e.is_model_change THEN 'requested model changed' END outcome,-1 event_order \
          FROM turn_events e WHERE e.session_id=? AND ? IN ('all','turns') \
          UNION ALL \
          SELECT 'message' event_type,m.sequence,1 sequence_known,m.timestamp,m.role,substr(m.content,1,?) content,length(m.content) total_chars,NULL tool_name,NULL call_id,NULL outcome,0 event_order \
@@ -636,6 +741,8 @@ pub(super) async fn timeline_section(
          FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id WHERE r.session_id=? AND (?='all' OR ?='tools' AND COALESCE(c.kind,'tool')!='user_input' OR ?='questions' AND c.kind='user_input') \
          ORDER BY sequence,event_order LIMIT ? OFFSET ?",
     )
+    .bind(session_id)
+    .bind(event_filter)
     .bind(session_id)
     .bind(event_filter)
     .bind(MESSAGE_PREVIEW_CHARS)

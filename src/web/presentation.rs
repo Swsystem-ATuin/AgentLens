@@ -1,6 +1,6 @@
 use super::queries::{
-    FilterValues, RecentUsageRow, SessionFilters, TimelineRow, TurnRow, UsageGroupRow,
-    UsageTotalsRow,
+    DiagnosticEvidenceRow, DiagnosticTotalsRow, FilterValues, PressureRow, RecentUsageRow,
+    SessionFilters, TimelineRow, TurnRow, UsageGroupRow, UsageTotalsRow,
 };
 
 pub(super) struct TimelineContent {
@@ -82,6 +82,37 @@ pub(super) fn present_timeline(
                     .as_ref()
                     .is_none_or(|presentation| presentation.initially_open),
                 contents: vec![content],
+            });
+            continue;
+        }
+
+        if row.event_type == "diagnostic_event" {
+            let title = if row.tool_name.as_deref() == Some("pressure") {
+                "Context and rate observation"
+            } else {
+                "Accounting observation"
+            };
+            let anchor = format!("event-{}-diagnostics", row.sequence);
+            items.push(TimelineItem {
+                event_type: row.event_type,
+                anchor: anchor.clone(),
+                order_label: format!("#{}", row.sequence),
+                timestamp: row.timestamp,
+                role: "diagnostic".into(),
+                title: title.into(),
+                state: row.outcome,
+                call_id: None,
+                initially_open: true,
+                contents: vec![TimelineContent {
+                    html: super::markdown::render_plain(if row.content.is_empty() {
+                        "No context, rate-limit, or accounting values were available."
+                    } else {
+                        &row.content
+                    }),
+                    anchor,
+                    is_primary: true,
+                    continuation_href: None,
+                }],
             });
             continue;
         }
@@ -279,6 +310,223 @@ pub(super) struct RecentUsageView {
     pub(super) reasoning_output_tokens: String,
     pub(super) total_tokens: String,
     pub(super) anomalous: bool,
+}
+
+pub(super) struct DiagnosticTotalsView {
+    pub(super) interruption_count: i64,
+    pub(super) incomplete_count: i64,
+    pub(super) accounting_anomaly_count: i64,
+    pub(super) observed_failure_count: i64,
+}
+
+impl From<DiagnosticTotalsRow> for DiagnosticTotalsView {
+    fn from(row: DiagnosticTotalsRow) -> Self {
+        Self {
+            interruption_count: row.interruption_count,
+            incomplete_count: row.incomplete_count,
+            accounting_anomaly_count: row.accounting_anomaly_count,
+            observed_failure_count: row.observed_failure_count,
+        }
+    }
+}
+
+pub(super) struct PressureView {
+    pub(super) timestamp: String,
+    pub(super) title: String,
+    pub(super) agent_kind: String,
+    pub(super) hostname: String,
+    pub(super) os_user: String,
+    pub(super) context: String,
+    pub(super) context_state: &'static str,
+    pub(super) scope: String,
+    pub(super) primary: String,
+    pub(super) primary_state: &'static str,
+    pub(super) secondary: String,
+    pub(super) secondary_state: &'static str,
+    pub(super) reached: String,
+    pub(super) evidence_href: String,
+}
+
+pub(super) struct DiagnosticEvidenceView {
+    pub(super) timestamp: String,
+    pub(super) title: String,
+    pub(super) href: String,
+}
+
+pub(super) fn present_pressure(rows: Vec<PressureRow>) -> Vec<PressureView> {
+    rows.into_iter()
+        .map(|row| {
+            let context = match (row.context_tokens, row.context_window) {
+                (Some(tokens), Some(window)) if window > 0 => format!(
+                    "{} / {} ({:.1}%)",
+                    format_tokens(Some(tokens)),
+                    format_tokens(Some(window)),
+                    tokens as f64 * 100.0 / window as f64
+                ),
+                (None, Some(window)) => {
+                    format!("Window {}; usage unavailable", format_tokens(Some(window)))
+                }
+                (Some(tokens), None) => {
+                    format!("Used {}; window unavailable", format_tokens(Some(tokens)))
+                }
+                _ => "Unavailable".into(),
+            };
+            let context_state = match (row.context_tokens, row.context_window) {
+                (None, None) => "unavailable",
+                (Some(tokens), _) if tokens < 0 => "inconsistent observation",
+                (_, Some(window)) if window <= 0 => "inconsistent observation",
+                (Some(tokens), Some(window)) if tokens > window => "inconsistent observation",
+                _ => freshness(row.observation_age_seconds),
+            };
+            let primary_state = rate_freshness(
+                row.primary_used_percent,
+                row.observation_age_seconds,
+                row.primary_reset_remaining_seconds,
+            );
+            let secondary_state = rate_freshness(
+                row.secondary_used_percent,
+                row.observation_age_seconds,
+                row.secondary_reset_remaining_seconds,
+            );
+            let position = row.evidence_position;
+            let sequence = row.source_sequence;
+            let mut scope = row
+                .rate_limit_name
+                .or(row.rate_limit_id)
+                .unwrap_or_else(|| "Unspecified limit".into());
+            if let Some(plan_type) = row.plan_type {
+                scope.push_str(" · plan ");
+                scope.push_str(&plan_type);
+            }
+            PressureView {
+                timestamp: row.timestamp.unwrap_or_else(|| "Unavailable".into()),
+                title: row.title,
+                agent_kind: row.agent_kind,
+                hostname: row.hostname,
+                os_user: row.os_user,
+                context,
+                context_state,
+                scope,
+                primary: format_rate_window(
+                    row.primary_used_percent,
+                    row.primary_window_minutes,
+                    row.primary_resets_at,
+                    row.primary_resets_in_seconds,
+                ),
+                primary_state,
+                secondary: format_rate_window(
+                    row.secondary_used_percent,
+                    row.secondary_window_minutes,
+                    row.secondary_resets_at,
+                    row.secondary_resets_in_seconds,
+                ),
+                secondary_state,
+                reached: row
+                    .rate_limit_reached_type
+                    .unwrap_or_else(|| "Not reported".into()),
+                evidence_href: diagnostic_event_href(&row.stable_id, sequence, position),
+            }
+        })
+        .collect()
+}
+
+pub(super) fn present_diagnostic_evidence(
+    rows: Vec<DiagnosticEvidenceRow>,
+    kind: &str,
+) -> Vec<DiagnosticEvidenceView> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let href = match kind {
+                "incomplete" => {
+                    let ordinal = row.ordinal?;
+                    let page = row.position / super::queries::TURN_PAGE_SIZE as i64 + 1;
+                    format!(
+                        "/sessions/{}/turns?page={page}#turn-{ordinal}",
+                        row.stable_id
+                    )
+                }
+                "interruption" => turn_event_href(&row.stable_id, row.sequence?, row.position),
+                "accounting" => diagnostic_event_href(&row.stable_id, row.sequence?, row.position),
+                "failure" => {
+                    let sequence = row.sequence?;
+                    let section = row.position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+                    filtered_transcript_href(
+                        &row.stable_id,
+                        section as u32,
+                        "tools",
+                        Some(&format!("event-{sequence}-result")),
+                    )
+                }
+                _ => return None,
+            };
+            Some(DiagnosticEvidenceView {
+                timestamp: row
+                    .timestamp
+                    .unwrap_or_else(|| "Timestamp unavailable".into()),
+                title: row.title,
+                href,
+            })
+        })
+        .collect()
+}
+
+fn diagnostic_event_href(stable_id: &str, sequence: i64, position: i64) -> String {
+    let section = position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    filtered_transcript_href(
+        stable_id,
+        section as u32,
+        "diagnostics",
+        Some(&format!("event-{sequence}-diagnostics")),
+    )
+}
+
+fn freshness(age_seconds: Option<i64>) -> &'static str {
+    match age_seconds {
+        Some(0..=900) => "recent observation",
+        Some(_) => "stale observation",
+        None => "timestamp unavailable",
+    }
+}
+
+fn rate_freshness(
+    used_percent: Option<f64>,
+    age_seconds: Option<i64>,
+    reset_remaining_seconds: Option<i64>,
+) -> &'static str {
+    if used_percent.is_none() {
+        "unavailable"
+    } else if used_percent.is_some_and(|percent| !(0.0..=100.0).contains(&percent)) {
+        "inconsistent observation"
+    } else if reset_remaining_seconds.is_some_and(|remaining| remaining <= 0) {
+        "expired observation"
+    } else {
+        freshness(age_seconds)
+    }
+}
+
+fn format_rate_window(
+    used_percent: Option<f64>,
+    window_minutes: Option<i64>,
+    resets_at: Option<i64>,
+    resets_in_seconds: Option<i64>,
+) -> String {
+    let Some(used_percent) = used_percent else {
+        return "Unavailable".into();
+    };
+    let window = window_minutes.map_or_else(
+        || "window unavailable".into(),
+        |minutes| format!("{minutes} minute window"),
+    );
+    let reset = resets_at.map_or_else(
+        || {
+            resets_in_seconds.map_or_else(
+                || "reset unavailable".into(),
+                |seconds| format!("reported reset in {seconds}s"),
+            )
+        },
+        |timestamp| format!("reset Unix {timestamp}"),
+    );
+    format!("{used_percent:.1}% used · {window} · {reset}")
 }
 
 pub(super) struct TurnView {

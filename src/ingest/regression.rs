@@ -544,6 +544,94 @@ async fn cumulative_usage_accounting_handles_resumes_duplicates_resets_and_gaps(
 }
 
 #[tokio::test]
+async fn pressure_snapshots_survive_missing_usage_and_sparse_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "pressure.jsonl",
+        &[
+            meta("pressure"),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"synthetic-limit","primary":{"used_percent":75.5,"window_minutes":300,"resets_in_seconds":60},"future":true}}}),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:01:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":40000},"model_context_window":100000},"rate_limits":{"limit_name":"Synthetic scope","primary":{"used_percent":80.0,"window_minutes":300,"resets_at":1767225900},"secondary":{"used_percent":20.0,"window_minutes":10080,"resets_at":1767830400},"plan_type":"synthetic-plan","rate_limit_reached_type":"primary"}}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":"unknown"},"rate_limits":{"primary":{"used_percent":"unknown"},"unknown":42}}}),
+        ],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+
+    type PressureEvidence = (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<PressureEvidence> = sqlx::query_as(
+        "SELECT source_sequence,context_window,context_tokens,rate_limit_id,rate_limit_name,primary_used_percent,primary_resets_in_seconds,primary_resets_at,secondary_used_percent,plan_type,rate_limit_reached_type FROM usage_events ORDER BY source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                1,
+                None,
+                None,
+                Some("synthetic-limit".into()),
+                None,
+                Some(75.5),
+                Some(60),
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2,
+                Some(100_000),
+                Some(40_000),
+                None,
+                Some("Synthetic scope".into()),
+                Some(80.0),
+                None,
+                Some(1_767_225_900),
+                Some(20.0),
+                Some("synthetic-plan".into()),
+                Some("primary".into()),
+            ),
+            (
+                3, None, None, None, None, None, None, None, None, None, None
+            ),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3,
+        "token-count events remain available when token info is absent"
+    );
+
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+}
+
+#[tokio::test]
 async fn ordered_turn_history_preserves_resumes_models_outcomes_and_unknowns() {
     let dir = tempfile::tempdir().unwrap();
     write_source(
@@ -1268,7 +1356,7 @@ async fn projection(pool: &SqlitePool) -> Vec<String> {
         "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') || ':' || coalesce(turn_ordinal,-1) FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || source_sequence || ':' || sequence_known || ':' || coalesce(call_id,'') || ':' || coalesce(tool_call_id,'') || ':' || coalesce(output,'') || ':' || outcome || ':' || coalesce(tool_results.raw_json,'') || ':' || coalesce(turn_ordinal,-1) FROM tool_results JOIN sessions ON sessions.id=tool_results.session_id ORDER BY external_id,source_sequence,tool_results.id",
-        "SELECT external_id || ':' || coalesce(source_sequence,-1) || ':' || sequence_known || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || coalesce(per_turn_input_tokens,-1) || ':' || coalesce(per_turn_output_tokens,-1) || ':' || coalesce(per_turn_cached_input_tokens,-1) || ':' || coalesce(per_turn_reasoning_output_tokens,-1) || ':' || coalesce(per_turn_total_tokens,-1) || ':' || coalesce(delta_input_tokens,-1) || ':' || coalesce(delta_output_tokens,-1) || ':' || coalesce(delta_cached_input_tokens,-1) || ':' || coalesce(delta_reasoning_output_tokens,-1) || ':' || coalesce(delta_total_tokens,-1) || ':' || cumulative_present || ':' || per_turn_present || ':' || is_duplicate || ':' || has_reset || ':' || has_missing || ':' || has_inconsistent || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,coalesce(source_sequence,usage_events.id)",
+        "SELECT external_id || ':' || coalesce(source_sequence,-1) || ':' || sequence_known || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || coalesce(per_turn_input_tokens,-1) || ':' || coalesce(per_turn_output_tokens,-1) || ':' || coalesce(per_turn_cached_input_tokens,-1) || ':' || coalesce(per_turn_reasoning_output_tokens,-1) || ':' || coalesce(per_turn_total_tokens,-1) || ':' || coalesce(delta_input_tokens,-1) || ':' || coalesce(delta_output_tokens,-1) || ':' || coalesce(delta_cached_input_tokens,-1) || ':' || coalesce(delta_reasoning_output_tokens,-1) || ':' || coalesce(delta_total_tokens,-1) || ':' || cumulative_present || ':' || per_turn_present || ':' || is_duplicate || ':' || has_reset || ':' || has_missing || ':' || has_inconsistent || ':' || coalesce(context_window,-1) || ':' || coalesce(context_tokens,-1) || ':' || coalesce(rate_limit_id,'') || ':' || coalesce(rate_limit_name,'') || ':' || coalesce(primary_used_percent,-1) || ':' || coalesce(primary_window_minutes,-1) || ':' || coalesce(primary_resets_at,-1) || ':' || coalesce(primary_resets_in_seconds,-1) || ':' || coalesce(secondary_used_percent,-1) || ':' || coalesce(secondary_window_minutes,-1) || ':' || coalesce(secondary_resets_at,-1) || ':' || coalesce(secondary_resets_in_seconds,-1) || ':' || coalesce(plan_type,'') || ':' || coalesce(rate_limit_reached_type,'') || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,coalesce(source_sequence,usage_events.id)",
         "SELECT external_id || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || snapshot_count || ':' || per_turn_observation_count || ':' || reset_count || ':' || duplicate_count || ':' || missing_count || ':' || inconsistent_count FROM session_usage JOIN sessions ON sessions.id=session_usage.session_id ORDER BY external_id",
         "SELECT external_id || ':' || ordinal || ':' || coalesce(turn_id,'') || ':' || coalesce(start_sequence,-1) || ':' || coalesce(start_timestamp,'') || ':' || start_kind || ':' || coalesce(end_sequence,-1) || ':' || coalesce(end_timestamp,'') || ':' || outcome || ':' || resumed || ':' || coalesce(requested_model,'') || ':' || coalesce(requested_model_sequence,-1) || ':' || coalesce(observed_model,'') || ':' || coalesce(observed_model_sequence,-1) FROM turns JOIN sessions ON sessions.id=turns.session_id ORDER BY external_id,ordinal",
         "SELECT external_id || ':' || coalesce(turn_ordinal,-1) || ':' || source_sequence || ':' || coalesce(timestamp,'') || ':' || kind || ':' || coalesce(turn_id,'') || ':' || coalesce(requested_model,'') || ':' || coalesce(served_model,'') || ':' || is_resumption || ':' || is_model_change || ':' || turn_events.raw_json FROM turn_events JOIN sessions ON sessions.id=turn_events.session_id ORDER BY external_id,source_sequence",

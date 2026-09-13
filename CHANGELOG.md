@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- An authenticated diagnostics page now retains and displays timestamped context-window and rate-limit snapshots, including rate-only events with missing token information, source scope, recent/stale/expired/unavailable states, and exact evidence links. Deterministic summaries explain interruptions, incomplete turns, accounting anomalies, and explicitly failed tools without inferring live allowances, task failure, or quality.
+
 - Session pages now link to a paginated ordered turn history with completion, interruption, resumption, unclosed/terminal-only preservation, evidence-based duration, requested-model changes, separately observed served-model fallbacks, associated tool outcomes, and links to supporting timeline events. Existing indexes upgrade safely; parser version 6 populates history on refresh.
 
 - An authenticated historical usage dashboard now provides fixed-timezone daily, weekly, and monthly observation-time totals grouped by session, model, project, host, user, or agent. It includes cache ratios, partial/unavailable labels, anomaly and unattributed counts, bounded recent transcript drill-down, and paginated detail that reconciles with complete-range totals.

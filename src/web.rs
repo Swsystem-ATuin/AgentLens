@@ -19,8 +19,9 @@ mod regression;
 
 use presentation::{
     FilterOptions, Pagination, TimelineItem, filtered_transcript_href, message_href,
-    present_recent_usage, present_timeline, present_turns, present_usage_groups,
-    present_usage_totals, select_options, sessions_href, usage_href,
+    present_diagnostic_evidence, present_pressure, present_recent_usage, present_timeline,
+    present_turns, present_usage_groups, present_usage_totals, select_options, sessions_href,
+    usage_href,
 };
 use queries::{
     MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
@@ -125,6 +126,18 @@ struct UsageTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "diagnostics.html")]
+struct DiagnosticsTemplate {
+    totals: presentation::DiagnosticTotalsView,
+    pressure: Vec<presentation::PressureView>,
+    interruptions: Vec<presentation::DiagnosticEvidenceView>,
+    incomplete: Vec<presentation::DiagnosticEvidenceView>,
+    accounting: Vec<presentation::DiagnosticEvidenceView>,
+    failures: Vec<presentation::DiagnosticEvidenceView>,
+    show_origins: bool,
+}
+
+#[derive(Template)]
 #[template(path = "session.html")]
 struct SessionTemplate {
     session: SessionRow,
@@ -195,6 +208,7 @@ fn router_with_projects(
         )
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
+        .route("/diagnostics", get(diagnostics))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/turns", get(turn_history))
         .route("/sessions/{id}/messages/{sequence}", get(message))
@@ -310,6 +324,33 @@ async fn usage(
         }
         .render()
         .map_err(|error| WebError::template("render usage dashboard", error))?,
+    ))
+}
+
+async fn diagnostics(State(state): State<AppState>) -> Result<Html<String>, WebError> {
+    let (totals, pressure, interruptions, incomplete, accounting, failures, show_origins) =
+        tokio::try_join!(
+            queries::diagnostic_totals(&state.pool),
+            queries::pressure_snapshots(&state.pool),
+            queries::diagnostic_evidence(&state.pool, "interruption"),
+            queries::diagnostic_evidence(&state.pool, "incomplete"),
+            queries::diagnostic_evidence(&state.pool, "accounting"),
+            queries::diagnostic_evidence(&state.pool, "failure"),
+            queries::show_origins(&state.pool),
+        )
+        .map_err(|error| WebError::database("load diagnostics", error))?;
+    Ok(Html(
+        DiagnosticsTemplate {
+            totals: totals.into(),
+            pressure: present_pressure(pressure),
+            interruptions: present_diagnostic_evidence(interruptions, "interruption"),
+            incomplete: present_diagnostic_evidence(incomplete, "incomplete"),
+            accounting: present_diagnostic_evidence(accounting, "accounting"),
+            failures: present_diagnostic_evidence(failures, "failure"),
+            show_origins,
+        }
+        .render()
+        .map_err(|error| WebError::template("render diagnostics", error))?,
     ))
 }
 
@@ -581,7 +622,7 @@ async fn session(
     let event_filter = query.event.as_deref().unwrap_or("all");
     if !matches!(
         event_filter,
-        "all" | "messages" | "tools" | "questions" | "turns"
+        "all" | "messages" | "tools" | "questions" | "turns" | "diagnostics"
     ) {
         return Err(WebError::invalid_filters());
     }
@@ -613,10 +654,17 @@ async fn session(
         section > 1 && matches!(event_filter, "all" | "messages"),
     );
     let event_options = select_options(
-        ["all", "messages", "tools", "questions", "turns"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+        [
+            "all",
+            "messages",
+            "tools",
+            "questions",
+            "turns",
+            "diagnostics",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
         Some(event_filter),
     );
     Ok(Html(
@@ -959,6 +1007,7 @@ mod tests {
             "/",
             "/sessions",
             "/usage",
+            "/diagnostics",
             "/sessions/1",
             "/sessions/1/turns",
             "/sessions/1/messages/0",
@@ -999,6 +1048,7 @@ mod tests {
             ("/", StatusCode::TEMPORARY_REDIRECT),
             ("/sessions", StatusCode::OK),
             ("/usage", StatusCode::OK),
+            ("/diagnostics", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
             ("/missing", StatusCode::NOT_FOUND),

@@ -24,7 +24,7 @@ For an initially imported partial file, status reflects the valid records that s
 
 ## Upgrade and verification
 
-The current ordered turn/model normalization uses parser version 6. Run either command with the updated executable:
+The current adapter uses parser version 7. Run either command with the updated executable:
 
 ```bash
 cargo run -- refresh --data data

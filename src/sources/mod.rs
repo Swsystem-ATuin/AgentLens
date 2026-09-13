@@ -60,6 +60,26 @@ impl TokenUsage {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LimitWindow {
+    pub(crate) used_percent: Option<f64>,
+    pub(crate) window_minutes: Option<i64>,
+    pub(crate) resets_at: Option<i64>,
+    pub(crate) resets_in_seconds: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PressureSnapshot {
+    pub(crate) context_window: Option<i64>,
+    pub(crate) context_tokens: Option<i64>,
+    pub(crate) rate_limit_id: Option<String>,
+    pub(crate) rate_limit_name: Option<String>,
+    pub(crate) primary: LimitWindow,
+    pub(crate) secondary: LimitWindow,
+    pub(crate) plan_type: Option<String>,
+    pub(crate) rate_limit_reached_type: Option<String>,
+}
+
 pub(crate) enum NormalizedRecord {
     Message {
         timestamp: Option<String>,
@@ -87,6 +107,7 @@ pub(crate) enum NormalizedRecord {
         timestamp: Option<String>,
         cumulative: Option<TokenUsage>,
         per_turn: Option<TokenUsage>,
+        pressure: Box<PressureSnapshot>,
         raw_json: String,
     },
     TurnEvent {

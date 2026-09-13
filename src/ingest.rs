@@ -478,6 +478,7 @@ async fn import_rollout_records(
                 timestamp,
                 cumulative,
                 per_turn,
+                pressure,
                 raw_json,
             } => {
                 let processed = usage_accounting.observe(cumulative.as_ref(), per_turn.as_ref());
@@ -489,8 +490,9 @@ async fn import_rollout_records(
                      input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens, \
                      per_turn_input_tokens,per_turn_output_tokens,per_turn_cached_input_tokens,per_turn_reasoning_output_tokens,per_turn_total_tokens, \
                      delta_input_tokens,delta_output_tokens,delta_cached_input_tokens,delta_reasoning_output_tokens,delta_total_tokens, \
-                     cumulative_present,per_turn_present,is_duplicate,has_reset,has_missing,has_inconsistent,raw_json \
-                     ) VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     cumulative_present,per_turn_present,is_duplicate,has_reset,has_missing,has_inconsistent, \
+                     context_window,context_tokens,rate_limit_id,rate_limit_name,primary_used_percent,primary_window_minutes,primary_resets_at,primary_resets_in_seconds,secondary_used_percent,secondary_window_minutes,secondary_resets_at,secondary_resets_in_seconds,plan_type,rate_limit_reached_type,raw_json \
+                     ) VALUES(?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39)",
                 )
                 .bind(session_id)
                 .bind(sequence)
@@ -516,6 +518,20 @@ async fn import_rollout_records(
                 .bind(processed.reset)
                 .bind(processed.missing)
                 .bind(processed.inconsistent)
+                .bind(pressure.context_window)
+                .bind(pressure.context_tokens)
+                .bind(pressure.rate_limit_id)
+                .bind(pressure.rate_limit_name)
+                .bind(pressure.primary.used_percent)
+                .bind(pressure.primary.window_minutes)
+                .bind(pressure.primary.resets_at)
+                .bind(pressure.primary.resets_in_seconds)
+                .bind(pressure.secondary.used_percent)
+                .bind(pressure.secondary.window_minutes)
+                .bind(pressure.secondary.resets_at)
+                .bind(pressure.secondary.resets_in_seconds)
+                .bind(pressure.plan_type)
+                .bind(pressure.rate_limit_reached_type)
                 .bind(raw_json)
                 .execute(&mut *connection)
                 .await?;

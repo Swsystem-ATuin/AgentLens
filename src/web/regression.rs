@@ -320,6 +320,50 @@ async fn turn_history_app() -> (tempfile::TempDir, SqlitePool, Router) {
     (dir, pool, app)
 }
 
+async fn diagnostics_app() -> (tempfile::TempDir, SqlitePool, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Codex');
+        INSERT INTO hosts VALUES(1,'synthetic-host');
+        INSERT INTO users VALUES(1,1,'synthetic-user');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,model) VALUES
+          (1,1,'diagnostics','diagnostics','Diagnostics <safe>','visible-model'),
+          (2,1,'hidden','hidden-diagnostics','Hidden diagnostics','codex-auto-review-hidden');
+        INSERT INTO turns(session_id,ordinal,start_sequence,start_timestamp,start_kind,end_sequence,end_timestamp,outcome) VALUES
+          (1,1,1,'2020-01-01T00:00:00Z','started',2,'2020-01-01T00:01:00Z','interrupted'),
+          (1,2,7,'2020-01-01T00:02:00Z','user_activity',NULL,NULL,'unclosed'),
+          (2,1,1,'2020-01-01T00:00:00Z','started',2,'2020-01-01T00:01:00Z','interrupted');
+        INSERT INTO turn_events(session_id,turn_ordinal,source_sequence,timestamp,kind) VALUES
+          (1,1,1,'2020-01-01T00:00:00Z','started'),
+          (1,1,2,'2020-01-01T00:01:00Z','interrupted'),
+          (1,2,7,'2020-01-01T00:02:00Z','user_activity');
+        INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,context_window,context_tokens,rate_limit_id,primary_used_percent,primary_window_minutes,primary_resets_at,primary_resets_in_seconds,secondary_used_percent,secondary_window_minutes,secondary_resets_at,has_inconsistent,raw_json) VALUES
+          (1,3,1,'2020-01-01T00:01:10Z',100000,60000,'synthetic-scope',88.0,300,NULL,60,42.0,10080,4102444800,1,'{}'),
+          (2,3,1,'2020-01-01T00:01:10Z',999999,999999,'hidden-scope',99.0,300,1,NULL,NULL,NULL,NULL,1,'{}');
+        INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,rate_limit_name,primary_used_percent,primary_window_minutes,primary_resets_at,has_missing,raw_json) VALUES
+          (1,4,1,datetime('now'),'recent-scope',25.0,300,unixepoch('now')+3600,1,'{}');
+        INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,context_window,context_tokens,primary_used_percent,raw_json) VALUES
+          (1,8,1,datetime('now'),100000,120000,120.0,'{}');
+        INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,status,kind) VALUES
+          (1,1,5,'failed','synthetic','failed','tool'),(2,2,5,'hidden','synthetic','failed','tool');
+        INSERT INTO tool_results(session_id,source_sequence,timestamp,call_id,tool_call_id,outcome) VALUES
+          (1,6,'2020-01-01T00:01:30Z','failed',1,'failed'),(2,6,'2020-01-01T00:01:30Z','hidden',2,'failed');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool.clone(), crate::auth::Credentials::load(&auth).unwrap());
+    (dir, pool, app)
+}
+
 async fn paginated_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -800,6 +844,93 @@ async fn turn_history_is_bounded_and_paginated() {
 }
 
 #[tokio::test]
+async fn diagnostics_render_freshness_scope_summaries_and_evidence_links() {
+    let (_dir, _pool, app) = diagnostics_app().await;
+    let (status, html) = get(&app, "/diagnostics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Observed pressure and diagnostics"));
+    assert!(html.contains("not live subscription allowances or task-quality scores"));
+    for (label, count) in [
+        ("Interrupted turns", 1),
+        ("Incomplete turns", 1),
+        ("Accounting anomalies", 2),
+        ("Observed tool failures", 1),
+    ] {
+        assert!(
+            html.contains(&format!("{label}</span><strong>{count}</strong>")),
+            "{label}: {html}"
+        );
+    }
+    assert!(html.contains("60,000 / 100,000 (60.0%)"));
+    assert!(html.contains("88.0% used · 300 minute window"));
+    assert!(html.contains("reported reset in 60s"));
+    assert!(html.contains("expired observation"));
+    assert!(html.contains("stale observation"));
+    assert!(html.contains("recent observation"));
+    assert!(html.contains("inconsistent observation"));
+    assert!(html.contains("synthetic-scope"));
+    assert!(html.contains("recent-scope"));
+    assert!(html.contains("synthetic-host"));
+    assert!(html.contains("synthetic-user"));
+    assert!(!html.contains("hidden-scope"));
+    assert!(!html.contains("999,999"));
+    assert!(html.contains("Diagnostics &#60;safe&#62;"));
+    assert!(html.contains("event-2-turns"));
+    assert!(html.contains("/sessions/diagnostics/turns?page=1#turn-2"));
+    assert!(html.contains("event-3-diagnostics"));
+    assert!(html.contains("event-6-result"));
+
+    let (status, evidence) = get(&app, "/sessions/diagnostics?event=diagnostics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(evidence.contains("Context and rate observation"));
+    assert!(evidence.contains("Accounting flags: inconsistent"));
+    assert!(evidence.contains("Accounting flags: missing"));
+    assert!(
+        evidence.find("event-3-diagnostics").unwrap()
+            < evidence.find("event-4-diagnostics").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn diagnostics_bound_snapshot_and_evidence_queries() {
+    let (_dir, pool, app) = diagnostics_app().await;
+    let mut transaction = pool.begin().await.unwrap();
+    for index in 0..55_i64 {
+        sqlx::query("INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,context_window,context_tokens,raw_json) VALUES(1,?,1,datetime('now'),100000,?, '{}')")
+            .bind(100 + index)
+            .bind(index)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+    }
+    for ordinal in 10..35_i64 {
+        sqlx::query("INSERT INTO turns(session_id,ordinal,start_kind,end_sequence,outcome) VALUES(1,?,'unknown',?,'interrupted')")
+            .bind(ordinal)
+            .bind(200 + ordinal)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+
+    assert_eq!(queries::pressure_snapshots(&pool).await.unwrap().len(), 50);
+    assert_eq!(
+        queries::diagnostic_evidence(&pool, "interruption")
+            .await
+            .unwrap()
+            .len(),
+        20
+    );
+    let (status, html) = get(&app, "/diagnostics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.len() < 256 * 1024,
+        "diagnostics page was {} bytes",
+        html.len()
+    );
+}
+
+#[tokio::test]
 async fn sessions_are_paginated_with_stable_order_and_filter_navigation() {
     let (_dir, app) = paginated_app().await;
 
@@ -1213,6 +1344,9 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
         usage.contains("<option value=\"session\" selected>session</option>"),
         "{usage}"
     );
+    let (_, diagnostics) = get(&app, "/diagnostics").await;
+    assert!(!diagnostics.contains("<th>Host</th>"), "{diagnostics}");
+    assert!(!diagnostics.contains("<th>User</th>"), "{diagnostics}");
     assert_eq!(
         get(&app, "/sessions/1").await.0,
         StatusCode::NOT_FOUND,

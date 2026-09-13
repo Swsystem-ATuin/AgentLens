@@ -18,7 +18,7 @@ Tool calls and results inherit the active reconstructed turn ordinal. The histor
 
 ## Index upgrade and verification
 
-The automatic schema upgrade adds turn tables and nullable tool-to-turn associations. Legacy rows are preserved, but historical turn boundaries are not invented from them. Codex parser version 6 causes one `refresh` to reimport older rollouts and populate exact turn evidence; a full rebuild is optional.
+The automatic schema upgrade adds turn tables and nullable tool-to-turn associations. Legacy rows are preserved, but historical turn boundaries are not invented from them. The current Codex parser version 7 causes one `refresh` to reimport older rollouts and populate exact turn and pressure evidence; a full rebuild is optional.
 
 Synthetic tests cover terminal-only and unclosed work, resumed sessions, distinct turn IDs, requested-model changes versus served fallbacks, successful/failed/unknown tools, deliberately reversed timestamps, missing timestamps and events, source-ordered evidence links, pagination, repeatable rebuilds, and legacy upgrades.
 

@@ -1,6 +1,6 @@
 use super::{
-    DiscoveredHome, DiscoveredSources, MessagePresentation, NormalizedRecord, SourceLayout,
-    TokenUsage,
+    DiscoveredHome, DiscoveredSources, LimitWindow, MessagePresentation, NormalizedRecord,
+    PressureSnapshot, SourceLayout, TokenUsage,
 };
 use crate::fingerprint::{HashingReader, ensure_unchanged};
 use anyhow::{Context, Result, ensure};
@@ -13,7 +13,7 @@ use std::{
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 6;
+pub(crate) const PARSER_VERSION: i64 = 7;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -469,14 +469,39 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
             raw_json: value.to_string(),
         })
     } else if typ == "event_msg" && payload["type"] == "token_count" {
+        let per_turn = token_usage(&payload["info"]["last_token_usage"]);
         Some(NormalizedRecord::Usage {
             timestamp: value["timestamp"].as_str().map(str::to_owned),
             cumulative: token_usage(&payload["info"]["total_token_usage"]),
-            per_turn: token_usage(&payload["info"]["last_token_usage"]),
+            pressure: Box::new(pressure_snapshot(payload, per_turn.as_ref())),
+            per_turn,
             raw_json: value.to_string(),
         })
     } else {
         None
+    }
+}
+
+fn pressure_snapshot(payload: &Value, per_turn: Option<&TokenUsage>) -> PressureSnapshot {
+    let rate_limits = &payload["rate_limits"];
+    PressureSnapshot {
+        context_window: payload["info"]["model_context_window"].as_i64(),
+        context_tokens: per_turn.and_then(|usage| usage.total_tokens),
+        rate_limit_id: string_field(rate_limits, &["limit_id"]),
+        rate_limit_name: string_field(rate_limits, &["limit_name"]),
+        primary: limit_window(&rate_limits["primary"]),
+        secondary: limit_window(&rate_limits["secondary"]),
+        plan_type: string_field(rate_limits, &["plan_type"]),
+        rate_limit_reached_type: string_field(rate_limits, &["rate_limit_reached_type"]),
+    }
+}
+
+fn limit_window(value: &Value) -> LimitWindow {
+    LimitWindow {
+        used_percent: value["used_percent"].as_f64(),
+        window_minutes: value["window_minutes"].as_i64(),
+        resets_at: value["resets_at"].as_i64(),
+        resets_in_seconds: value["resets_in_seconds"].as_i64(),
     }
 }
 
