@@ -17,18 +17,16 @@ mod queries;
 #[cfg(test)]
 mod regression;
 
-#[cfg(test)]
-use presentation::select_options;
 use presentation::{
-    FilterOptions, Pagination, TranscriptSegment, group_transcript_section, message_href,
-    sessions_href, transcript_href,
+    FilterOptions, Pagination, TimelineItem, filtered_transcript_href, message_href,
+    present_timeline, select_options, sessions_href,
 };
-#[cfg(test)]
-use queries::MessageRow;
 use queries::{
     MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
-    TRANSCRIPT_SECTION_SIZE,
+    TRANSCRIPT_SECTION_SIZE, ToolChunk,
 };
+#[cfg(test)]
+use queries::{MessageRow, TimelineRow};
 
 const MAX_SESSION_PAGE: u32 = 100_000;
 
@@ -39,8 +37,36 @@ struct AppState {
 }
 
 #[cfg(test)]
-fn group_transcript(messages: Vec<MessageRow>) -> Vec<TranscriptSegment> {
-    group_transcript_section(messages, crate::sources::codex::KIND, false)
+fn group_transcript(messages: Vec<MessageRow>) -> Vec<TimelineItem> {
+    group_transcript_for_source(messages, crate::sources::codex::KIND, false)
+}
+
+#[cfg(test)]
+fn group_transcript_for_source(
+    messages: Vec<MessageRow>,
+    source_kind: &str,
+    conversation_started: bool,
+) -> Vec<TimelineItem> {
+    let rows = messages
+        .into_iter()
+        .map(|message| {
+            let total_chars =
+                message.content.chars().count() as i64 + i64::from(message.content_truncated);
+            TimelineRow {
+                event_type: "message".into(),
+                sequence: message.sequence,
+                sequence_known: true,
+                timestamp: message.timestamp,
+                role: Some(message.role),
+                content: message.content,
+                total_chars,
+                tool_name: None,
+                call_id: None,
+                outcome: None,
+            }
+        })
+        .collect();
+    present_timeline(rows, source_kind, "stable-session", conversation_started)
 }
 
 #[derive(Deserialize, Default)]
@@ -76,14 +102,16 @@ struct SessionsTemplate {
 #[template(path = "session.html")]
 struct SessionTemplate {
     session: SessionRow,
-    segments: Vec<TranscriptSegment>,
+    segments: Vec<TimelineItem>,
     show_origin: bool,
+    event_options: Vec<presentation::FilterOption>,
     pagination: Pagination,
 }
 
 #[derive(Deserialize, Default)]
 struct TranscriptQuery {
     section: Option<u32>,
+    event: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -95,6 +123,17 @@ struct MessageQuery {
 #[template(path = "message.html")]
 struct MessageTemplate {
     message: MessageChunk,
+    content_html: String,
+    transcript_href: String,
+    pagination: Pagination,
+}
+
+#[derive(Template)]
+#[template(path = "tool.html")]
+struct ToolTemplate {
+    item: ToolChunk,
+    title: String,
+    state: String,
     content_html: String,
     transcript_href: String,
     pagination: Pagination,
@@ -118,6 +157,8 @@ fn router_with_projects(
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/messages/{sequence}", get(message))
+        .route("/sessions/{id}/tools/{sequence}", get(tool_call))
+        .route("/sessions/{id}/results/{sequence}", get(tool_result))
         // Query strings can contain user-supplied private values. Keep request
         // spans useful without recording the URI in server diagnostics.
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -364,31 +405,50 @@ async fn session(
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
     let section = bounded_page(query.section, "validate transcript section")?;
+    let event_filter = query.event.as_deref().unwrap_or("all");
+    if !matches!(event_filter, "all" | "messages" | "tools" | "questions") {
+        return Err(WebError::invalid_filters());
+    }
     let show_origin = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
     let row = load_session(&state.pool, &stable_id, &state.projects).await?;
-    let mut messages = queries::transcript_section(
+    let mut events = queries::timeline_section(
         &state.pool,
         row.id,
+        event_filter,
         i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64,
     )
     .await
     .map_err(|error| WebError::database("load transcript section", error))?;
-    let has_next = messages.len() > TRANSCRIPT_SECTION_SIZE;
-    messages.truncate(TRANSCRIPT_SECTION_SIZE);
+    let has_next = events.len() > TRANSCRIPT_SECTION_SIZE;
+    events.truncate(TRANSCRIPT_SECTION_SIZE);
     let pagination = Pagination {
         page: section,
-        previous_href: (section > 1).then(|| transcript_href(&stable_id, section - 1)),
+        previous_href: (section > 1)
+            .then(|| filtered_transcript_href(&stable_id, section - 1, event_filter, None)),
         next_href: (has_next && section < MAX_SESSION_PAGE)
-            .then(|| transcript_href(&stable_id, section + 1)),
+            .then(|| filtered_transcript_href(&stable_id, section + 1, event_filter, None)),
     };
-    let segments = group_transcript_section(messages, &row.agent_kind, section > 1);
+    let segments = present_timeline(
+        events,
+        &row.agent_kind,
+        &stable_id,
+        section > 1 && matches!(event_filter, "all" | "messages"),
+    );
+    let event_options = select_options(
+        ["all", "messages", "tools", "questions"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        Some(event_filter),
+    );
     Ok(Html(
         SessionTemplate {
             session: row,
             segments,
             show_origin,
+            event_options,
             pagination,
         }
         .render()
@@ -422,7 +482,7 @@ async fn message(
     if part > 1 && offset >= message.total_chars {
         return Err(WebError::invalid_pagination("validate message part"));
     }
-    let preceding = queries::preceding_message_count(&state.pool, session.id, sequence)
+    let preceding = queries::preceding_timeline_event_count(&state.pool, session.id, sequence, 0)
         .await
         .map_err(|error| WebError::database("locate message section", error))?;
     let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
@@ -436,11 +496,120 @@ async fn message(
         MessageTemplate {
             content_html: markdown::render(&message.content),
             message,
-            transcript_href: transcript_href(&stable_id, section as u32),
+            transcript_href: filtered_transcript_href(
+                &stable_id,
+                section as u32,
+                "all",
+                Some(&format!("event-{sequence}-message")),
+            ),
             pagination,
         }
         .render()
         .map_err(|error| WebError::template("render message part", error))?,
+    ))
+}
+
+async fn tool_call(
+    State(state): State<AppState>,
+    Path((stable_id, sequence)): Path<(String, i64)>,
+    Query(query): Query<MessageQuery>,
+) -> Result<Html<String>, WebError> {
+    tool_detail(state, stable_id, sequence, query.part, false).await
+}
+
+async fn tool_result(
+    State(state): State<AppState>,
+    Path((stable_id, sequence)): Path<(String, i64)>,
+    Query(query): Query<MessageQuery>,
+) -> Result<Html<String>, WebError> {
+    tool_detail(state, stable_id, sequence, query.part, true).await
+}
+
+async fn tool_detail(
+    state: AppState,
+    stable_id: String,
+    sequence: i64,
+    requested_part: Option<u32>,
+    result: bool,
+) -> Result<Html<String>, WebError> {
+    let part = bounded_page(requested_part, "validate tool detail part")?;
+    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
+    let item = if result {
+        queries::tool_result_chunk(&state.pool, session.id, sequence, offset).await
+    } else {
+        queries::tool_call_chunk(&state.pool, session.id, sequence, offset).await
+    }
+    .map_err(|error| WebError::database("load tool detail part", error))?
+    .ok_or_else(WebError::not_found)?;
+    if part > 1 && offset >= item.total_chars {
+        return Err(WebError::invalid_pagination("validate tool detail part"));
+    }
+    let event_order = if result { 2 } else { 1 };
+    let preceding =
+        queries::preceding_timeline_event_count(&state.pool, session.id, sequence, event_order)
+            .await
+            .map_err(|error| WebError::database("locate tool timeline section", error))?;
+    let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    let detail_kind = if result { "results" } else { "tools" };
+    let title = if item.kind == "user_input" {
+        if result { "Answer" } else { "Question" }.to_owned()
+    } else if result {
+        format!(
+            "Tool result: {}",
+            item.tool_name.as_deref().unwrap_or("unknown tool")
+        )
+    } else {
+        format!(
+            "Tool request: {}",
+            item.tool_name.as_deref().unwrap_or("unknown tool")
+        )
+    };
+    let state_label = if result {
+        if item.outcome == "failed" {
+            "failed"
+        } else {
+            "output observed"
+        }
+    } else {
+        match item.outcome.as_str() {
+            "failed" => "requested · failed",
+            "output observed" => "requested · output observed",
+            _ => "requested · outcome unknown",
+        }
+    };
+    let pagination = Pagination {
+        page: part,
+        previous_href: (part > 1).then(|| {
+            format!(
+                "/sessions/{stable_id}/{detail_kind}/{sequence}?part={}",
+                part - 1
+            )
+        }),
+        next_href: (offset + MESSAGE_CHUNK_CHARS < item.total_chars && part < MAX_SESSION_PAGE)
+            .then(|| {
+                format!(
+                    "/sessions/{stable_id}/{detail_kind}/{sequence}?part={}",
+                    part + 1
+                )
+            }),
+    };
+    Ok(Html(
+        ToolTemplate {
+            content_html: markdown::render_plain(&item.content),
+            transcript_href: filtered_transcript_href(
+                &stable_id,
+                section as u32,
+                "all",
+                Some(&format!("event-{sequence}-{detail_kind}")),
+            ),
+            item,
+            title,
+            state: state_label.to_owned(),
+            pagination,
+        }
+        .render()
+        .map_err(|error| WebError::template("render tool detail", error))?,
     ))
 }
 
@@ -691,6 +860,7 @@ mod tests {
                 match_snippet: None,
             },
             segments: group_transcript(messages),
+            event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
         }
@@ -741,6 +911,7 @@ mod tests {
                     match_snippet: None,
                 },
                 segments: group_transcript(messages),
+                event_options: vec![],
                 show_origin: true,
                 pagination: no_pagination(),
             }
@@ -861,8 +1032,55 @@ mod tests {
     }
 
     #[test]
+    fn tool_events_separate_otherwise_consecutive_assistant_replies() {
+        let rows = vec![
+            TimelineRow {
+                event_type: "message".into(),
+                sequence: 10,
+                sequence_known: true,
+                timestamp: None,
+                role: Some("assistant".into()),
+                content: "before tool".into(),
+                total_chars: 11,
+                tool_name: None,
+                call_id: None,
+                outcome: None,
+            },
+            TimelineRow {
+                event_type: "tool_call".into(),
+                sequence: 11,
+                sequence_known: true,
+                timestamp: None,
+                role: None,
+                content: "{}".into(),
+                total_chars: 2,
+                tool_name: Some("runner".into()),
+                call_id: Some("call".into()),
+                outcome: Some("output observed".into()),
+            },
+            TimelineRow {
+                event_type: "message".into(),
+                sequence: 12,
+                sequence_known: true,
+                timestamp: None,
+                role: Some("assistant".into()),
+                content: "after tool".into(),
+                total_chars: 10,
+                tool_name: None,
+                call_id: None,
+                outcome: None,
+            },
+        ];
+
+        let timeline = present_timeline(rows, crate::sources::codex::KIND, "stable", true);
+        assert_eq!(timeline.len(), 3);
+        assert_eq!(timeline[0].contents.len(), 1);
+        assert_eq!(timeline[2].contents.len(), 1);
+    }
+
+    #[test]
     fn later_sections_do_not_reclassify_conversation_as_initial_setup() {
-        let segments = group_transcript_section(
+        let segments = group_transcript_for_source(
             vec![message(50, "user", "You are seeing ordinary conversation")],
             crate::sources::codex::KIND,
             true,
@@ -874,7 +1092,7 @@ mod tests {
 
     #[test]
     fn source_specific_markers_are_ordinary_for_unknown_agents() {
-        let segments = group_transcript_section(
+        let segments = group_transcript_for_source(
             vec![message(
                 0,
                 "developer",

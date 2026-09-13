@@ -1,71 +1,151 @@
-use super::queries::{FilterValues, MessageRow, SessionFilters};
+use super::queries::{FilterValues, SessionFilters, TimelineRow};
 
-pub(super) struct TranscriptSegment {
-    pub(super) sequence: i64,
-    pub(super) timestamp: Option<String>,
-    pub(super) role: String,
-    pub(super) contents: Vec<String>,
-    pub(super) truncated_sequences: Vec<i64>,
-    pub(super) title: String,
-    pub(super) initially_open: bool,
+pub(super) struct TimelineContent {
+    pub(super) html: String,
+    pub(super) anchor: String,
+    pub(super) is_primary: bool,
+    pub(super) continuation_href: Option<String>,
 }
 
-pub(super) fn group_transcript_section(
-    messages: Vec<MessageRow>,
+pub(super) struct TimelineItem {
+    pub(super) event_type: String,
+    pub(super) anchor: String,
+    pub(super) order_label: String,
+    pub(super) timestamp: Option<String>,
+    pub(super) role: String,
+    pub(super) title: String,
+    pub(super) state: Option<String>,
+    pub(super) call_id: Option<String>,
+    pub(super) initially_open: bool,
+    pub(super) contents: Vec<TimelineContent>,
+}
+
+pub(super) fn present_timeline(
+    rows: Vec<TimelineRow>,
     source_kind: &str,
+    stable_id: &str,
     mut conversation_started: bool,
-) -> Vec<TranscriptSegment> {
-    let mut segments: Vec<TranscriptSegment> = Vec::new();
-    for message in messages {
-        let presentation = crate::sources::classify_message(
-            source_kind,
-            &message.role,
-            &message.content,
-            !conversation_started,
-        );
-        if !conversation_started
-            && message.role == "user"
-            && presentation
-                .as_ref()
-                .is_none_or(|presentation| presentation.initially_open)
-        {
-            conversation_started = true;
-        }
-        if message.role == "assistant"
-            && presentation.is_none()
-            && let Some(previous) = segments.last_mut()
-            && previous.role == "assistant"
-            && previous.initially_open
-        {
-            previous
-                .contents
-                .push(super::markdown::render(&message.content));
-            if message.content_truncated {
-                previous.truncated_sequences.push(message.sequence);
+) -> Vec<TimelineItem> {
+    let mut items: Vec<TimelineItem> = Vec::new();
+    for row in rows {
+        if row.event_type == "message" {
+            let role = row.role.as_deref().unwrap_or("unknown");
+            let presentation = crate::sources::classify_message(
+                source_kind,
+                role,
+                &row.content,
+                !conversation_started,
+            );
+            if !conversation_started
+                && role == "user"
+                && presentation
+                    .as_ref()
+                    .is_none_or(|presentation| presentation.initially_open)
+            {
+                conversation_started = true;
             }
+            let anchor = format!("event-{}-message", row.sequence);
+            let mut content = TimelineContent {
+                html: super::markdown::render(&row.content),
+                anchor: anchor.clone(),
+                is_primary: true,
+                continuation_href: (row.total_chars > super::queries::MESSAGE_PREVIEW_CHARS)
+                    .then(|| format!("/sessions/{stable_id}/messages/{}", row.sequence)),
+            };
+            if role == "assistant"
+                && presentation.is_none()
+                && let Some(previous) = items.last_mut()
+                && previous.event_type == "message"
+                && previous.role == "assistant"
+                && previous.initially_open
+            {
+                content.is_primary = false;
+                previous.contents.push(content);
+                continue;
+            }
+            items.push(TimelineItem {
+                event_type: "message".into(),
+                anchor,
+                order_label: format!("#{}", row.sequence),
+                timestamp: row.timestamp,
+                role: role.to_owned(),
+                title: presentation
+                    .as_ref()
+                    .map(|presentation| presentation.title.to_owned())
+                    .unwrap_or_else(|| role.to_owned()),
+                state: None,
+                call_id: None,
+                initially_open: presentation
+                    .as_ref()
+                    .is_none_or(|presentation| presentation.initially_open),
+                contents: vec![content],
+            });
             continue;
         }
-        let truncated_sequences = message
-            .content_truncated
-            .then_some(message.sequence)
-            .into_iter()
-            .collect();
-        segments.push(TranscriptSegment {
-            sequence: message.sequence,
-            timestamp: message.timestamp,
-            title: presentation
-                .as_ref()
-                .map(|presentation| presentation.title.to_owned())
-                .unwrap_or_else(|| message.role.clone()),
-            initially_open: presentation
-                .as_ref()
-                .is_none_or(|presentation| presentation.initially_open),
-            role: message.role,
-            contents: vec![super::markdown::render(&message.content)],
-            truncated_sequences,
+
+        let is_request = matches!(row.event_type.as_str(), "tool_call" | "question");
+        let is_question = matches!(row.event_type.as_str(), "question" | "answer");
+        let tool_name = row.tool_name.as_deref().unwrap_or("unknown tool");
+        let title = match row.event_type.as_str() {
+            "question" => "Question".to_owned(),
+            "answer" => "Answer".to_owned(),
+            "tool_result" if row.tool_name.is_none() => "Orphan tool result".to_owned(),
+            "tool_result" => format!("Tool result: {tool_name}"),
+            _ => format!("Tool request: {tool_name}"),
+        };
+        let state = if is_request {
+            Some(format!(
+                "requested · {}",
+                match row.outcome.as_deref() {
+                    Some("failed") => "failed",
+                    Some("output observed") => "output observed",
+                    _ => "outcome unknown",
+                }
+            ))
+        } else {
+            Some(
+                match row.outcome.as_deref() {
+                    Some("failed") => "failed",
+                    _ => "output observed",
+                }
+                .to_owned(),
+            )
+        };
+        let detail_kind = if is_request { "tools" } else { "results" };
+        let empty = if is_request {
+            "No arguments recorded."
+        } else {
+            "No output body recorded."
+        };
+        let anchor = format!("event-{}-{detail_kind}", row.sequence);
+        items.push(TimelineItem {
+            event_type: row.event_type.clone(),
+            anchor: anchor.clone(),
+            order_label: if row.sequence_known {
+                format!("#{}", row.sequence)
+            } else {
+                format!("near #{} · exact legacy order unavailable", row.sequence)
+            },
+            timestamp: row.timestamp,
+            role: if is_question { "user-input" } else { "tool" }.into(),
+            title,
+            state,
+            call_id: row.call_id,
+            initially_open: is_question,
+            contents: vec![TimelineContent {
+                html: super::markdown::render_plain(if row.content.is_empty() {
+                    empty
+                } else {
+                    &row.content
+                }),
+                anchor,
+                is_primary: true,
+                continuation_href: (row.total_chars > super::queries::MESSAGE_PREVIEW_CHARS)
+                    .then(|| format!("/sessions/{stable_id}/{detail_kind}/{}", row.sequence)),
+            }],
         });
     }
-    segments
+    items
 }
 
 pub(super) struct FilterOption {
@@ -135,8 +215,19 @@ pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
     format!("/sessions?{}", pairs.join("&"))
 }
 
-pub(super) fn transcript_href(stable_id: &str, section: u32) -> String {
-    format!("/sessions/{stable_id}?section={section}")
+pub(super) fn filtered_transcript_href(
+    stable_id: &str,
+    section: u32,
+    event_filter: &str,
+    anchor: Option<&str>,
+) -> String {
+    let event = if event_filter == "all" {
+        String::new()
+    } else {
+        format!("&event={}", percent_encode(event_filter))
+    };
+    let anchor = anchor.map_or_else(String::new, |anchor| format!("#{anchor}"));
+    format!("/sessions/{stable_id}?section={section}{event}{anchor}")
 }
 
 pub(super) fn message_href(stable_id: &str, sequence: i64, part: u32) -> String {

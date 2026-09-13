@@ -9,12 +9,18 @@ CREATE TABLE IF NOT EXISTS source_files (id INTEGER PRIMARY KEY, instance_id INT
 CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES agent_instances(id), source_file_id INTEGER REFERENCES source_files(id), external_id TEXT NOT NULL, stable_id TEXT, started_at TEXT, ended_at TEXT, cwd TEXT, model TEXT, status TEXT, title TEXT, derived_title TEXT, raw_metadata TEXT, UNIQUE(instance_id, external_id));
 CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT, UNIQUE(session_id, sequence));
 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(content, session_id UNINDEXED, sequence UNINDEXED, role UNINDEXED, content='messages', content_rowid='id', tokenize='unicode61');
-CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, call_id TEXT, tool_name TEXT, arguments TEXT, output TEXT, status TEXT, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS tool_calls (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT, call_id TEXT, tool_name TEXT, arguments TEXT, output TEXT, status TEXT, raw_json TEXT, kind TEXT NOT NULL DEFAULT 'tool');
+CREATE TABLE IF NOT EXISTS tool_results (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, source_sequence INTEGER NOT NULL, sequence_known INTEGER NOT NULL DEFAULT 1, timestamp TEXT, call_id TEXT, tool_call_id INTEGER REFERENCES tool_calls(id) ON DELETE CASCADE, output TEXT, outcome TEXT NOT NULL, raw_json TEXT);
+CREATE TRIGGER IF NOT EXISTS tool_results_pair AFTER INSERT ON tool_results WHEN new.tool_call_id IS NOT NULL BEGIN
+  UPDATE tool_calls SET output=new.output,status=CASE WHEN new.outcome='failed' THEN 'failed' ELSE 'complete' END WHERE id=new.tool_call_id;
+END;
 CREATE TABLE IF NOT EXISTS usage_events (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, timestamp TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, total_tokens INTEGER, raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_started_id ON sessions(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_file ON sessions(source_file_id);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_session_sequence ON tool_calls(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_pair ON tool_calls(session_id, call_id, sequence DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_results_session_sequence ON tool_results(session_id, source_sequence);
+CREATE INDEX IF NOT EXISTS idx_tool_results_call ON tool_results(tool_call_id, source_sequence);
 CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);

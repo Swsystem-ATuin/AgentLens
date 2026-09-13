@@ -133,6 +133,24 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             .context("upgrade session identity schema")?;
         }
     }
+    let tool_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('tool_calls')")
+            .fetch_all(&mut *migration)
+            .await?;
+    if !tool_columns.iter().any(|name| name == "kind") {
+        sqlx::query("ALTER TABLE tool_calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'tool'")
+            .execute(&mut *migration)
+            .await
+            .context("upgrade tool timeline schema")?;
+    }
+    sqlx::query(
+        "INSERT INTO tool_results(session_id,source_sequence,sequence_known,call_id,tool_call_id,output,outcome) \
+         SELECT c.session_id,c.sequence,0,c.call_id,c.id,c.output,'observed' FROM tool_calls c \
+         WHERE c.output IS NOT NULL AND NOT EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id)",
+    )
+    .execute(&mut *migration)
+    .await
+    .context("backfill legacy tool results")?;
     let sessions: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT s.id,i.source_key,s.external_id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id WHERE s.stable_id IS NULL",
     )
@@ -441,6 +459,56 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(matches, 1, "normal reopen must not duplicate the index");
+    }
+
+    #[tokio::test]
+    async fn opening_a_legacy_index_backfills_order_unknown_tool_results_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let pool = super::open(&path).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO agents VALUES(1,'synthetic','Synthetic');
+             INSERT INTO hosts VALUES(1,'host');
+             INSERT INTO users VALUES(1,1,'user');
+             INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
+             INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'native','stable','title');
+             INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,arguments,output,status) VALUES(1,1,7,'legacy-call','runner','{}','legacy output','complete');
+             ALTER TABLE tool_calls DROP COLUMN kind;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        for reopen in 1..=2 {
+            let pool = super::open(&path).await.unwrap();
+            let result: (i64, bool, String, String) = sqlx::query_as(
+                "SELECT source_sequence,sequence_known,output,outcome FROM tool_results",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                (7, false, "legacy output".into(), "observed".into())
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tool_results")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                1,
+                "reopen {reopen} must not duplicate a legacy output"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT kind FROM tool_calls")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                "tool"
+            );
+            pool.close().await;
+        }
     }
 
     #[tokio::test]

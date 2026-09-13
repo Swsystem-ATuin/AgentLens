@@ -31,6 +31,13 @@ pub(super) fn render(source: &str) -> String {
     format!("<div class=\"rich-text\">{rendered}</div>")
 }
 
+pub(super) fn render_plain(source: &str) -> String {
+    format!(
+        "<p class=\"transcript-paragraph\">{}</p>",
+        escape_html(source)
+    )
+}
+
 fn plain_event(event: &Event<'_>) -> bool {
     matches!(
         event,

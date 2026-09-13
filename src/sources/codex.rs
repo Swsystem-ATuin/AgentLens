@@ -12,7 +12,7 @@ use std::{
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 3;
+pub(crate) const PARSER_VERSION: i64 = 4;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -387,18 +387,20 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
             Some("function_call" | "custom_tool_call")
         )
     {
+        let tool_name = payload["name"].as_str().map(str::to_owned);
         Some(NormalizedRecord::ToolCall {
             timestamp: value["timestamp"].as_str().map(str::to_owned),
             call_id: payload["call_id"]
                 .as_str()
                 .or_else(|| payload["id"].as_str())
-                .unwrap_or("")
-                .to_owned(),
-            tool_name: payload["name"].as_str().map(str::to_owned),
-            arguments: payload["arguments"]
-                .as_str()
-                .or_else(|| payload["input"].as_str())
                 .map(str::to_owned),
+            kind: if tool_name.as_deref() == Some("request_user_input") {
+                "user_input"
+            } else {
+                "tool"
+            },
+            tool_name,
+            arguments: json_text(payload.get("arguments").or_else(|| payload.get("input"))),
             raw_json: value.to_string(),
         })
     } else if typ == "response_item"
@@ -407,12 +409,20 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
             Some("function_call_output" | "custom_tool_call_output")
         )
     {
-        payload["call_id"]
-            .as_str()
-            .map(|call_id| NormalizedRecord::ToolOutput {
-                call_id: call_id.to_owned(),
-                output: payload["output"].as_str().map(str::to_owned),
-            })
+        Some(NormalizedRecord::ToolOutput {
+            timestamp: value["timestamp"].as_str().map(str::to_owned),
+            call_id: payload["call_id"]
+                .as_str()
+                .or_else(|| payload["id"].as_str())
+                .map(str::to_owned),
+            output: json_text(payload.get("output")),
+            outcome: if explicit_tool_failure(payload) {
+                "failed"
+            } else {
+                "observed"
+            },
+            raw_json: value.to_string(),
+        })
     } else if typ == "event_msg" && payload["type"] == "token_count" && !payload["info"].is_null() {
         let usage = &payload["info"]["total_token_usage"];
         Some(NormalizedRecord::Usage {
@@ -426,6 +436,26 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
     } else {
         None
     }
+}
+
+fn json_text(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Null) | None => None,
+        Some(value) => Some(value.to_string()),
+    }
+}
+
+fn explicit_tool_failure(payload: &Value) -> bool {
+    payload["success"].as_bool() == Some(false)
+        || payload["is_error"].as_bool() == Some(true)
+        || matches!(payload["status"].as_str(), Some("failed" | "error"))
+        || payload["output"]["success"].as_bool() == Some(false)
+        || payload["output"]["is_error"].as_bool() == Some(true)
+        || matches!(
+            payload["output"]["status"].as_str(),
+            Some("failed" | "error")
+        )
 }
 
 fn message_content(payload: &Value) -> String {

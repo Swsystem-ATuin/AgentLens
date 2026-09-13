@@ -29,6 +29,7 @@ pub(super) struct SessionRow {
     pub(super) match_snippet: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(FromRow)]
 pub(super) struct MessageRow {
     pub(super) sequence: i64,
@@ -45,6 +46,33 @@ pub(super) struct MessageChunk {
     pub(super) role: String,
     pub(super) content: String,
     pub(super) total_chars: i64,
+}
+
+#[derive(FromRow)]
+pub(super) struct TimelineRow {
+    pub(super) event_type: String,
+    pub(super) sequence: i64,
+    pub(super) sequence_known: bool,
+    pub(super) timestamp: Option<String>,
+    pub(super) role: Option<String>,
+    pub(super) content: String,
+    pub(super) total_chars: i64,
+    pub(super) tool_name: Option<String>,
+    pub(super) call_id: Option<String>,
+    pub(super) outcome: Option<String>,
+}
+
+#[derive(FromRow)]
+pub(super) struct ToolChunk {
+    pub(super) sequence: i64,
+    pub(super) sequence_known: bool,
+    pub(super) timestamp: Option<String>,
+    pub(super) call_id: Option<String>,
+    pub(super) tool_name: Option<String>,
+    pub(super) kind: String,
+    pub(super) content: String,
+    pub(super) total_chars: i64,
+    pub(super) outcome: String,
 }
 
 pub(super) struct SessionFilters<'a> {
@@ -337,18 +365,37 @@ fn push_project_case<'a>(query: &mut QueryBuilder<'a, Sqlite>, projects: &'a Pro
     query.push(" END");
 }
 
-pub(super) async fn transcript_section(
+pub(super) async fn timeline_section(
     pool: &SqlitePool,
     session_id: i64,
+    event_filter: &str,
     offset: i64,
-) -> Result<Vec<MessageRow>, sqlx::Error> {
-    sqlx::query_as::<_, MessageRow>(
-        "SELECT sequence,timestamp,role,substr(content,1,?) content,length(content)>? content_truncated \
-         FROM messages WHERE session_id=? ORDER BY sequence LIMIT ? OFFSET ?",
+) -> Result<Vec<TimelineRow>, sqlx::Error> {
+    sqlx::query_as::<_, TimelineRow>(
+        "SELECT 'message' event_type,m.sequence,1 sequence_known,m.timestamp,m.role,substr(m.content,1,?) content,length(m.content) total_chars,NULL tool_name,NULL call_id,NULL outcome,0 event_order \
+         FROM messages m WHERE m.session_id=? AND ? IN ('all','messages') \
+         UNION ALL \
+         SELECT CASE WHEN c.kind='user_input' THEN 'question' ELSE 'tool_call' END,c.sequence,1,c.timestamp,NULL,substr(COALESCE(c.arguments,''),1,?),length(COALESCE(c.arguments,'')),substr(c.tool_name,1,160),substr(c.call_id,1,160), \
+           CASE WHEN EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id AND r.outcome='failed') THEN 'failed' WHEN EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id) THEN 'output observed' ELSE 'unknown' END,1 \
+         FROM tool_calls c WHERE c.session_id=? AND (?='all' OR ?='tools' AND c.kind!='user_input' OR ?='questions' AND c.kind='user_input') \
+         UNION ALL \
+         SELECT CASE WHEN c.kind='user_input' THEN 'answer' ELSE 'tool_result' END,r.source_sequence,r.sequence_known,r.timestamp,NULL,substr(COALESCE(r.output,''),1,?),length(COALESCE(r.output,'')),substr(c.tool_name,1,160),substr(r.call_id,1,160),r.outcome,2 \
+         FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id WHERE r.session_id=? AND (?='all' OR ?='tools' AND COALESCE(c.kind,'tool')!='user_input' OR ?='questions' AND c.kind='user_input') \
+         ORDER BY sequence,event_order LIMIT ? OFFSET ?",
     )
     .bind(MESSAGE_PREVIEW_CHARS)
+    .bind(session_id)
+    .bind(event_filter)
     .bind(MESSAGE_PREVIEW_CHARS)
     .bind(session_id)
+    .bind(event_filter)
+    .bind(event_filter)
+    .bind(event_filter)
+    .bind(MESSAGE_PREVIEW_CHARS)
+    .bind(session_id)
+    .bind(event_filter)
+    .bind(event_filter)
+    .bind(event_filter)
     .bind((TRANSCRIPT_SECTION_SIZE + 1) as i64)
     .bind(offset)
     .fetch_all(pool)
@@ -373,14 +420,62 @@ pub(super) async fn message_chunk(
     .await
 }
 
-pub(super) async fn preceding_message_count(
+pub(super) async fn preceding_timeline_event_count(
     pool: &SqlitePool,
     session_id: i64,
     sequence: i64,
+    event_order: i64,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT count(*) FROM messages WHERE session_id=? AND sequence<?")
-        .bind(session_id)
-        .bind(sequence)
-        .fetch_one(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT count(*) FROM ( \
+         SELECT sequence,0 event_order FROM messages WHERE session_id=? \
+         UNION ALL SELECT sequence,1 FROM tool_calls WHERE session_id=? \
+         UNION ALL SELECT source_sequence,2 FROM tool_results WHERE session_id=? \
+         ) WHERE sequence<? OR sequence=? AND event_order<?",
+    )
+    .bind(session_id)
+    .bind(session_id)
+    .bind(session_id)
+    .bind(sequence)
+    .bind(sequence)
+    .bind(event_order)
+    .fetch_one(pool)
+    .await
+}
+
+pub(super) async fn tool_call_chunk(
+    pool: &SqlitePool,
+    session_id: i64,
+    sequence: i64,
+    offset: i64,
+) -> Result<Option<ToolChunk>, sqlx::Error> {
+    sqlx::query_as::<_, ToolChunk>(
+        "SELECT c.sequence,1 sequence_known,c.timestamp,substr(c.call_id,1,160) call_id,substr(c.tool_name,1,160) tool_name,c.kind,substr(COALESCE(c.arguments,''),? + 1,?) content,length(COALESCE(c.arguments,'')) total_chars, \
+         CASE WHEN EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id AND r.outcome='failed') THEN 'failed' WHEN EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id) THEN 'output observed' ELSE 'unknown' END outcome \
+         FROM tool_calls c WHERE c.session_id=? AND c.sequence=?",
+    )
+    .bind(offset)
+    .bind(MESSAGE_CHUNK_CHARS)
+    .bind(session_id)
+    .bind(sequence)
+    .fetch_optional(pool)
+    .await
+}
+
+pub(super) async fn tool_result_chunk(
+    pool: &SqlitePool,
+    session_id: i64,
+    sequence: i64,
+    offset: i64,
+) -> Result<Option<ToolChunk>, sqlx::Error> {
+    sqlx::query_as::<_, ToolChunk>(
+        "SELECT r.source_sequence sequence,r.sequence_known,r.timestamp,substr(r.call_id,1,160) call_id,substr(c.tool_name,1,160) tool_name,COALESCE(c.kind,'tool') kind,substr(COALESCE(r.output,''),? + 1,?) content,length(COALESCE(r.output,'')) total_chars,r.outcome \
+         FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id WHERE r.session_id=? AND r.source_sequence=? ORDER BY r.sequence_known DESC,r.id LIMIT 1",
+    )
+    .bind(offset)
+    .bind(MESSAGE_CHUNK_CHARS)
+    .bind(session_id)
+    .bind(sequence)
+    .fetch_optional(pool)
+    .await
 }

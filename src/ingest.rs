@@ -405,17 +405,31 @@ async fn import_rollout_records(
                 call_id,
                 tool_name,
                 arguments,
+                kind,
                 raw_json,
             } => {
-                sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json) VALUES(?,?,?,?,?,?,'called',?)")
-                        .bind(session_id).bind(sequence).bind(timestamp).bind(call_id).bind(tool_name).bind(arguments).bind(raw_json).execute(&mut *connection).await?;
+                sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json,kind) VALUES(?,?,?,?,?,?,'called',?,?)")
+                        .bind(session_id).bind(sequence).bind(timestamp).bind(call_id).bind(tool_name).bind(arguments).bind(raw_json).bind(kind).execute(&mut *connection).await?;
                 tools += 1;
             }
-            NormalizedRecord::ToolOutput { call_id, output } => {
-                sqlx::query("UPDATE tool_calls SET output=?,status='complete' WHERE id=(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? ORDER BY sequence DESC LIMIT 1)")
-                    .bind(output)
+            NormalizedRecord::ToolOutput {
+                timestamp,
+                call_id,
+                output,
+                outcome,
+                raw_json,
+            } => {
+                sqlx::query("INSERT INTO tool_results(session_id,source_sequence,timestamp,call_id,tool_call_id,output,outcome,raw_json) VALUES(?,?,?,?,(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1),?,?,?)")
                     .bind(session_id)
+                    .bind(sequence)
+                    .bind(timestamp)
                     .bind(&call_id)
+                    .bind(session_id)
+                    .bind(call_id.as_deref().filter(|call_id| !call_id.is_empty()))
+                    .bind(sequence)
+                    .bind(output)
+                    .bind(outcome)
+                    .bind(raw_json)
                     .execute(&mut *connection)
                     .await?;
             }

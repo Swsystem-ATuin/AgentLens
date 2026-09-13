@@ -193,6 +193,30 @@ async fn schema_variants_preserve_messages_tools_usage_and_raw_fields() {
             )
         ]
     );
+    let results: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT source_sequence,r.call_id,c.tool_name,r.output FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id ORDER BY source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        results,
+        [
+            (
+                8,
+                "b".into(),
+                Some("synthetic_custom".into()),
+                "custom result".into()
+            ),
+            (
+                9,
+                "a".into(),
+                Some("synthetic_function".into()),
+                "function result".into()
+            ),
+            (10, "unmatched".into(), None, "ignored".into()),
+        ]
+    );
     let usage: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT input_tokens,output_tokens,cached_input_tokens,total_tokens FROM usage_events",
     )
@@ -245,6 +269,137 @@ async fn streaming_tool_pairing_preserves_latest_matching_call_behavior() {
                 "second".into(),
                 Some("latest result".into()),
                 "complete".into()
+            ),
+        ]
+    );
+    let results: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT r.source_sequence,c.tool_name FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id ORDER BY r.source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        results,
+        [(3, Some("second".into())), (4, None)],
+        "each output remains ordered and repeated IDs pair with the latest preceding call"
+    );
+}
+
+#[tokio::test]
+async fn tool_timeline_retains_questions_failures_structured_values_and_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "tool-timeline.jsonl",
+        &[
+            meta("tool-timeline"),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"ordinary conversation"}]}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"broken","name":"shell","arguments":"{not json"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"question","name":"request_user_input","arguments":{"questions":[{"question":"Proceed?"}]}}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"question","output":{"answers":{"Proceed?":"yes"}}}}),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"failure","name":"runner","input":["synthetic",2]}}),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"failure","output":{"is_error":true,"message":"synthetic failure"}}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":["orphan",1]}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"repeat","name":"first","arguments":null}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"repeat","name":"second","arguments":{}}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"repeat","output":"latest"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"aborted","name":"request_user_input","arguments":"question without an answer"}}),
+        ],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+
+    let calls: Vec<(i64, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT sequence,tool_name,kind,arguments,status FROM tool_calls ORDER BY sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        calls,
+        [
+            (
+                2,
+                "shell".into(),
+                "tool".into(),
+                Some("{not json".into()),
+                "called".into()
+            ),
+            (
+                3,
+                "request_user_input".into(),
+                "user_input".into(),
+                Some(r#"{"questions":[{"question":"Proceed?"}]}"#.into()),
+                "complete".into()
+            ),
+            (
+                5,
+                "runner".into(),
+                "tool".into(),
+                Some(r#"["synthetic",2]"#.into()),
+                "failed".into()
+            ),
+            (8, "first".into(), "tool".into(), None, "called".into()),
+            (
+                9,
+                "second".into(),
+                "tool".into(),
+                Some("{}".into()),
+                "complete".into()
+            ),
+            (
+                11,
+                "request_user_input".into(),
+                "user_input".into(),
+                Some("question without an answer".into()),
+                "called".into()
+            ),
+        ]
+    );
+    type ResultProjection = (i64, Option<String>, Option<String>, String, String, bool);
+    let results: Vec<ResultProjection> = sqlx::query_as(
+        "SELECT r.source_sequence,r.call_id,c.tool_name,r.output,r.outcome,r.raw_json IS NOT NULL FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id ORDER BY r.source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        results,
+        [
+            (
+                4,
+                Some("question".into()),
+                Some("request_user_input".into()),
+                r#"{"answers":{"Proceed?":"yes"}}"#.into(),
+                "observed".into(),
+                true
+            ),
+            (
+                6,
+                Some("failure".into()),
+                Some("runner".into()),
+                r#"{"is_error":true,"message":"synthetic failure"}"#.into(),
+                "failed".into(),
+                true
+            ),
+            (
+                7,
+                None,
+                None,
+                r#"["orphan",1]"#.into(),
+                "observed".into(),
+                true
+            ),
+            (
+                10,
+                Some("repeat".into()),
+                Some("second".into()),
+                "latest".into(),
+                "observed".into(),
+                true
             ),
         ]
     );
@@ -795,6 +950,7 @@ async fn projection(pool: &SqlitePool) -> Vec<String> {
         "SELECT external_id || ':' || status || ':' || raw_metadata FROM sessions ORDER BY external_id",
         "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
         "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
+        "SELECT external_id || ':' || source_sequence || ':' || sequence_known || ':' || coalesce(call_id,'') || ':' || coalesce(tool_call_id,'') || ':' || coalesce(output,'') || ':' || outcome || ':' || coalesce(tool_results.raw_json,'') FROM tool_results JOIN sessions ON sessions.id=tool_results.session_id ORDER BY external_id,source_sequence,tool_results.id",
         "SELECT external_id || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,usage_events.raw_json",
     ] {
         out.extend(

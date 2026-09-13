@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Timeline item · Agent Lens{% endblock %}{% block content %}
+<h1>{{ title }}</h1><div class="meta"><span>{{ state }}</span><span>{% if item.sequence_known %}#{{ item.sequence }}{% else %}near #{{ item.sequence }} · exact legacy order unavailable{% endif %}</span><span>{{ item.timestamp.as_deref().unwrap_or("") }}</span>{% if let Some(call_id) = item.call_id %}<span>Call {{ call_id }}</span>{% endif %}<a href="{{ transcript_href }}">Back to timeline</a></div>
+<div class="message {{ item.kind }}"><div class="message-content">{{ content_html|safe }}</div></div>
+{% if pagination.previous_href.is_some() || pagination.next_href.is_some() %}<nav class="pagination" aria-label="Timeline item parts">{% if let Some(href) = pagination.previous_href %}<a rel="prev" href="{{ href }}">Previous part</a>{% else %}<span class="muted">Previous part</span>{% endif %}<span class="muted">Part {{ pagination.page }}</span>{% if let Some(href) = pagination.next_href %}<a rel="next" href="{{ href }}">Next part</a>{% else %}<span class="muted">Next part</span>{% endif %}</nav>{% endif %}
+{% endblock %}

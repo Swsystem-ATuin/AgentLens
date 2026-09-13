@@ -80,6 +80,104 @@ fn demo() {}
     (dir, app)
 }
 
+async fn tool_timeline_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
+        INSERT INTO hosts VALUES(1,'host-a');
+        INSERT INTO users VALUES(1,1,'user-a');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'synthetic-a');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,started_at) VALUES
+          (1,1,'timeline','timeline','Tool timeline','2026-01-01');
+        INSERT INTO messages(session_id,sequence,role,content) VALUES
+          (1,0,'user','initial ordinary conversation'),
+          (1,9,'assistant','resumed ordinary conversation');
+        INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,arguments,status,kind) VALUES
+          (1,1,1,'observed','shell','<unsafe> {not json','called','tool'),
+          (2,1,3,'question','request_user_input','{"questions":[{"question":"Proceed?"}]}','called','user_input'),
+          (3,1,5,'failed','runner','{"task":"synthetic"}','called','tool'),
+          (4,1,7,'aborted','request_user_input','question without answer','called','user_input'),
+          (5,1,10,'long','shell','placeholder','called','tool');
+        INSERT INTO tool_results(session_id,source_sequence,timestamp,call_id,tool_call_id,output,outcome) VALUES
+          (1,2,'2026-01-01T00:00:02Z','observed',1,'plain result','observed'),
+          (1,4,'2026-01-01T00:00:04Z','question',2,'{"answers":{"Proceed?":"yes"}}','observed'),
+          (1,6,'2026-01-01T00:00:06Z','failed',3,'{"is_error":true,"message":"failed safely"}','failed'),
+          (1,8,'2026-01-01T00:00:08Z','orphan',NULL,'orphan output','observed'),
+          (1,11,'2026-01-01T00:00:11Z','long',5,'placeholder','observed');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let long_arguments = format!("{}ARGUMENT_TAIL", "a".repeat(20_000));
+    let long_output = format!("{}OUTPUT_TAIL", "o".repeat(20_000));
+    sqlx::query("UPDATE tool_calls SET arguments=? WHERE id=5")
+        .bind(long_arguments)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tool_results SET output=? WHERE source_sequence=11")
+        .bind(long_output)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
+async fn bounded_tool_timeline_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO agents VALUES(1,'codex','Synthetic Codex');
+         INSERT INTO hosts VALUES(1,'host-a');
+         INSERT INTO users VALUES(1,1,'user-a');
+         INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'synthetic-a');
+         INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'bounded-tools','bounded-tools','Bounded tools');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    for index in 0..30_i64 {
+        let call_id = format!("call-{index}");
+        let call = sqlx::query(
+            "INSERT INTO tool_calls(session_id,sequence,call_id,tool_name,arguments,status,kind) VALUES(1,?,?,?,?,'called','tool') RETURNING id",
+        )
+        .bind(index * 2)
+        .bind(&call_id)
+        .bind(format!("tool-{index}"))
+        .bind(format!("request-{index}-{}", "x".repeat(5_000)))
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        let tool_call_id: i64 = sqlx::Row::get(&call, 0);
+        sqlx::query(
+            "INSERT INTO tool_results(session_id,source_sequence,call_id,tool_call_id,output,outcome) VALUES(1,?,?,?,?,'observed')",
+        )
+        .bind(index * 2 + 1)
+        .bind(call_id)
+        .bind(tool_call_id)
+        .bind(format!("result-{index}-{}", "y".repeat(5_000)))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
 async fn navigation_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -565,7 +663,7 @@ async fn long_transcripts_use_bounded_sections_and_lazy_message_parts() {
     assert!(part_one.len() < 128 * 1024);
     assert!(!part_one.contains("TAIL"));
     assert!(part_one.contains("rel=\"next\" href=\"/sessions/1/messages/0?part=2\""));
-    assert!(part_one.contains("href=\"/sessions/1?section=1\""));
+    assert!(part_one.contains("href=\"/sessions/1?section=1#event-0-message\""));
 
     let (status, part_two) = get(&app, "/sessions/1/messages/0?part=2").await;
     assert_eq!(status, StatusCode::OK);
@@ -601,7 +699,8 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     assert!(html.contains(
         "<details class=\"message developer\"><summary><strong>Multi-agent role</strong>"
     ));
-    assert!(html.contains("<p class=\"transcript-paragraph\">first reply</p><p class=\"transcript-paragraph\">second reply</p>"));
+    assert_eq!(html.matches("<strong>assistant</strong>").count(), 1);
+    assert!(html.find("first reply").unwrap() < html.find("second reply").unwrap());
     assert!(html.find("synthetic request").unwrap() < html.find("first reply").unwrap());
     let normalized = html
         .replace("&#60;", "&lt;")
@@ -631,6 +730,128 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     let (status, html) = get(&app, "/sessions/2").await;
     assert_eq!(status, StatusCode::OK);
     assert!(!html.contains("<details"));
+}
+
+#[tokio::test]
+async fn tool_timeline_interleaves_filters_anchors_states_and_lazy_details() {
+    let (_dir, app) = tool_timeline_app().await;
+    let (status, html) = get(&app, "/sessions/timeline").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(html.matches("<details class=\"message").count(), 12);
+    assert!(
+        html.len() < 128 * 1024,
+        "timeline response was {} bytes",
+        html.len()
+    );
+    let ordered = [
+        "initial ordinary conversation",
+        "Tool request: shell",
+        "plain result",
+        "<strong>Question</strong>",
+        "<strong>Answer</strong>",
+        "Tool request: runner",
+        "failed safely",
+        "question without answer",
+        "Orphan tool result",
+        "resumed ordinary conversation",
+    ];
+    let mut last = 0;
+    for value in ordered {
+        let position = html
+            .find(value)
+            .unwrap_or_else(|| panic!("missing {value}"));
+        assert!(position >= last, "{value} was out of source order");
+        last = position;
+    }
+    assert!(html.contains("requested · output observed"));
+    assert!(html.contains("requested · failed"));
+    assert!(html.contains("requested · outcome unknown"));
+    assert!(html.contains("id=\"event-3-tools\""));
+    assert!(html.contains("id=\"event-4-results\""));
+    assert!(html.contains("id=\"event-8-results\""));
+    assert!(html.contains("Call question"));
+    assert!(html.contains("&lt;unsafe&gt; {not json"));
+    assert!(!html.contains("<unsafe>"));
+    assert_eq!(html.matches("class=\"message user-input\" open").count(), 3);
+    assert!(html.contains("href=\"/sessions/timeline/tools/10\""));
+    assert!(html.contains("href=\"/sessions/timeline/results/11\""));
+    assert!(!html.contains("ARGUMENT_TAIL"));
+    assert!(!html.contains("OUTPUT_TAIL"));
+
+    let (_, messages) = get(&app, "/sessions/timeline?event=messages").await;
+    assert_eq!(messages.matches("<details class=\"message").count(), 2);
+    assert!(!messages.contains("Tool request:"));
+    let (_, tools) = get(&app, "/sessions/timeline?event=tools").await;
+    assert_eq!(tools.matches("<details class=\"message").count(), 7);
+    assert!(!tools.contains("<strong>Question</strong>"));
+    assert!(!tools.contains("initial ordinary conversation"));
+    let (_, questions) = get(&app, "/sessions/timeline?event=questions").await;
+    assert_eq!(questions.matches("<details class=\"message").count(), 3);
+    assert!(questions.contains("<strong>Question</strong>"));
+    assert!(questions.contains("<strong>Answer</strong>"));
+    assert!(!questions.contains("Tool request: shell"));
+    assert_eq!(
+        get(&app, "/sessions/timeline?event=invalid").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let (_, call_one) = get(&app, "/sessions/timeline/tools/10").await;
+    assert!(call_one.len() < 128 * 1024);
+    assert!(!call_one.contains("ARGUMENT_TAIL"));
+    assert!(call_one.contains("rel=\"next\" href=\"/sessions/timeline/tools/10?part=2\""));
+    assert!(call_one.contains("href=\"/sessions/timeline?section=1#event-10-tools\""));
+    let (_, call_two) = get(&app, "/sessions/timeline/tools/10?part=2").await;
+    assert!(call_two.contains("ARGUMENT_TAIL"));
+    assert!(!call_two.contains("rel=\"next\""));
+
+    let (_, result_one) = get(&app, "/sessions/timeline/results/11").await;
+    assert!(!result_one.contains("OUTPUT_TAIL"));
+    assert!(result_one.contains("rel=\"next\" href=\"/sessions/timeline/results/11?part=2\""));
+    let (_, result_two) = get(&app, "/sessions/timeline/results/11?part=2").await;
+    assert!(result_two.contains("OUTPUT_TAIL"));
+    for path in [
+        "/sessions/timeline/tools/10?part=0",
+        "/sessions/timeline/tools/10?part=3",
+        "/sessions/timeline/results/99",
+        "/sessions/other/tools/10",
+    ] {
+        let expected = if path.contains("part=0") || path.contains("part=3") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        assert_eq!(get(&app, path).await.0, expected, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn tool_timeline_pages_and_previews_have_measured_bounds() {
+    let (_dir, app) = bounded_tool_timeline_app().await;
+    let (status, first) = get(&app, "/sessions/bounded-tools?event=tools").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("<details class=\"message").count(), 50);
+    assert!(
+        first.len() < 160 * 1024,
+        "first timeline page was {} bytes",
+        first.len()
+    );
+    assert!(first.contains("request-0-"));
+    assert!(first.contains("result-24-"));
+    assert!(!first.contains("request-25-"));
+    assert!(first.contains("section=2&#38;event=tools"));
+
+    let (status, second) = get(&app, "/sessions/bounded-tools?section=2&event=tools").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second.matches("<details class=\"message").count(), 10);
+    assert!(
+        second.len() < 48 * 1024,
+        "second timeline page was {} bytes",
+        second.len()
+    );
+    assert!(second.contains("request-25-"));
+    assert!(second.contains("result-29-"));
+    assert!(!second.contains("request-24-"));
+    assert!(second.contains("section=1&#38;event=tools"));
 }
 
 #[tokio::test]
@@ -716,6 +937,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 message(2, "user", &format!("  {prefix}\nsynthetic")),
                 message(3, "assistant", "next reply"),
             ]),
+            event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
         }

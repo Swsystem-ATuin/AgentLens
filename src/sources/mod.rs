@@ -29,14 +29,18 @@ pub(crate) enum NormalizedRecord {
     },
     ToolCall {
         timestamp: Option<String>,
-        call_id: String,
+        call_id: Option<String>,
         tool_name: Option<String>,
         arguments: Option<String>,
+        kind: &'static str,
         raw_json: String,
     },
     ToolOutput {
-        call_id: String,
+        timestamp: Option<String>,
+        call_id: Option<String>,
         output: Option<String>,
+        outcome: &'static str,
+        raw_json: String,
     },
     Usage {
         timestamp: Option<String>,
