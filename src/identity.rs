@@ -25,6 +25,13 @@ pub(crate) fn session_id(source_id: &str, native_id: &str) -> String {
     )
 }
 
+pub(crate) fn source_file_id(source_id: &str, kind: &str, path: &str) -> String {
+    format!(
+        "file_{}",
+        digest(b"agent-lens-source-file-v1\0", &[source_id, kind, path])
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,6 +48,14 @@ mod tests {
         assert_ne!(
             session_id(&first_source, "same-native-id"),
             session_id(&other_source, "same-native-id")
+        );
+        assert_eq!(
+            source_file_id(&first_source, "sessions", "nested/one.jsonl"),
+            source_file_id(&first_source, "sessions", "nested/one.jsonl")
+        );
+        assert_ne!(
+            source_file_id(&first_source, "sessions", "nested/one.jsonl"),
+            source_file_id(&first_source, "sessions", "nested/two.jsonl")
         );
         assert_ne!(
             source_id("ab", "c", "", ""),

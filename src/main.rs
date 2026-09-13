@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod fingerprint;
+mod health;
 mod identity;
 mod ingest;
 mod postmortem;
@@ -36,6 +37,8 @@ enum Command {
         #[arg(long, default_value = "data")]
         data: PathBuf,
     },
+    /// Print a sanitised diagnostic summary of the disposable index.
+    Health,
     /// Serve the local web UI.
     Serve {
         #[arg(long, default_value = "127.0.0.1:3001")]
@@ -95,6 +98,10 @@ async fn main() -> Result<()> {
                 report.removed_sessions,
                 report.removed_files
             );
+        }
+        Command::Health => {
+            let pool = db::open(&cli.database).await?;
+            print!("{}", health::cli_report(&pool).await?);
         }
         Command::Serve {
             bind,

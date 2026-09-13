@@ -137,6 +137,21 @@ struct DiagnosticsTemplate {
     show_origins: bool,
 }
 
+#[derive(Deserialize, Default)]
+struct HealthQuery {
+    page: Option<u32>,
+}
+
+#[derive(Template)]
+#[template(path = "health.html")]
+struct HealthTemplate {
+    latest_run: Option<crate::health::IngestHealth>,
+    totals: crate::health::HealthTotals,
+    sources: Vec<crate::health::SourceHealth>,
+    show_origins: bool,
+    pagination: Pagination,
+}
+
 #[derive(Template)]
 #[template(path = "session.html")]
 struct SessionTemplate {
@@ -254,6 +269,7 @@ fn router_with_projects(
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
         .route("/diagnostics", get(diagnostics))
+        .route("/health", get(health))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/live-status", get(live_status))
         .route("/sessions/{id}/turns", get(turn_history))
@@ -399,6 +415,39 @@ async fn diagnostics(State(state): State<AppState>) -> Result<Html<String>, WebE
         }
         .render()
         .map_err(|error| WebError::template("render diagnostics", error))?,
+    ))
+}
+
+async fn health(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Result<Html<String>, WebError> {
+    let page = bounded_page(query.page, "validate health page")?;
+    let (mut snapshot, show_origins) = tokio::try_join!(
+        crate::health::snapshot(
+            &state.pool,
+            i64::from(page - 1) * crate::health::SOURCE_PAGE_SIZE as i64,
+        ),
+        queries::show_origins(&state.pool),
+    )
+    .map_err(|error| WebError::database("load source health", error))?;
+    let has_next = snapshot.sources.len() > crate::health::SOURCE_PAGE_SIZE;
+    snapshot.sources.truncate(crate::health::SOURCE_PAGE_SIZE);
+    Ok(Html(
+        HealthTemplate {
+            latest_run: snapshot.latest_run,
+            totals: snapshot.totals,
+            sources: snapshot.sources,
+            show_origins,
+            pagination: Pagination {
+                page,
+                previous_href: (page > 1).then(|| format!("/health?page={}", page - 1)),
+                next_href: (has_next && page < MAX_SESSION_PAGE)
+                    .then(|| format!("/health?page={}", page + 1)),
+            },
+        }
+        .render()
+        .map_err(|error| WebError::template("render source health", error))?,
     ))
 }
 
@@ -1130,6 +1179,7 @@ mod tests {
             "/sessions",
             "/usage",
             "/diagnostics",
+            "/health",
             "/sessions/1",
             "/sessions/1/live-status",
             "/sessions/1/turns",
@@ -1175,6 +1225,7 @@ mod tests {
             ("/sessions", StatusCode::OK),
             ("/usage", StatusCode::OK),
             ("/diagnostics", StatusCode::OK),
+            ("/health", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/live-status", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),

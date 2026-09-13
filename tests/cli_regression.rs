@@ -100,6 +100,72 @@ fn refresh_summary_distinguishes_partial_files_and_malformed_lines() {
     assert!(!stdout.contains("private malformed content"), "{stdout}");
 }
 
+#[test]
+fn health_command_reports_fixed_diagnostics_without_paths_or_parser_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("PRIVATE_FILE.jsonl"),
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"synthetic-health\"}}\n",
+            "PRIVATE MALFORMED CONTENT\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"synthetic\"}]}}\n"
+        ),
+    )
+    .unwrap();
+    let refresh = run(
+        dir.path(),
+        &["--database", "index.sqlite", "refresh", "--data", "sources"],
+    );
+    assert!(
+        refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+
+    let result = run(dir.path(), &["--database", "index.sqlite", "health"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert!(output.contains("latest ingest: complete"), "{output}");
+    assert!(
+        output.contains("sources: 1; ok 0; partial 1; error 0"),
+        "{output}"
+    );
+    assert!(output.contains("reason=malformed_records"), "{output}");
+    assert!(output.contains("file_"), "{output}");
+    for private in [
+        "PRIVATE_FILE",
+        "PRIVATE MALFORMED CONTENT",
+        dir.path().to_str().unwrap(),
+    ] {
+        assert!(!output.contains(private), "leaked {private}: {output}");
+    }
+
+    let missing = dir.path().join("PRIVATE_MISSING_ROOT");
+    let failed = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "refresh",
+            "--data",
+            missing.to_str().unwrap(),
+        ],
+    );
+    assert!(!failed.status.success());
+    let result = run(dir.path(), &["--database", "index.sqlite", "health"]);
+    assert!(result.status.success());
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert!(output.contains("latest ingest: failed"), "{output}");
+    assert!(output.contains("reason source_discovery"), "{output}");
+    assert!(!output.contains("PRIVATE_MISSING_ROOT"), "{output}");
+}
+
 #[tokio::test]
 async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needing_auth() {
     let dir = tempfile::tempdir().unwrap();

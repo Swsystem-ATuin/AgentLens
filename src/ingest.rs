@@ -39,6 +39,38 @@ struct ImportedRollout {
 }
 
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
+    let run =
+        sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running','unknown')")
+            .execute(pool)
+            .await
+            .context("start ingest health record")?
+            .last_insert_rowid();
+    match ingest_data_root_run(pool, root, run).await {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let reason = classify_run_failure(&format!("{error:#}"));
+            if let Err(record_error) = sqlx::query("UPDATE ingest_runs SET finished_at=CURRENT_TIMESTAMP,status='failed',errors=1,failure_reason=? WHERE id=?")
+                .bind(reason)
+                .bind(run)
+                .execute(pool)
+                .await
+            {
+                // Avoid leaving a misleading running row if even the sanitised
+                // failure finalization cannot be committed.
+                let _ = sqlx::query("DELETE FROM ingest_runs WHERE id=?")
+                    .bind(run)
+                    .execute(pool)
+                    .await;
+                return Err(error.context(format!(
+                    "record sanitised ingest failure: {record_error:#}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Result<IngestReport> {
     let discovered = codex::discover(root)?;
     let mut transaction = pool.begin().await?;
     let previous_layout: Option<String> = sqlx::query_scalar(
@@ -53,11 +85,11 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
             .is_none_or(|previous| previous == discovered.database_layout),
         "source layout does not match the previous rebuild or refresh; run rebuild to change between a direct .codex home and host/user data"
     );
-    let run = sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running',?)")
+    sqlx::query("UPDATE ingest_runs SET source_layout=? WHERE id=?")
         .bind(discovered.database_layout)
+        .bind(run)
         .execute(&mut *transaction)
-        .await?
-        .last_insert_rowid();
+        .await?;
     let mut report = IngestReport::default();
     for home in discovered.homes {
         let (instance, source_key) = ensure_instance(
@@ -145,6 +177,24 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
         .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(report)
+}
+
+fn classify_run_failure(detail: &str) -> &'static str {
+    let detail = detail.to_ascii_lowercase();
+    if detail.contains("layout does not match") {
+        "source_layout_mismatch"
+    } else if detail.contains("traversal") || detail.contains("symbolic link") {
+        "source_traversal"
+    } else if detail.contains("discover")
+        || detail.contains("source root")
+        || detail.contains("codex home")
+        || detail.contains("optional source")
+        || detail.contains("inspect data")
+    {
+        "source_discovery"
+    } else {
+        "ingest_failed"
+    }
 }
 
 async fn prune_missing_sources(

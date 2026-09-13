@@ -83,7 +83,13 @@ async fn direct_codex_home_refreshes_only_an_existing_hostless_index() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(runs, 3, "a rejected refresh must not record a run");
+    assert_eq!(runs, 4, "a rejected refresh records only sanitised health");
+    let failure: (String, String) =
+        sqlx::query_as("SELECT status,failure_reason FROM ingest_runs ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failure, ("failed".into(), "source_layout_mismatch".into()));
 }
 
 #[tokio::test]
@@ -1764,7 +1770,20 @@ async fn refresh_missing_root_or_invalid_discovery_preserves_the_index() {
             .fetch_one(&pool)
             .await
             .unwrap(),
-        1
+        3
+    );
+    let failures: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status,failure_reason FROM ingest_runs WHERE status='failed' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        failures,
+        [
+            ("failed".into(), "source_discovery".into()),
+            ("failed".into(), "source_traversal".into())
+        ]
     );
 }
 
@@ -2014,13 +2033,16 @@ async fn refresh_relative_directory_links_reject_cycles_and_file_links() {
             ingest_data_root(&pool, &root).await.is_err(),
             "invalid traversal target {target} must cancel refresh"
         );
+        let failure: (String, String) = sqlx::query_as(
+            "SELECT status,failure_reason FROM ingest_runs ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_runs")
-                .fetch_one(&pool)
-                .await
-                .unwrap(),
-            1,
-            "failed traversal must roll back the run"
+            failure,
+            ("failed".into(), "source_traversal".into()),
+            "failed traversal retains only sanitised run health"
         );
         std::fs::remove_file(link).unwrap();
     }

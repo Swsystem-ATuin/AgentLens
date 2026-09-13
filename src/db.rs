@@ -98,6 +98,12 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .await
         .context("upgrade ingest source-layout schema")?;
     }
+    if !ingest_columns.iter().any(|name| name == "failure_reason") {
+        sqlx::query("ALTER TABLE ingest_runs ADD COLUMN failure_reason TEXT")
+            .execute(&mut *migration)
+            .await
+            .context("upgrade ingest health schema")?;
+    }
     let instance_columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_instances')")
             .fetch_all(&mut *migration)
@@ -722,11 +728,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_a_legacy_index_adds_source_observation_time() {
+    async fn opening_a_legacy_index_adds_health_columns() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.sqlite");
         let pool = super::open(&path).await.unwrap();
         sqlx::query("ALTER TABLE source_files DROP COLUMN observed_at")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE ingest_runs DROP COLUMN failure_reason")
             .execute(&pool)
             .await
             .unwrap();
@@ -739,6 +749,12 @@ mod tests {
                 .await
                 .unwrap();
         assert!(columns.iter().any(|column| column == "observed_at"));
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('ingest_runs')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|column| column == "failure_reason"));
     }
 
     #[tokio::test]

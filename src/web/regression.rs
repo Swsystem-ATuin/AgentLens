@@ -1641,6 +1641,99 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
     );
 }
 
+#[tokio::test]
+async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'synthetic-agent','Synthetic');
+        INSERT INTO hosts VALUES(1,'PRIVATE_HOST');
+        INSERT INTO users VALUES(1,1,'PRIVATE_USER');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home,source_key)
+          VALUES(1,1,1,'/PRIVATE_HOME','src_synthetic');
+        INSERT INTO ingest_runs(id,started_at,finished_at,status,files_seen,errors,source_layout)
+          VALUES(1,'2026-01-01 00:00:00','2026-01-01 00:00:05','complete',102,2,'direct-codex-home');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for id in 1..=102 {
+        let (status, error, observed) = match id {
+            1 => (
+                "partial",
+                Some("PRIVATE malformed record at /PRIVATE_PATH"),
+                "datetime('now')",
+            ),
+            2 => (
+                "error",
+                Some("PRIVATE SECRET UNKNOWN FAILURE"),
+                "datetime('now','+1 day')",
+            ),
+            _ => ("ok", None, "datetime('now','-1 hour')"),
+        };
+        let sql = format!(
+            "INSERT INTO source_files(id,instance_id,ingest_run_id,path,kind,observed_at,parse_status,parse_error) VALUES(?,1,1,?,'sessions',{observed},?,?)"
+        );
+        sqlx::query(&sql)
+            .bind(id)
+            .bind(format!("/PRIVATE_PATH/{id}.jsonl"))
+            .bind(status)
+            .bind(error)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO sessions(instance_id,source_file_id,external_id,stable_id,title) VALUES(1,3,'PRIVATE_NATIVE','session-health','PRIVATE_TITLE')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+
+    let (status, first) = get(&app, "/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(first.contains("Source health"), "{first}");
+    assert!(first.contains("malformed_records"), "{first}");
+    assert!(first.contains("import_failed"), "{first}");
+    assert!(first.contains("clock skew"), "{first}");
+    assert!(first.contains("Transcript unavailable"), "{first}");
+    assert!(
+        first.contains("href=\"/sessions/session-health\">Transcript</a>"),
+        "{first}"
+    );
+    assert!(first.contains("102"), "{first}");
+    assert_eq!(first.matches("<code>file_").count(), 100);
+    assert!(first.contains("/health?page=2"), "{first}");
+    for private in [
+        "PRIVATE_PATH",
+        "PRIVATE SECRET",
+        "PRIVATE_HOST",
+        "PRIVATE_USER",
+        "PRIVATE_HOME",
+        "PRIVATE_TITLE",
+        "PRIVATE_NATIVE",
+    ] {
+        assert!(!first.contains(private), "leaked {private}: {first}");
+    }
+    assert!(!first.contains("<th>Host</th>"), "{first}");
+    assert!(!first.contains("<th>User</th>"), "{first}");
+
+    let (status, second) = get(&app, "/health?page=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second.matches("<code>file_").count(), 2);
+    assert!(second.contains("/health?page=1"), "{second}");
+    assert!(
+        second.len() < 32 * 1024,
+        "health page was {} bytes",
+        second.len()
+    );
+}
+
 #[test]
 fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
     for (prefix, title, open) in [
