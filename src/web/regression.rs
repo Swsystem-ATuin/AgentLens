@@ -232,6 +232,52 @@ async fn navigation_app() -> (tempfile::TempDir, Router) {
     (dir, app)
 }
 
+async fn usage_dashboard_app() -> (tempfile::TempDir, SqlitePool, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Codex');
+        INSERT INTO hosts VALUES(1,'alpha'),(2,'beta');
+        INSERT INTO users VALUES(1,1,'one'),(2,2,'two');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES
+          (1,1,1,'alpha-home'),(2,1,2,'beta-home');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,cwd,model) VALUES
+          (1,1,'one','usage-one','Usage one','/work/repo/component','model-a'),
+          (2,2,'two','usage-two','Usage two','/elsewhere',NULL),
+          (3,1,'three','usage-three','January usage','/work/repo','model-b'),
+          (4,1,'hidden','usage-hidden','Hidden usage','/work/repo','codex-auto-review-private');
+        INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,delta_input_tokens,delta_output_tokens,delta_cached_input_tokens,delta_reasoning_output_tokens,delta_total_tokens,cumulative_present,has_missing) VALUES
+          (1,1,1,'2026-01-31T23:30:00Z',100,20,40,5,120,1,0),
+          (1,2,1,'2026-02-02T10:00:00Z',50,10,10,NULL,60,1,0),
+          (2,1,1,'2026-02-03T12:00:00Z',0,7,0,NULL,7,1,0),
+          (2,2,1,NULL,999,999,999,NULL,1998,1,1),
+          (3,1,1,'2026-01-30T10:00:00Z',25,5,5,1,30,1,0),
+          (4,1,1,'2026-02-03T12:00:00Z',5000,5000,5000,5000,10000,1,0);
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let projects_path = dir.path().join("projects.json");
+    std::fs::write(
+        &projects_path,
+        r#"{"timezone":"+01:00","projects":[{"name":"Fixture project","host":"alpha","root":"/work/repo"}]}"#,
+    )
+    .unwrap();
+    let projects = crate::projects::ProjectConfig::load(Some(&projects_path)).unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router_with_projects(
+        pool.clone(),
+        crate::auth::Credentials::load(&auth).unwrap(),
+        projects,
+    );
+    (dir, pool, app)
+}
+
 async fn paginated_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -477,6 +523,158 @@ async fn projects_dates_archives_and_agents_filter_rendered_sessions() {
     assert!(transcript.contains("Windows Repo / UI"));
     assert!(transcript.contains("other-agent"));
     assert!(transcript.contains("active"));
+}
+
+#[tokio::test]
+async fn usage_dashboard_uses_event_time_and_reconciles_grouped_detail() {
+    let (_dir, pool, app) = usage_dashboard_app().await;
+    let uri = "/usage?period=month&group=model&from=2026-02-01&to=2026-02-28";
+    let (status, html) = get(&app, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Historical usage"));
+    assert!(html.contains("UTC+01:00"));
+    assert!(html.contains("<strong>150</strong>"));
+    assert!(html.contains("<strong>50</strong><small>33.3%</small>"));
+    assert!(html.contains("<strong>37</strong>"));
+    assert!(html.contains("<strong>5 (partial)</strong>"));
+    assert!(html.contains("<strong>187</strong>"));
+    assert!(html.contains("3 attributed observations across 2 sessions"));
+    assert!(html.contains("1 observations have no usable timestamp"));
+    assert!(html.contains("Unknown model"));
+    assert!(html.contains("<td>0</td><td>0</td><td>Unavailable</td><td>7</td>"));
+    assert!(html.contains("href=\"/sessions/usage-one\""));
+    assert!(!html.contains("Hidden usage"));
+    assert!(!html.contains("10,000"));
+
+    let projects_path = _dir.path().join("projects.json");
+    let projects = crate::projects::ProjectConfig::load(Some(&projects_path)).unwrap();
+    let filters = UsageFilters {
+        period: "month",
+        group: "model",
+        from: Some("2026-02-01"),
+        to: Some("2026-02-28"),
+    };
+    let totals = queries::usage_totals(&pool, &filters, &projects)
+        .await
+        .unwrap();
+    let detail = queries::usage_groups(&pool, &filters, &projects, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            detail
+                .iter()
+                .filter_map(|row| row.input_tokens)
+                .sum::<i64>(),
+            detail
+                .iter()
+                .filter_map(|row| row.output_tokens)
+                .sum::<i64>(),
+            detail
+                .iter()
+                .filter_map(|row| row.cached_input_tokens)
+                .sum::<i64>(),
+            detail
+                .iter()
+                .filter_map(|row| row.reasoning_output_tokens)
+                .sum::<i64>(),
+            detail
+                .iter()
+                .filter_map(|row| row.total_tokens)
+                .sum::<i64>(),
+        ),
+        (
+            totals.input_tokens.unwrap(),
+            totals.output_tokens.unwrap(),
+            totals.cached_input_tokens.unwrap(),
+            totals.reasoning_output_tokens.unwrap(),
+            totals.total_tokens.unwrap(),
+        ),
+        "the complete grouped result must reconcile to the selected overview"
+    );
+
+    let (_, weekly) = get(&app, "/usage?period=week&group=session").await;
+    assert!(weekly.contains("2026-01-26"));
+    assert!(weekly.contains("2026-02-02"));
+    assert!(weekly.contains("href=\"/sessions/usage-one\""));
+    let (_, daily) = get(
+        &app,
+        "/usage?period=day&group=agent&from=2026-02-01&to=2026-02-01",
+    )
+    .await;
+    assert!(daily.contains("<td>2026-02-01</td><td>codex</td>"));
+    for (group, expected) in [
+        ("project", "Fixture project"),
+        ("host", "alpha"),
+        ("user", "one"),
+        ("agent", "codex"),
+    ] {
+        let (_, grouped) = get(
+            &app,
+            &format!("/usage?period=month&group={group}&from=2026-02-01&to=2026-02-28"),
+        )
+        .await;
+        assert!(grouped.contains(expected), "group={group}: {grouped}");
+        if group == "project" {
+            assert!(grouped.contains("Unassigned project"));
+        }
+    }
+
+    for uri in [
+        "/usage?period=year",
+        "/usage?group=invalid",
+        "/usage?from=2026-02-30",
+        "/usage?from=2026-03-01&to=2026-02-01",
+        "/usage?page=0",
+    ] {
+        assert_eq!(get(&app, uri).await.0, StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn usage_dashboard_bounds_rows_and_preserves_range_navigation() {
+    let (_dir, pool, app) = usage_dashboard_app().await;
+    let mut transaction = pool.begin().await.unwrap();
+    for index in 0..=USAGE_PAGE_SIZE as i64 {
+        let session_id = 100 + index;
+        sqlx::query(
+            "INSERT INTO sessions(id,instance_id,external_id,stable_id,title,model) VALUES(?,1,?,?,?,'model-page')",
+        )
+        .bind(session_id)
+        .bind(format!("page-{index}"))
+        .bind(format!("usage-page-{index}"))
+        .bind(format!("Usage page {index}"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,delta_input_tokens,delta_output_tokens,delta_cached_input_tokens,delta_total_tokens,cumulative_present) VALUES(?,1,1,'2026-02-10T12:00:00Z',?,?,?, ?,1)",
+        )
+        .bind(session_id)
+        .bind(index + 1)
+        .bind(index + 1)
+        .bind(0_i64)
+        .bind((index + 1) * 2)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    }
+    transaction.commit().await.unwrap();
+
+    let query = "period=day&group=session&from=2026-02-10&to=2026-02-10";
+    let (status, first) = get(&app, &format!("/usage?{query}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        first.len() < 256 * 1024,
+        "usage page was {} bytes",
+        first.len()
+    );
+    assert!(first.contains(
+        "rel=\"next\" href=\"/usage?period=day&#38;group=session&#38;from=2026-02-10&#38;to=2026-02-10&#38;page=2\""
+    ));
+    let (_, second) = get(&app, &format!("/usage?{query}&page=2")).await;
+    assert!(second.contains("rel=\"prev\""));
+    assert!(!second.contains("rel=\"next\""));
 }
 
 #[tokio::test]
@@ -886,6 +1084,13 @@ async fn direct_codex_home_omits_host_and_user_from_lists_and_transcripts() {
     assert!(list.contains(&format!("href=\"/sessions/{id}\"")), "{list}");
     let (_, transcript) = get(&app, &format!("/sessions/{id}")).await;
     assert!(!transcript.contains("<span> / </span>"), "{transcript}");
+    let (_, usage) = get(&app, "/usage?group=host").await;
+    assert!(!usage.contains("<option value=\"host\""), "{usage}");
+    assert!(!usage.contains("<option value=\"user\""), "{usage}");
+    assert!(
+        usage.contains("<option value=\"session\" selected>session</option>"),
+        "{usage}"
+    );
     assert_eq!(
         get(&app, "/sessions/1").await.0,
         StatusCode::NOT_FOUND,

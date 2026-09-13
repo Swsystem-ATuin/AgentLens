@@ -19,11 +19,12 @@ mod regression;
 
 use presentation::{
     FilterOptions, Pagination, TimelineItem, filtered_transcript_href, message_href,
-    present_timeline, select_options, sessions_href,
+    present_recent_usage, present_timeline, present_usage_groups, present_usage_totals,
+    select_options, sessions_href, usage_href,
 };
 use queries::{
     MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
-    TRANSCRIPT_SECTION_SIZE, ToolChunk,
+    TRANSCRIPT_SECTION_SIZE, ToolChunk, USAGE_PAGE_SIZE, UsageFilters,
 };
 #[cfg(test)]
 use queries::{MessageRow, TimelineRow};
@@ -98,6 +99,31 @@ struct SessionsTemplate {
     empty_message: &'static str,
 }
 
+#[derive(Deserialize, Default)]
+struct UsageQuery {
+    period: Option<String>,
+    group: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    page: Option<u32>,
+}
+
+#[derive(Template)]
+#[template(path = "usage.html")]
+struct UsageTemplate {
+    totals: presentation::UsageTotalsView,
+    rows: Vec<presentation::UsageGroupView>,
+    recent: Vec<presentation::RecentUsageView>,
+    period_options: Vec<presentation::FilterOption>,
+    group_options: Vec<presentation::FilterOption>,
+    period_label: &'static str,
+    group_label: &'static str,
+    from: Option<String>,
+    to: Option<String>,
+    timezone: String,
+    pagination: Pagination,
+}
+
 #[derive(Template)]
 #[template(path = "session.html")]
 struct SessionTemplate {
@@ -155,6 +181,7 @@ fn router_with_projects(
             get(|| async { axum::response::Redirect::temporary("/sessions") }),
         )
         .route("/sessions", get(sessions))
+        .route("/usage", get(usage))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/messages/{sequence}", get(message))
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
@@ -186,6 +213,138 @@ pub async fn serve(
     tracing::info!(%bind, "Agent Lens listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn usage(
+    State(state): State<AppState>,
+    Query(mut query): Query<UsageQuery>,
+) -> Result<Html<String>, WebError> {
+    query.normalize();
+    query.validate()?;
+    let page = bounded_page(query.page, "validate usage page")?;
+    let show_origins = queries::show_origins(&state.pool)
+        .await
+        .map_err(|error| WebError::database("load source layout", error))?;
+    if !show_origins && matches!(query.group.as_deref(), Some("host" | "user")) {
+        query.group = Some("session".to_owned());
+    }
+    let period = query.period.as_deref().unwrap_or("day");
+    let group = query.group.as_deref().unwrap_or("model");
+    let filters = UsageFilters {
+        period,
+        group,
+        from: query.from.as_deref(),
+        to: query.to.as_deref(),
+    };
+    let (totals, mut rows, recent) = tokio::try_join!(
+        queries::usage_totals(&state.pool, &filters, &state.projects),
+        queries::usage_groups(
+            &state.pool,
+            &filters,
+            &state.projects,
+            i64::from(page - 1) * USAGE_PAGE_SIZE as i64,
+        ),
+        queries::recent_usage(&state.pool, &filters, &state.projects),
+    )
+    .map_err(|error| WebError::database("load usage dashboard", error))?;
+    let has_next = rows.len() > USAGE_PAGE_SIZE;
+    rows.truncate(USAGE_PAGE_SIZE);
+    let pagination = Pagination {
+        page,
+        previous_href: (page > 1)
+            .then(|| usage_href(period, group, filters.from, filters.to, page - 1)),
+        next_href: (has_next && page < MAX_SESSION_PAGE)
+            .then(|| usage_href(period, group, filters.from, filters.to, page + 1)),
+    };
+    let mut groups = vec!["session", "model", "project", "agent"];
+    if show_origins {
+        groups.extend(["host", "user"]);
+    }
+    Ok(Html(
+        UsageTemplate {
+            totals: present_usage_totals(totals),
+            rows: present_usage_groups(rows),
+            recent: present_recent_usage(recent),
+            period_options: select_options(
+                ["day", "week", "month"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                Some(period),
+            ),
+            group_options: select_options(
+                groups.into_iter().map(str::to_owned).collect(),
+                Some(group),
+            ),
+            period_label: match period {
+                "week" => "Week starting Monday",
+                "month" => "Month",
+                _ => "Day",
+            },
+            group_label: match group {
+                "session" => "Session",
+                "project" => "Project",
+                "host" => "Host",
+                "user" => "User",
+                "agent" => "Agent",
+                _ => "Model",
+            },
+            from: query.from,
+            to: query.to,
+            timezone: state.projects.timezone().to_owned(),
+            pagination,
+        }
+        .render()
+        .map_err(|error| WebError::template("render usage dashboard", error))?,
+    ))
+}
+
+impl UsageQuery {
+    fn normalize(&mut self) {
+        for value in [
+            &mut self.period,
+            &mut self.group,
+            &mut self.from,
+            &mut self.to,
+        ] {
+            if value.as_deref().is_some_and(str::is_empty) {
+                *value = None;
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), WebError> {
+        if self
+            .period
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "day" | "week" | "month"))
+            || self.group.as_deref().is_some_and(|value| {
+                !matches!(
+                    value,
+                    "session" | "model" | "project" | "host" | "user" | "agent"
+                )
+            })
+        {
+            return Err(WebError::invalid_filters());
+        }
+        for value in [self.from.as_deref(), self.to.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !valid_date(value) {
+                return Err(WebError::invalid_filters());
+            }
+        }
+        if self
+            .from
+            .as_deref()
+            .zip(self.to.as_deref())
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(WebError::invalid_filters());
+        }
+        Ok(())
+    }
 }
 
 async fn sessions(
@@ -749,6 +908,7 @@ mod tests {
         for path in [
             "/",
             "/sessions",
+            "/usage",
             "/sessions/1",
             "/sessions/1/messages/0",
             "/sessions/invalid",
@@ -787,6 +947,7 @@ mod tests {
         for (path, status) in [
             ("/", StatusCode::TEMPORARY_REDIRECT),
             ("/sessions", StatusCode::OK),
+            ("/usage", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/missing", StatusCode::NOT_FOUND),
         ] {

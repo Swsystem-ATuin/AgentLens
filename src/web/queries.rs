@@ -3,6 +3,8 @@ use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
 pub(super) const SESSION_PAGE_SIZE: usize = 50;
 pub(super) const TRANSCRIPT_SECTION_SIZE: usize = 50;
+pub(super) const USAGE_PAGE_SIZE: usize = 100;
+pub(super) const RECENT_USAGE_LIMIT: i64 = 20;
 pub(super) const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
 pub(super) const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 const SEARCH_CANDIDATES_PER_SESSION: i64 = 8;
@@ -105,6 +107,69 @@ pub(super) struct FilterValues {
     pub(super) agents: Vec<String>,
     pub(super) projects: Vec<String>,
     pub(super) archives: Vec<String>,
+}
+
+pub(super) struct UsageFilters<'a> {
+    pub(super) period: &'a str,
+    pub(super) group: &'a str,
+    pub(super) from: Option<&'a str>,
+    pub(super) to: Option<&'a str>,
+}
+
+#[derive(FromRow)]
+pub(super) struct UsageTotalsRow {
+    pub(super) input_tokens: Option<i64>,
+    pub(super) output_tokens: Option<i64>,
+    pub(super) cached_input_tokens: Option<i64>,
+    pub(super) reasoning_output_tokens: Option<i64>,
+    pub(super) total_tokens: Option<i64>,
+    pub(super) input_available_count: i64,
+    pub(super) output_available_count: i64,
+    pub(super) cached_available_count: i64,
+    pub(super) reasoning_available_count: i64,
+    pub(super) total_available_count: i64,
+    pub(super) session_count: i64,
+    pub(super) observation_count: i64,
+    pub(super) unattributed_count: i64,
+    pub(super) reset_count: i64,
+    pub(super) duplicate_count: i64,
+    pub(super) missing_count: i64,
+    pub(super) inconsistent_count: i64,
+    pub(super) latest_at: Option<String>,
+}
+
+#[derive(FromRow)]
+pub(super) struct UsageGroupRow {
+    pub(super) period: String,
+    pub(super) dimension: String,
+    pub(super) stable_id: Option<String>,
+    pub(super) input_tokens: Option<i64>,
+    pub(super) output_tokens: Option<i64>,
+    pub(super) cached_input_tokens: Option<i64>,
+    pub(super) reasoning_output_tokens: Option<i64>,
+    pub(super) total_tokens: Option<i64>,
+    pub(super) input_available_count: i64,
+    pub(super) output_available_count: i64,
+    pub(super) cached_available_count: i64,
+    pub(super) reasoning_available_count: i64,
+    pub(super) total_available_count: i64,
+    pub(super) session_count: i64,
+    pub(super) observation_count: i64,
+    pub(super) anomaly_count: i64,
+}
+
+#[derive(FromRow)]
+pub(super) struct RecentUsageRow {
+    pub(super) timestamp: String,
+    pub(super) stable_id: String,
+    pub(super) title: String,
+    pub(super) model: String,
+    pub(super) input_tokens: Option<i64>,
+    pub(super) output_tokens: Option<i64>,
+    pub(super) cached_input_tokens: Option<i64>,
+    pub(super) reasoning_output_tokens: Option<i64>,
+    pub(super) total_tokens: Option<i64>,
+    pub(super) anomalous: bool,
 }
 
 pub(super) async fn sessions(
@@ -274,6 +339,149 @@ pub(super) async fn show_origins(pool: &SqlitePool) -> Result<bool, sqlx::Error>
     .fetch_optional(pool)
     .await?;
     Ok(layout.as_deref() != Some("direct-codex-home"))
+}
+
+pub(super) async fn usage_totals(
+    pool: &SqlitePool,
+    filters: &UsageFilters<'_>,
+    projects: &ProjectConfig,
+) -> Result<UsageTotalsRow, sqlx::Error> {
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "WITH scoped AS (SELECT u.* FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE ",
+    );
+    push_visible_model(&mut query);
+    query.push("), attributed AS (SELECT * FROM scoped u WHERE datetime(u.timestamp) IS NOT NULL");
+    push_usage_date_boundaries(&mut query, filters, projects.timezone());
+    query.push(
+        ") SELECT SUM(delta_input_tokens) input_tokens,SUM(delta_output_tokens) output_tokens,SUM(delta_cached_input_tokens) cached_input_tokens,SUM(delta_reasoning_output_tokens) reasoning_output_tokens,SUM(delta_total_tokens) total_tokens,COUNT(delta_input_tokens) input_available_count,COUNT(delta_output_tokens) output_available_count,COUNT(delta_cached_input_tokens) cached_available_count,COUNT(delta_reasoning_output_tokens) reasoning_available_count,COUNT(delta_total_tokens) total_available_count,COUNT(DISTINCT session_id) session_count,COUNT(*) observation_count,(SELECT count(*) FROM scoped WHERE datetime(timestamp) IS NULL) unattributed_count,COALESCE(SUM(has_reset),0) reset_count,COALESCE(SUM(is_duplicate),0) duplicate_count,COALESCE(SUM(has_missing),0) missing_count,COALESCE(SUM(has_inconsistent),0) inconsistent_count,MAX(timestamp) latest_at FROM attributed",
+    );
+    query
+        .build_query_as::<UsageTotalsRow>()
+        .fetch_one(pool)
+        .await
+}
+
+pub(super) async fn usage_groups(
+    pool: &SqlitePool,
+    filters: &UsageFilters<'_>,
+    projects: &ProjectConfig,
+    offset: i64,
+) -> Result<Vec<UsageGroupRow>, sqlx::Error> {
+    let mut query = QueryBuilder::<Sqlite>::new("SELECT ");
+    push_usage_period(&mut query, filters.period, projects.timezone());
+    query.push(" period,");
+    push_usage_dimension(&mut query, filters.group, projects);
+    query.push(" dimension,");
+    if filters.group == "session" {
+        query.push("s.stable_id");
+    } else {
+        query.push("NULL");
+    }
+    query.push(
+        " stable_id,SUM(u.delta_input_tokens) input_tokens,SUM(u.delta_output_tokens) output_tokens,SUM(u.delta_cached_input_tokens) cached_input_tokens,SUM(u.delta_reasoning_output_tokens) reasoning_output_tokens,SUM(u.delta_total_tokens) total_tokens,COUNT(u.delta_input_tokens) input_available_count,COUNT(u.delta_output_tokens) output_available_count,COUNT(u.delta_cached_input_tokens) cached_available_count,COUNT(u.delta_reasoning_output_tokens) reasoning_available_count,COUNT(u.delta_total_tokens) total_available_count,COUNT(DISTINCT s.id) session_count,COUNT(*) observation_count,SUM(CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 1 ELSE 0 END) anomaly_count FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users usr ON usr.id=i.user_id JOIN hosts h ON h.id=usr.host_id WHERE datetime(u.timestamp) IS NOT NULL AND ",
+    );
+    push_visible_model(&mut query);
+    push_usage_date_boundaries(&mut query, filters, projects.timezone());
+    query.push(" GROUP BY period,dimension,stable_id ORDER BY period DESC,total_tokens DESC,dimension LIMIT ")
+        .push_bind((USAGE_PAGE_SIZE + 1) as i64)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    query
+        .build_query_as::<UsageGroupRow>()
+        .fetch_all(pool)
+        .await
+}
+
+pub(super) async fn recent_usage(
+    pool: &SqlitePool,
+    filters: &UsageFilters<'_>,
+    projects: &ProjectConfig,
+) -> Result<Vec<RecentUsageRow>, sqlx::Error> {
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT u.timestamp,s.stable_id,COALESCE(s.title,s.external_id) title,COALESCE(NULLIF(s.model,''),'Unknown model') model,u.delta_input_tokens input_tokens,u.delta_output_tokens output_tokens,u.delta_cached_input_tokens cached_input_tokens,u.delta_reasoning_output_tokens reasoning_output_tokens,u.delta_total_tokens total_tokens,(u.has_reset OR u.has_missing OR u.has_inconsistent) anomalous FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE datetime(u.timestamp) IS NOT NULL AND ",
+    );
+    push_visible_model(&mut query);
+    push_usage_date_boundaries(&mut query, filters, projects.timezone());
+    query
+        .push(" ORDER BY julianday(u.timestamp) DESC,u.id DESC LIMIT ")
+        .push_bind(RECENT_USAGE_LIMIT);
+    query
+        .build_query_as::<RecentUsageRow>()
+        .fetch_all(pool)
+        .await
+}
+
+fn push_visible_model<'a>(query: &mut QueryBuilder<'a, Sqlite>) {
+    let exclusion = crate::sources::model_exclusion();
+    query
+        .push("(a.kind<>")
+        .push_bind(exclusion.source_kind)
+        .push(" OR s.model IS NULL OR s.model NOT LIKE ")
+        .push_bind(exclusion.pattern)
+        .push(")");
+}
+
+fn push_usage_date_boundaries<'a>(
+    query: &mut QueryBuilder<'a, Sqlite>,
+    filters: &UsageFilters<'a>,
+    timezone: &'a str,
+) {
+    for (value, comparison) in [(filters.from, ">="), (filters.to, "<=")] {
+        query
+            .push(" AND (")
+            .push_bind(value)
+            .push(" IS NULL OR date(u.timestamp,")
+            .push_bind(timezone)
+            .push(") ")
+            .push(comparison)
+            .push(" ")
+            .push_bind(value)
+            .push(")");
+    }
+}
+
+fn push_usage_period<'a>(query: &mut QueryBuilder<'a, Sqlite>, period: &str, timezone: &'a str) {
+    match period {
+        "week" => {
+            query
+                .push("date(u.timestamp,")
+                .push_bind(timezone)
+                .push(",'-' || ((CAST(strftime('%w',u.timestamp,")
+                .push_bind(timezone)
+                .push(") AS INTEGER)+6)%7) || ' days')");
+        }
+        "month" => {
+            query
+                .push("strftime('%Y-%m',u.timestamp,")
+                .push_bind(timezone)
+                .push(")");
+        }
+        _ => {
+            query
+                .push("date(u.timestamp,")
+                .push_bind(timezone)
+                .push(")");
+        }
+    }
+}
+
+fn push_usage_dimension<'a>(
+    query: &mut QueryBuilder<'a, Sqlite>,
+    group: &str,
+    projects: &'a ProjectConfig,
+) {
+    match group {
+        "model" => query.push("COALESCE(NULLIF(s.model,''),'Unknown model')"),
+        "project" => {
+            query.push("COALESCE((");
+            push_project_case(query, projects);
+            query.push("),'Unassigned project')")
+        }
+        "host" => query.push("h.name"),
+        "user" => query.push("usr.os_user"),
+        "agent" => query.push("a.kind"),
+        _ => query.push("COALESCE(s.title,s.external_id)"),
+    };
 }
 
 pub(super) async fn session(

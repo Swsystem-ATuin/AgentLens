@@ -1,4 +1,6 @@
-use super::queries::{FilterValues, SessionFilters, TimelineRow};
+use super::queries::{
+    FilterValues, RecentUsageRow, SessionFilters, TimelineRow, UsageGroupRow, UsageTotalsRow,
+};
 
 pub(super) struct TimelineContent {
     pub(super) html: String,
@@ -191,6 +193,214 @@ pub(super) struct Pagination {
     pub(super) page: u32,
     pub(super) previous_href: Option<String>,
     pub(super) next_href: Option<String>,
+}
+
+pub(super) struct UsageTotalsView {
+    pub(super) input_tokens: String,
+    pub(super) output_tokens: String,
+    pub(super) cached_input_tokens: String,
+    pub(super) reasoning_output_tokens: String,
+    pub(super) total_tokens: String,
+    pub(super) cache_ratio: String,
+    pub(super) session_count: i64,
+    pub(super) observation_count: i64,
+    pub(super) unattributed_count: i64,
+    pub(super) reset_count: i64,
+    pub(super) duplicate_count: i64,
+    pub(super) missing_count: i64,
+    pub(super) inconsistent_count: i64,
+    pub(super) latest_at: String,
+}
+
+pub(super) struct UsageGroupView {
+    pub(super) period: String,
+    pub(super) dimension: String,
+    pub(super) session_href: Option<String>,
+    pub(super) input_tokens: String,
+    pub(super) output_tokens: String,
+    pub(super) cached_input_tokens: String,
+    pub(super) reasoning_output_tokens: String,
+    pub(super) total_tokens: String,
+    pub(super) cache_ratio: String,
+    pub(super) session_count: i64,
+    pub(super) observation_count: i64,
+    pub(super) anomaly_count: i64,
+}
+
+pub(super) struct RecentUsageView {
+    pub(super) timestamp: String,
+    pub(super) session_href: String,
+    pub(super) title: String,
+    pub(super) model: String,
+    pub(super) input_tokens: String,
+    pub(super) output_tokens: String,
+    pub(super) cached_input_tokens: String,
+    pub(super) reasoning_output_tokens: String,
+    pub(super) total_tokens: String,
+    pub(super) anomalous: bool,
+}
+
+pub(super) fn present_usage_totals(row: UsageTotalsRow) -> UsageTotalsView {
+    UsageTotalsView {
+        input_tokens: format_metric(
+            row.input_tokens,
+            row.input_available_count,
+            row.observation_count,
+        ),
+        output_tokens: format_metric(
+            row.output_tokens,
+            row.output_available_count,
+            row.observation_count,
+        ),
+        cached_input_tokens: format_metric(
+            row.cached_input_tokens,
+            row.cached_available_count,
+            row.observation_count,
+        ),
+        reasoning_output_tokens: format_metric(
+            row.reasoning_output_tokens,
+            row.reasoning_available_count,
+            row.observation_count,
+        ),
+        total_tokens: format_metric(
+            row.total_tokens,
+            row.total_available_count,
+            row.observation_count,
+        ),
+        cache_ratio: cache_ratio(
+            row.cached_input_tokens,
+            row.input_tokens,
+            row.cached_available_count == row.observation_count
+                && row.input_available_count == row.observation_count,
+        ),
+        session_count: row.session_count,
+        observation_count: row.observation_count,
+        unattributed_count: row.unattributed_count,
+        reset_count: row.reset_count,
+        duplicate_count: row.duplicate_count,
+        missing_count: row.missing_count,
+        inconsistent_count: row.inconsistent_count,
+        latest_at: row.latest_at.unwrap_or_else(|| "Unavailable".to_owned()),
+    }
+}
+
+pub(super) fn present_usage_groups(rows: Vec<UsageGroupRow>) -> Vec<UsageGroupView> {
+    rows.into_iter()
+        .map(|row| UsageGroupView {
+            period: row.period,
+            dimension: row.dimension,
+            session_href: row.stable_id.map(|id| format!("/sessions/{id}")),
+            input_tokens: format_metric(
+                row.input_tokens,
+                row.input_available_count,
+                row.observation_count,
+            ),
+            output_tokens: format_metric(
+                row.output_tokens,
+                row.output_available_count,
+                row.observation_count,
+            ),
+            cached_input_tokens: format_metric(
+                row.cached_input_tokens,
+                row.cached_available_count,
+                row.observation_count,
+            ),
+            reasoning_output_tokens: format_metric(
+                row.reasoning_output_tokens,
+                row.reasoning_available_count,
+                row.observation_count,
+            ),
+            total_tokens: format_metric(
+                row.total_tokens,
+                row.total_available_count,
+                row.observation_count,
+            ),
+            cache_ratio: cache_ratio(
+                row.cached_input_tokens,
+                row.input_tokens,
+                row.cached_available_count == row.observation_count
+                    && row.input_available_count == row.observation_count,
+            ),
+            session_count: row.session_count,
+            observation_count: row.observation_count,
+            anomaly_count: row.anomaly_count,
+        })
+        .collect()
+}
+
+pub(super) fn present_recent_usage(rows: Vec<RecentUsageRow>) -> Vec<RecentUsageView> {
+    rows.into_iter()
+        .map(|row| RecentUsageView {
+            timestamp: row.timestamp,
+            session_href: format!("/sessions/{}", row.stable_id),
+            title: row.title,
+            model: row.model,
+            input_tokens: format_tokens(row.input_tokens),
+            output_tokens: format_tokens(row.output_tokens),
+            cached_input_tokens: format_tokens(row.cached_input_tokens),
+            reasoning_output_tokens: format_tokens(row.reasoning_output_tokens),
+            total_tokens: format_tokens(row.total_tokens),
+            anomalous: row.anomalous,
+        })
+        .collect()
+}
+
+fn format_tokens(value: Option<i64>) -> String {
+    let Some(value) = value else {
+        return "Unavailable".to_owned();
+    };
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
+}
+
+fn format_metric(value: Option<i64>, available: i64, observations: i64) -> String {
+    let formatted = format_tokens(value);
+    if value.is_some() && available < observations {
+        format!("{formatted} (partial)")
+    } else {
+        formatted
+    }
+}
+
+fn cache_ratio(cached: Option<i64>, input: Option<i64>, complete: bool) -> String {
+    match (cached, input) {
+        (Some(cached), Some(input)) if input > 0 => {
+            let ratio = format!("{:.1}%", cached as f64 * 100.0 / input as f64);
+            if complete {
+                ratio
+            } else {
+                format!("{ratio} (partial)")
+            }
+        }
+        _ => "Unavailable".to_owned(),
+    }
+}
+
+pub(super) fn usage_href(
+    period: &str,
+    group: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    page: u32,
+) -> String {
+    let mut pairs = vec![
+        format!("period={}", percent_encode(period)),
+        format!("group={}", percent_encode(group)),
+    ];
+    for (name, value) in [("from", from), ("to", to)] {
+        if let Some(value) = value {
+            pairs.push(format!("{name}={}", percent_encode(value)));
+        }
+    }
+    pairs.push(format!("page={page}"));
+    format!("/usage?{}", pairs.join("&"))
 }
 
 pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
