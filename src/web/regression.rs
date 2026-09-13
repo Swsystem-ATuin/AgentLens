@@ -1733,6 +1733,172 @@ async fn codex_and_gemini_render_together_with_adapter_specific_messages() {
 }
 
 #[tokio::test]
+async fn operational_metrics_are_authenticated_bounded_and_content_free_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Codex'),(2,'gemini','Gemini CLI'),(3,'PRIVATE_SENTINEL_AGENT','PRIVATE_SENTINEL');
+        INSERT INTO hosts VALUES(1,'PRIVATE_SENTINEL_HOST');
+        INSERT INTO users VALUES(1,1,'PRIVATE_SENTINEL_USER');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home,source_key) VALUES
+          (1,1,1,'PRIVATE_SENTINEL_CODEX_HOME','source-1'),
+          (2,2,1,'PRIVATE_SENTINEL_GEMINI_HOME','source-2'),
+          (3,3,1,'PRIVATE_SENTINEL_OTHER_HOME','source-3');
+        INSERT INTO ingest_runs(id,started_at,finished_at,status,files_seen,errors,failure_reason) VALUES
+          (1,'2026-01-01T00:00:00Z','2026-01-01T00:00:01Z','complete',3,0,NULL),
+          (2,'2026-01-02T00:00:00Z','2026-01-02T00:00:02Z','PRIVATE_SENTINEL_STATUS',0,1,'PRIVATE_SENTINEL_REASON');
+        INSERT INTO source_files(id,instance_id,ingest_run_id,path,kind,parse_status,parse_error,observed_at) VALUES
+          (1,1,1,'PRIVATE_SENTINEL_CODEX_PATH','sessions','ok',NULL,datetime('now')),
+          (2,2,1,'PRIVATE_SENTINEL_GEMINI_PATH','chats','partial','PRIVATE_SENTINEL_ERROR',datetime('now')),
+          (3,3,1,'PRIVATE_SENTINEL_OTHER_PATH','other','PRIVATE_SENTINEL_STATE','PRIVATE_SENTINEL_ERROR',NULL);
+        INSERT INTO sessions(id,instance_id,source_file_id,external_id,stable_id,title,model,status,cwd) VALUES
+          (1,1,1,'PRIVATE_SENTINEL_ID_1','stable-1','PRIVATE_SENTINEL_TITLE_1','gpt-5.3-codex','complete','PRIVATE_SENTINEL_CWD'),
+          (2,2,2,'PRIVATE_SENTINEL_ID_2','stable-2','PRIVATE_SENTINEL_TITLE_2','gemini-2.5-pro','unknown','PRIVATE_SENTINEL_CWD'),
+          (3,3,3,'PRIVATE_SENTINEL_ID_3','stable-3','PRIVATE_SENTINEL_TITLE_3','PRIVATE_SENTINEL_MODEL','PRIVATE_SENTINEL_SESSION_STATUS','PRIVATE_SENTINEL_CWD');
+        INSERT INTO messages(session_id,sequence,role,content,raw_json) VALUES
+          (3,0,'user','PRIVATE_SENTINEL_PROMPT','PRIVATE_SENTINEL_RAW');
+        INSERT INTO session_usage(session_id,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,snapshot_count,per_turn_observation_count,reset_count,duplicate_count,missing_count,inconsistent_count) VALUES
+          (1,100,20,40,5,120,1,0,0,0,0,0),
+          (2,NULL,NULL,NULL,NULL,NULL,1,1,0,0,1,0),
+          (3,7,3,2,NULL,10,1,0,0,0,0,0);
+        INSERT INTO tool_calls(id,session_id,sequence,tool_name,arguments,status,kind) VALUES
+          (1,1,0,'PRIVATE_SENTINEL_TOOL','PRIVATE_SENTINEL_ARGUMENTS','complete','tool'),
+          (2,1,1,'PRIVATE_SENTINEL_TOOL','PRIVATE_SENTINEL_ARGUMENTS','called','tool'),
+          (3,2,0,'PRIVATE_SENTINEL_TOOL','PRIVATE_SENTINEL_ARGUMENTS','failed','tool'),
+          (4,3,0,'PRIVATE_SENTINEL_TOOL','PRIVATE_SENTINEL_ARGUMENTS','complete','tool');
+        INSERT INTO tool_results(session_id,source_sequence,tool_call_id,output,outcome) VALUES
+          (1,0,1,'PRIVATE_SENTINEL_OUTPUT','observed'),
+          (2,0,3,'PRIVATE_SENTINEL_OUTPUT','failed'),
+          (3,0,4,'PRIVATE_SENTINEL_OUTPUT','PRIVATE_SENTINEL_OUTCOME');
+        INSERT INTO turns(session_id,ordinal,start_kind,outcome) VALUES
+          (1,0,'user_activity','complete'),
+          (2,0,'user_activity','unclosed'),
+          (3,0,'user_activity','PRIVATE_SENTINEL_TURN');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let credentials = crate::auth::Credentials::load(&auth).unwrap();
+    let app = router(pool.clone(), credentials.clone());
+
+    let response = authenticated_response(&app, "/metrics").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    for expected in [
+        "agentlens_indexed_sessions{agent=\"codex\",status=\"complete\"} 1",
+        "agentlens_indexed_sessions{agent=\"other\",status=\"other\"} 1",
+        "agentlens_indexed_source_files{agent=\"gemini\",state=\"partial\",freshness=\"recent\"} 1",
+        "agentlens_indexed_tool_outcomes{agent=\"codex\",outcome=\"unknown\"} 1",
+        "agentlens_indexed_tool_outcomes{agent=\"gemini\",outcome=\"failed\"} 1",
+        "agentlens_indexed_turn_outcomes{agent=\"gemini\",outcome=\"unclosed\"} 1",
+        "agentlens_last_ingest_info{status=\"unknown\",reason=\"none\"} 1",
+        "agentlens_indexed_usage_tokens{agent=\"codex\",model_family=\"gpt\",kind=\"total\"} 120",
+        "agentlens_indexed_usage_sessions{agent=\"gemini\",model_family=\"gemini\",kind=\"total\",availability=\"unavailable\"} 1",
+    ] {
+        assert!(body.contains(expected), "missing {expected}: {body}");
+    }
+    assert!(body.len() < 128 * 1024);
+    assert!(body.ends_with('\n'));
+    assert!(!body.contains("PRIVATE_SENTINEL"), "{body}");
+    assert!(!body.contains("stable-"), "{body}");
+    let mut completed_families = std::collections::HashSet::new();
+    let mut current_family = "";
+    for line in body.lines().filter(|line| !line.starts_with('#')) {
+        let family = line.split(['{', ' ']).next().unwrap();
+        if family != current_family {
+            assert!(
+                !completed_families.contains(family),
+                "metric family {family} is not contiguous: {body}"
+            );
+            if !current_family.is_empty() {
+                completed_families.insert(current_family);
+            }
+            current_family = family;
+        }
+    }
+
+    let restarted = router(pool, credentials);
+    let (_, restarted_body) = get(&restarted, "/metrics").await;
+    assert_eq!(body, restarted_body);
+}
+
+#[tokio::test]
+async fn operational_metrics_reconstruct_across_full_rebuilds() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source/synthetic-host/synthetic-user");
+    let codex = source.join(".codex/sessions");
+    let gemini = source.join(".gemini/tmp/project/chats");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::create_dir_all(&gemini).unwrap();
+    std::fs::write(
+        codex.join("session.jsonl"),
+        include_bytes!("../../tests/fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    std::fs::write(
+        gemini.join("session.jsonl"),
+        include_bytes!("../../tests/fixtures/gemini/session.jsonl"),
+    )
+    .unwrap();
+    let database = dir.path().join("index.sqlite");
+
+    let first = crate::db::begin_rebuild(&database).await.unwrap();
+    crate::ingest::ingest_data_root(first.pool(), &dir.path().join("source"))
+        .await
+        .unwrap();
+    first.publish().await.unwrap();
+    let first_pool = crate::db::open(&database).await.unwrap();
+    let first_metrics = crate::metrics::render(&first_pool).await.unwrap();
+    first_pool.close().await;
+
+    let second = crate::db::begin_rebuild(&database).await.unwrap();
+    crate::ingest::ingest_data_root(second.pool(), &dir.path().join("source"))
+        .await
+        .unwrap();
+    second.publish().await.unwrap();
+    let second_pool = crate::db::open(&database).await.unwrap();
+    let second_metrics = crate::metrics::render(&second_pool).await.unwrap();
+
+    let stable_lines = |body: &str| {
+        body.lines()
+            .filter(|line| {
+                !line.starts_with("agentlens_last_ingest_duration_seconds ")
+                    && !line.starts_with("agentlens_last_ingest_finished_timestamp_seconds ")
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(stable_lines(&first_metrics), stable_lines(&second_metrics));
+    assert!(
+        second_metrics.contains("agentlens_ingest_runs{status=\"complete\",reason=\"none\"} 1")
+    );
+    assert!(
+        second_metrics
+            .contains("agentlens_indexed_sessions{agent=\"codex\",status=\"complete\"} 1")
+    );
+    assert!(
+        second_metrics
+            .contains("agentlens_indexed_sessions{agent=\"gemini\",status=\"unknown\"} 1")
+    );
+}
+
+#[tokio::test]
 async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))

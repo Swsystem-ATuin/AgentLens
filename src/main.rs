@@ -4,6 +4,7 @@ mod fingerprint;
 mod health;
 mod identity;
 mod ingest;
+mod metrics;
 mod postmortem;
 mod projects;
 mod search;

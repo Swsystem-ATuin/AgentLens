@@ -270,6 +270,7 @@ fn router_with_projects(
         .route("/usage", get(usage))
         .route("/diagnostics", get(diagnostics))
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/live-status", get(live_status))
         .route("/sessions/{id}/turns", get(turn_history))
@@ -449,6 +450,20 @@ async fn health(
         .render()
         .map_err(|error| WebError::template("render source health", error))?,
     ))
+}
+
+async fn metrics(State(state): State<AppState>) -> Result<Response, WebError> {
+    let body = crate::metrics::render(&state.pool)
+        .await
+        .map_err(|error| WebError::database("load operational metrics", error))?;
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response())
 }
 
 impl UsageQuery {
@@ -1180,6 +1195,7 @@ mod tests {
             "/usage",
             "/diagnostics",
             "/health",
+            "/metrics",
             "/sessions/1",
             "/sessions/1/live-status",
             "/sessions/1/turns",
@@ -1226,6 +1242,7 @@ mod tests {
             ("/usage", StatusCode::OK),
             ("/diagnostics", StatusCode::OK),
             ("/health", StatusCode::OK),
+            ("/metrics", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/live-status", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
