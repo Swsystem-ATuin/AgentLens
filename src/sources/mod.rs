@@ -65,6 +65,7 @@ pub(crate) enum NormalizedRecord {
         timestamp: Option<String>,
         role: String,
         content: String,
+        opens_turn: bool,
         raw_json: String,
     },
     ToolCall {
@@ -86,6 +87,14 @@ pub(crate) enum NormalizedRecord {
         timestamp: Option<String>,
         cumulative: Option<TokenUsage>,
         per_turn: Option<TokenUsage>,
+        raw_json: String,
+    },
+    TurnEvent {
+        timestamp: Option<String>,
+        kind: &'static str,
+        turn_id: Option<String>,
+        requested_model: Option<String>,
+        served_model: Option<String>,
         raw_json: String,
     },
 }

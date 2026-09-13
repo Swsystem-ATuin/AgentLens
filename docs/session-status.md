@@ -7,8 +7,10 @@ The reducer starts at `unknown` and applies these transitions:
 | Record | New status |
 | --- | --- |
 | `event_msg/task_complete` | `complete` |
+| `event_msg/turn_complete` | `complete` |
 | `event_msg/turn_aborted` | `aborted` |
 | `event_msg/task_started` | `unknown` |
+| `event_msg/turn_started` | `unknown` |
 | `turn_context` | `unknown` |
 | `event_msg/user_message` | `unknown` |
 | user-role `response_item/message` | `unknown` |
@@ -22,7 +24,7 @@ For an initially imported partial file, status reflects the valid records that s
 
 ## Upgrade and verification
 
-This normalization change increments the parser version to 2. Run either command with the updated executable:
+The current ordered turn/model normalization uses parser version 6. Run either command with the updated executable:
 
 ```bash
 cargo run -- refresh --data data
@@ -30,7 +32,7 @@ cargo run -- refresh --data data
 cargo run -- rebuild --data data
 ```
 
-The first refresh reimports rollouts indexed by an older parser version automatically. There is no schema migration. Refresh can update a database while the server is running; later requests see the committed statuses. See [refresh behavior](refresh.md) and [safe rebuilds](rebuild.md).
+The first refresh reimports rollouts indexed by an older parser version automatically. The schema migration also creates turn history storage; no manual migration is needed. Refresh can update a database while the server is running; later requests see the committed statuses. See [refresh behavior](refresh.md), [ordered turn history](turn-history.md), and [safe rebuilds](rebuild.md).
 
 Synthetic regression cases cover completion then interruption, interruption then completion, resumption through each supported opening record, unrelated trailing records, missing lifecycle events, and deliberately reversed timestamps. The regression fails under the former presence-based implementation because any historical completion incorrectly overrides a later interruption or resumed turn.
 

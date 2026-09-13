@@ -544,6 +544,172 @@ async fn cumulative_usage_accounting_handles_resumes_duplicates_resets_and_gaps(
 }
 
 #[tokio::test]
+async fn ordered_turn_history_preserves_resumes_models_outcomes_and_unknowns() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "turns.jsonl",
+        &[
+            meta("turn-history"),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"turn_complete"}}),
+            json!({"type":"event_msg","timestamp":"2026-01-03T00:00:00Z","payload":{"type":"turn_started"}}),
+            json!({"type":"turn_context","timestamp":"2026-01-03T00:00:01Z","payload":{"turn_id":"turn-two","model":"requested-a"}}),
+            json!({"type":"response_item","timestamp":"2026-01-03T00:00:02Z","payload":{"type":"message","role":"user","content":[{"text":"synthetic request"}]}}),
+            json!({"type":"response_item","timestamp":"2026-01-03T00:00:03Z","payload":{"type":"function_call","call_id":"failed-call","name":"synthetic","arguments":"{}"}}),
+            json!({"type":"response_item","timestamp":"2026-01-03T00:00:04Z","payload":{"type":"function_call_output","call_id":"failed-call","output":{"is_error":true}}}),
+            json!({"type":"turn_context","timestamp":"2026-01-03T00:00:05Z","payload":{"turn_id":"turn-two","model":"requested-a2"}}),
+            json!({"type":"event_msg","timestamp":"2026-01-03T00:00:06Z","payload":{"type":"model_reroute","from_model":"requested-a2","to_model":"served-b"}}),
+            json!({"type":"event_msg","timestamp":"2025-01-01T00:00:00Z","payload":{"type":"task_complete"}}),
+            json!({"type":"turn_context","timestamp":"2026-01-04T00:00:00Z","payload":{"turn_id":"turn-three","model":"requested-c"}}),
+            json!({"type":"response_item","timestamp":"2026-01-04T00:00:01Z","payload":{"type":"function_call","call_id":"unknown-call","name":"synthetic","arguments":"{}"}}),
+            json!({"type":"event_msg","payload":{"type":"turn_aborted"}}),
+            json!({"type":"response_item","timestamp":"2026-01-05T00:00:00Z","payload":{"type":"message","role":"user","content":[{"text":"resumed synthetic request"}]}}),
+            json!({"type":"response_item","timestamp":"2026-01-05T00:00:01Z","payload":{"type":"message","role":"assistant","content":[{"text":"synthetic response"}]}}),
+        ],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&pool, dir.path()).await.unwrap();
+
+    type TurnProjection = (
+        i64,
+        Option<String>,
+        Option<i64>,
+        String,
+        Option<i64>,
+        Option<String>,
+        String,
+        bool,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+    );
+    let turns: Vec<TurnProjection> = sqlx::query_as("SELECT ordinal,turn_id,start_sequence,start_kind,end_sequence,end_timestamp,outcome,resumed,requested_model,requested_model_sequence,observed_model,observed_model_sequence FROM turns ORDER BY ordinal")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        turns,
+        [
+            (
+                1,
+                None,
+                None,
+                "unknown".into(),
+                Some(1),
+                Some("2026-01-01T00:00:00Z".into()),
+                "complete".into(),
+                false,
+                None,
+                None,
+                None,
+                None
+            ),
+            (
+                2,
+                Some("turn-two".into()),
+                Some(2),
+                "started".into(),
+                Some(9),
+                Some("2025-01-01T00:00:00Z".into()),
+                "complete".into(),
+                true,
+                Some("requested-a2".into()),
+                Some(7),
+                Some("served-b".into()),
+                Some(8)
+            ),
+            (
+                3,
+                Some("turn-three".into()),
+                Some(10),
+                "requested_model".into(),
+                Some(12),
+                None,
+                "interrupted".into(),
+                true,
+                Some("requested-c".into()),
+                Some(10),
+                None,
+                None
+            ),
+            (
+                4,
+                None,
+                Some(13),
+                "user_activity".into(),
+                None,
+                None,
+                "unclosed".into(),
+                true,
+                None,
+                None,
+                None,
+                None
+            ),
+        ]
+    );
+    let events: Vec<(i64, Option<i64>, String, bool)> = sqlx::query_as(
+        "SELECT source_sequence,turn_ordinal,kind,is_resumption FROM turn_events ORDER BY source_sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        [
+            (1, Some(1), "completed".into(), false),
+            (2, Some(2), "started".into(), true),
+            (3, Some(2), "requested_model".into(), false),
+            (7, Some(2), "requested_model".into(), false),
+            (8, Some(2), "served_model_fallback".into(), false),
+            (9, Some(2), "completed".into(), false),
+            (10, Some(3), "requested_model".into(), true),
+            (12, Some(3), "interrupted".into(), false),
+            (13, Some(4), "user_activity".into(), true),
+        ]
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT is_model_change FROM turn_events WHERE source_sequence=7"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    let tools: Vec<(i64, Option<i64>, String)> =
+        sqlx::query_as("SELECT sequence,turn_ordinal,status FROM tool_calls ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        tools,
+        [
+            (5, Some(2), "failed".into()),
+            (11, Some(3), "called".into())
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT turn_ordinal FROM tool_results WHERE source_sequence=6"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some(2)
+    );
+
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+}
+
+#[tokio::test]
 async fn session_status_follows_ordered_lifecycle_and_resume_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let event = |kind: &str, timestamp: &str| json!({"type":"event_msg","timestamp":timestamp,"payload":{"type":kind}});
@@ -571,6 +737,19 @@ async fn session_status_follows_ordered_lifecycle_and_resume_evidence() {
             vec![
                 event("task_complete", "2026-01-01T00:00:00Z"),
                 event("task_started", "2025-01-01T00:00:00Z"),
+            ],
+            "unknown",
+        ),
+        (
+            "current-turn-complete",
+            vec![event("turn_complete", "2026-01-01T00:00:00Z")],
+            "complete",
+        ),
+        (
+            "complete-then-current-started",
+            vec![
+                event("turn_complete", "2026-01-01T00:00:00Z"),
+                event("turn_started", "2025-01-01T00:00:00Z"),
             ],
             "unknown",
         ),
@@ -1087,10 +1266,12 @@ async fn projection(pool: &SqlitePool) -> Vec<String> {
     for query in [
         "SELECT external_id || ':' || status || ':' || raw_metadata FROM sessions ORDER BY external_id",
         "SELECT external_id || ':' || sequence || ':' || raw_json FROM messages JOIN sessions ON sessions.id=messages.session_id ORDER BY external_id,sequence",
-        "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
-        "SELECT external_id || ':' || source_sequence || ':' || sequence_known || ':' || coalesce(call_id,'') || ':' || coalesce(tool_call_id,'') || ':' || coalesce(output,'') || ':' || outcome || ':' || coalesce(tool_results.raw_json,'') FROM tool_results JOIN sessions ON sessions.id=tool_results.session_id ORDER BY external_id,source_sequence,tool_results.id",
+        "SELECT external_id || ':' || sequence || ':' || raw_json || ':' || coalesce(output,'') || ':' || coalesce(turn_ordinal,-1) FROM tool_calls JOIN sessions ON sessions.id=tool_calls.session_id ORDER BY external_id,sequence",
+        "SELECT external_id || ':' || source_sequence || ':' || sequence_known || ':' || coalesce(call_id,'') || ':' || coalesce(tool_call_id,'') || ':' || coalesce(output,'') || ':' || outcome || ':' || coalesce(tool_results.raw_json,'') || ':' || coalesce(turn_ordinal,-1) FROM tool_results JOIN sessions ON sessions.id=tool_results.session_id ORDER BY external_id,source_sequence,tool_results.id",
         "SELECT external_id || ':' || coalesce(source_sequence,-1) || ':' || sequence_known || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || coalesce(per_turn_input_tokens,-1) || ':' || coalesce(per_turn_output_tokens,-1) || ':' || coalesce(per_turn_cached_input_tokens,-1) || ':' || coalesce(per_turn_reasoning_output_tokens,-1) || ':' || coalesce(per_turn_total_tokens,-1) || ':' || coalesce(delta_input_tokens,-1) || ':' || coalesce(delta_output_tokens,-1) || ':' || coalesce(delta_cached_input_tokens,-1) || ':' || coalesce(delta_reasoning_output_tokens,-1) || ':' || coalesce(delta_total_tokens,-1) || ':' || cumulative_present || ':' || per_turn_present || ':' || is_duplicate || ':' || has_reset || ':' || has_missing || ':' || has_inconsistent || ':' || usage_events.raw_json FROM usage_events JOIN sessions ON sessions.id=usage_events.session_id ORDER BY external_id,coalesce(source_sequence,usage_events.id)",
         "SELECT external_id || ':' || coalesce(input_tokens,-1) || ':' || coalesce(output_tokens,-1) || ':' || coalesce(cached_input_tokens,-1) || ':' || coalesce(reasoning_output_tokens,-1) || ':' || coalesce(total_tokens,-1) || ':' || snapshot_count || ':' || per_turn_observation_count || ':' || reset_count || ':' || duplicate_count || ':' || missing_count || ':' || inconsistent_count FROM session_usage JOIN sessions ON sessions.id=session_usage.session_id ORDER BY external_id",
+        "SELECT external_id || ':' || ordinal || ':' || coalesce(turn_id,'') || ':' || coalesce(start_sequence,-1) || ':' || coalesce(start_timestamp,'') || ':' || start_kind || ':' || coalesce(end_sequence,-1) || ':' || coalesce(end_timestamp,'') || ':' || outcome || ':' || resumed || ':' || coalesce(requested_model,'') || ':' || coalesce(requested_model_sequence,-1) || ':' || coalesce(observed_model,'') || ':' || coalesce(observed_model_sequence,-1) FROM turns JOIN sessions ON sessions.id=turns.session_id ORDER BY external_id,ordinal",
+        "SELECT external_id || ':' || coalesce(turn_ordinal,-1) || ':' || source_sequence || ':' || coalesce(timestamp,'') || ':' || kind || ':' || coalesce(turn_id,'') || ':' || coalesce(requested_model,'') || ':' || coalesce(served_model,'') || ':' || is_resumption || ':' || is_model_change || ':' || turn_events.raw_json FROM turn_events JOIN sessions ON sessions.id=turn_events.session_id ORDER BY external_id,source_sequence",
     ] {
         out.extend(
             sqlx::query_scalar::<_, String>(query)
@@ -1285,6 +1466,8 @@ async fn refresh_removes_missing_sources_and_all_their_indexed_content() {
         "tool_calls",
         "usage_events",
         "session_usage",
+        "turns",
+        "turn_events",
     ] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
@@ -1303,6 +1486,8 @@ async fn refresh_removes_missing_sources_and_all_their_indexed_content() {
         "tool_calls",
         "usage_events",
         "session_usage",
+        "turns",
+        "turn_events",
         "source_files",
     ] {
         assert_eq!(

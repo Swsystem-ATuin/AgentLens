@@ -137,11 +137,58 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         sqlx::query_scalar("SELECT name FROM pragma_table_info('tool_calls')")
             .fetch_all(&mut *migration)
             .await?;
-    if !tool_columns.iter().any(|name| name == "kind") {
-        sqlx::query("ALTER TABLE tool_calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'tool'")
+    for (column, definition) in [
+        ("kind", "TEXT NOT NULL DEFAULT 'tool'"),
+        ("turn_ordinal", "INTEGER"),
+    ] {
+        if !tool_columns.iter().any(|name| name == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE tool_calls ADD COLUMN {column} {definition}"
+            ))
             .execute(&mut *migration)
             .await
             .context("upgrade tool timeline schema")?;
+        }
+    }
+    let tool_result_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('tool_results')")
+            .fetch_all(&mut *migration)
+            .await?;
+    if !tool_result_columns
+        .iter()
+        .any(|name| name == "turn_ordinal")
+    {
+        sqlx::query("ALTER TABLE tool_results ADD COLUMN turn_ordinal INTEGER")
+            .execute(&mut *migration)
+            .await
+            .context("upgrade tool result turn schema")?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tool_calls_turn ON tool_calls(session_id,turn_ordinal)",
+    )
+    .execute(&mut *migration)
+    .await
+    .context("index tool calls by turn")?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tool_results_turn ON tool_results(session_id,turn_ordinal)",
+    )
+    .execute(&mut *migration)
+    .await
+    .context("index tool results by turn")?;
+    let turn_event_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('turn_events')")
+            .fetch_all(&mut *migration)
+            .await?;
+    if !turn_event_columns
+        .iter()
+        .any(|name| name == "is_model_change")
+    {
+        sqlx::query(
+            "ALTER TABLE turn_events ADD COLUMN is_model_change INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&mut *migration)
+        .await
+        .context("upgrade turn model-change schema")?;
     }
     let usage_columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('usage_events')")
@@ -511,6 +558,12 @@ mod tests {
              INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
              INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'native','stable','title');
              INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,arguments,output,status) VALUES(1,1,7,'legacy-call','runner','{}','legacy output','complete');
+             DROP INDEX idx_tool_calls_turn;
+             DROP INDEX idx_tool_results_turn;
+             DROP TABLE turn_events;
+             DROP TABLE turns;
+             ALTER TABLE tool_results DROP COLUMN turn_ordinal;
+             ALTER TABLE tool_calls DROP COLUMN turn_ordinal;
              ALTER TABLE tool_calls DROP COLUMN kind;",
         )
         .execute(&pool)
@@ -544,6 +597,21 @@ mod tests {
                     .await
                     .unwrap(),
                 "tool"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, Option<i64>>("SELECT turn_ordinal FROM tool_calls LIMIT 1")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM turns")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                0,
+                "legacy tool rows do not contain evidence for invented turns"
             );
             pool.close().await;
         }

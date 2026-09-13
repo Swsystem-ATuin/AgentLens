@@ -5,6 +5,7 @@ pub(super) const SESSION_PAGE_SIZE: usize = 50;
 pub(super) const TRANSCRIPT_SECTION_SIZE: usize = 50;
 pub(super) const USAGE_PAGE_SIZE: usize = 100;
 pub(super) const RECENT_USAGE_LIMIT: i64 = 20;
+pub(super) const TURN_PAGE_SIZE: usize = 50;
 pub(super) const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
 pub(super) const MESSAGE_CHUNK_CHARS: i64 = 16_384;
 const SEARCH_CANDIDATES_PER_SESSION: i64 = 8;
@@ -170,6 +171,32 @@ pub(super) struct RecentUsageRow {
     pub(super) reasoning_output_tokens: Option<i64>,
     pub(super) total_tokens: Option<i64>,
     pub(super) anomalous: bool,
+}
+
+#[derive(FromRow)]
+pub(super) struct TurnRow {
+    pub(super) ordinal: i64,
+    pub(super) turn_id: Option<String>,
+    pub(super) start_sequence: Option<i64>,
+    pub(super) start_timestamp: Option<String>,
+    pub(super) start_kind: String,
+    pub(super) end_sequence: Option<i64>,
+    pub(super) end_timestamp: Option<String>,
+    pub(super) outcome: String,
+    pub(super) resumed: bool,
+    pub(super) requested_model: Option<String>,
+    pub(super) requested_model_sequence: Option<i64>,
+    pub(super) observed_model: Option<String>,
+    pub(super) observed_model_sequence: Option<i64>,
+    pub(super) duration_seconds: Option<i64>,
+    pub(super) tool_request_count: i64,
+    pub(super) tool_result_count: i64,
+    pub(super) failed_tool_count: i64,
+    pub(super) unknown_tool_count: i64,
+    pub(super) start_position: i64,
+    pub(super) end_position: i64,
+    pub(super) requested_model_position: i64,
+    pub(super) observed_model_position: i64,
 }
 
 pub(super) async fn sessions(
@@ -411,6 +438,21 @@ pub(super) async fn recent_usage(
         .await
 }
 
+pub(super) async fn session_turns(
+    pool: &SqlitePool,
+    session_id: i64,
+    offset: i64,
+) -> Result<Vec<TurnRow>, sqlx::Error> {
+    sqlx::query_as::<_, TurnRow>(
+        "SELECT t.ordinal,t.turn_id,t.start_sequence,t.start_timestamp,t.start_kind,t.end_sequence,t.end_timestamp,t.outcome,t.resumed,t.requested_model,t.requested_model_sequence,t.observed_model,t.observed_model_sequence,CASE WHEN unixepoch(t.start_timestamp) IS NOT NULL AND unixepoch(t.end_timestamp)>=unixepoch(t.start_timestamp) THEN unixepoch(t.end_timestamp)-unixepoch(t.start_timestamp) END duration_seconds,(SELECT count(*) FROM tool_calls c WHERE c.session_id=t.session_id AND c.turn_ordinal=t.ordinal) tool_request_count,(SELECT count(*) FROM tool_results r WHERE r.session_id=t.session_id AND r.turn_ordinal=t.ordinal) tool_result_count,(SELECT count(*) FROM tool_results r WHERE r.session_id=t.session_id AND r.turn_ordinal=t.ordinal AND r.outcome='failed') failed_tool_count,(SELECT count(*) FROM tool_calls c WHERE c.session_id=t.session_id AND c.turn_ordinal=t.ordinal AND NOT EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id)) unknown_tool_count,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<COALESCE(t.start_sequence,t.end_sequence)) start_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.end_sequence) end_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.requested_model_sequence) requested_model_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.observed_model_sequence) observed_model_position FROM turns t WHERE t.session_id=? ORDER BY t.ordinal DESC LIMIT ? OFFSET ?",
+    )
+    .bind(session_id)
+    .bind((TURN_PAGE_SIZE + 1) as i64)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
 fn push_visible_model<'a>(query: &mut QueryBuilder<'a, Sqlite>) {
     let exclusion = crate::sources::model_exclusion();
     query
@@ -580,7 +622,10 @@ pub(super) async fn timeline_section(
     offset: i64,
 ) -> Result<Vec<TimelineRow>, sqlx::Error> {
     sqlx::query_as::<_, TimelineRow>(
-        "SELECT 'message' event_type,m.sequence,1 sequence_known,m.timestamp,m.role,substr(m.content,1,?) content,length(m.content) total_chars,NULL tool_name,NULL call_id,NULL outcome,0 event_order \
+        "SELECT 'turn_event' event_type,e.source_sequence sequence,1 sequence_known,e.timestamp,NULL role,CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END content,length(CASE e.kind WHEN 'requested_model' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') WHEN 'served_model_fallback' THEN 'Requested model: ' || COALESCE(e.requested_model,'Unavailable') || char(10) || 'Observed served model: ' || COALESCE(e.served_model,'Unavailable') ELSE '' END) total_chars,e.kind tool_name,substr(e.turn_id,1,160) call_id,CASE WHEN e.is_resumption THEN 'resumed' WHEN e.is_model_change THEN 'requested model changed' END outcome,-1 event_order \
+         FROM turn_events e WHERE e.session_id=? AND ? IN ('all','turns') \
+         UNION ALL \
+         SELECT 'message' event_type,m.sequence,1 sequence_known,m.timestamp,m.role,substr(m.content,1,?) content,length(m.content) total_chars,NULL tool_name,NULL call_id,NULL outcome,0 event_order \
          FROM messages m WHERE m.session_id=? AND ? IN ('all','messages') \
          UNION ALL \
          SELECT CASE WHEN c.kind='user_input' THEN 'question' ELSE 'tool_call' END,c.sequence,1,c.timestamp,NULL,substr(COALESCE(c.arguments,''),1,?),length(COALESCE(c.arguments,'')),substr(c.tool_name,1,160),substr(c.call_id,1,160), \
@@ -591,6 +636,8 @@ pub(super) async fn timeline_section(
          FROM tool_results r LEFT JOIN tool_calls c ON c.id=r.tool_call_id WHERE r.session_id=? AND (?='all' OR ?='tools' AND COALESCE(c.kind,'tool')!='user_input' OR ?='questions' AND c.kind='user_input') \
          ORDER BY sequence,event_order LIMIT ? OFFSET ?",
     )
+    .bind(session_id)
+    .bind(event_filter)
     .bind(MESSAGE_PREVIEW_CHARS)
     .bind(session_id)
     .bind(event_filter)
@@ -636,11 +683,13 @@ pub(super) async fn preceding_timeline_event_count(
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT count(*) FROM ( \
-         SELECT sequence,0 event_order FROM messages WHERE session_id=? \
+         SELECT source_sequence sequence,-1 event_order FROM turn_events WHERE session_id=? \
+         UNION ALL SELECT sequence,0 event_order FROM messages WHERE session_id=? \
          UNION ALL SELECT sequence,1 FROM tool_calls WHERE session_id=? \
          UNION ALL SELECT source_sequence,2 FROM tool_results WHERE session_id=? \
          ) WHERE sequence<? OR sequence=? AND event_order<?",
     )
+    .bind(session_id)
     .bind(session_id)
     .bind(session_id)
     .bind(session_id)

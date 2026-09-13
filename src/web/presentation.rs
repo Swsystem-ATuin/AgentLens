@@ -1,5 +1,6 @@
 use super::queries::{
-    FilterValues, RecentUsageRow, SessionFilters, TimelineRow, UsageGroupRow, UsageTotalsRow,
+    FilterValues, RecentUsageRow, SessionFilters, TimelineRow, TurnRow, UsageGroupRow,
+    UsageTotalsRow,
 };
 
 pub(super) struct TimelineContent {
@@ -81,6 +82,46 @@ pub(super) fn present_timeline(
                     .as_ref()
                     .is_none_or(|presentation| presentation.initially_open),
                 contents: vec![content],
+            });
+            continue;
+        }
+
+        if row.event_type == "turn_event" {
+            let kind = row.tool_name.as_deref().unwrap_or("unknown");
+            let title = match kind {
+                "started" => "Turn started",
+                "requested_model" if row.outcome.as_deref() == Some("requested model changed") => {
+                    "Requested model changed"
+                }
+                "requested_model" => "Requested model",
+                "completed" => "Turn completed",
+                "interrupted" => "Turn interrupted",
+                "user_activity" if row.outcome.as_deref() == Some("resumed") => "Turn resumed",
+                "user_activity" => "User turn activity",
+                "served_model_fallback" => "Observed served-model fallback",
+                _ => "Turn evidence",
+            };
+            let anchor = format!("event-{}-turns", row.sequence);
+            items.push(TimelineItem {
+                event_type: row.event_type,
+                anchor: anchor.clone(),
+                order_label: format!("#{}", row.sequence),
+                timestamp: row.timestamp,
+                role: "turn".into(),
+                title: title.into(),
+                state: row.outcome,
+                call_id: row.call_id,
+                initially_open: matches!(kind, "interrupted" | "served_model_fallback"),
+                contents: vec![TimelineContent {
+                    html: super::markdown::render_plain(if row.content.is_empty() {
+                        "Boundary evidence only."
+                    } else {
+                        &row.content
+                    }),
+                    anchor,
+                    is_primary: true,
+                    continuation_href: None,
+                }],
             });
             continue;
         }
@@ -238,6 +279,96 @@ pub(super) struct RecentUsageView {
     pub(super) reasoning_output_tokens: String,
     pub(super) total_tokens: String,
     pub(super) anomalous: bool,
+}
+
+pub(super) struct TurnView {
+    pub(super) ordinal: i64,
+    pub(super) turn_id: String,
+    pub(super) start_timestamp: String,
+    pub(super) end_timestamp: String,
+    pub(super) start_kind: String,
+    pub(super) outcome: String,
+    pub(super) resumed: bool,
+    pub(super) requested_model: String,
+    pub(super) observed_model: String,
+    pub(super) duration: String,
+    pub(super) tool_request_count: i64,
+    pub(super) tool_result_count: i64,
+    pub(super) failed_tool_count: i64,
+    pub(super) unknown_tool_count: i64,
+    pub(super) start_href: Option<String>,
+    pub(super) end_href: Option<String>,
+    pub(super) requested_model_href: Option<String>,
+    pub(super) observed_model_href: Option<String>,
+}
+
+pub(super) fn present_turns(rows: Vec<TurnRow>, stable_id: &str) -> Vec<TurnView> {
+    rows.into_iter()
+        .map(|row| TurnView {
+            ordinal: row.ordinal,
+            turn_id: row.turn_id.unwrap_or_else(|| "Unavailable".into()),
+            start_timestamp: row
+                .start_timestamp
+                .unwrap_or_else(|| "Opening evidence unavailable".into()),
+            end_timestamp: row
+                .end_timestamp
+                .unwrap_or_else(|| "Terminal evidence unavailable".into()),
+            start_kind: match row.start_kind.as_str() {
+                "started" => "task started",
+                "requested_model" => "turn context",
+                "user_activity" => "user activity",
+                _ => "unknown opening",
+            }
+            .into(),
+            outcome: row.outcome,
+            resumed: row.resumed,
+            requested_model: row.requested_model.unwrap_or_else(|| "Unavailable".into()),
+            observed_model: row.observed_model.unwrap_or_else(|| "Not observed".into()),
+            duration: row
+                .duration_seconds
+                .map(format_duration)
+                .unwrap_or_else(|| "Unavailable".into()),
+            tool_request_count: row.tool_request_count,
+            tool_result_count: row.tool_result_count,
+            failed_tool_count: row.failed_tool_count,
+            unknown_tool_count: row.unknown_tool_count,
+            start_href: row
+                .start_sequence
+                .map(|sequence| turn_event_href(stable_id, sequence, row.start_position)),
+            end_href: row
+                .end_sequence
+                .map(|sequence| turn_event_href(stable_id, sequence, row.end_position)),
+            requested_model_href: row
+                .requested_model_sequence
+                .map(|sequence| turn_event_href(stable_id, sequence, row.requested_model_position)),
+            observed_model_href: row
+                .observed_model_sequence
+                .map(|sequence| turn_event_href(stable_id, sequence, row.observed_model_position)),
+        })
+        .collect()
+}
+
+fn turn_event_href(stable_id: &str, sequence: i64, position: i64) -> String {
+    let section = position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    filtered_transcript_href(
+        stable_id,
+        section as u32,
+        "turns",
+        Some(&format!("event-{sequence}-turns")),
+    )
+}
+
+fn format_duration(seconds: i64) -> String {
+    let hours = seconds / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 pub(super) fn present_usage_totals(row: UsageTotalsRow) -> UsageTotalsView {

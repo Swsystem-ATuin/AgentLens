@@ -13,7 +13,7 @@ use std::{
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 5;
+pub(crate) const PARSER_VERSION: i64 = 6;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -376,10 +376,54 @@ fn normalize_record(value: Value) -> Option<NormalizedRecord> {
     let typ = value["type"].as_str().unwrap_or("");
     let payload = &value["payload"];
     if typ == "response_item" && payload["type"] == "message" {
+        let role = payload["role"].as_str().unwrap_or("unknown").to_owned();
         Some(NormalizedRecord::Message {
             timestamp: value["timestamp"].as_str().map(str::to_owned),
-            role: payload["role"].as_str().unwrap_or("unknown").to_owned(),
+            opens_turn: role == "user",
+            role,
             content: message_content(payload),
+            raw_json: value.to_string(),
+        })
+    } else if typ == "turn_context" {
+        Some(NormalizedRecord::TurnEvent {
+            timestamp: value["timestamp"].as_str().map(str::to_owned),
+            kind: "requested_model",
+            turn_id: string_field(payload, &["turn_id", "id"]),
+            requested_model: string_field(payload, &["model", "requested_model"]),
+            served_model: None,
+            raw_json: value.to_string(),
+        })
+    } else if typ == "event_msg"
+        && matches!(
+            payload["type"].as_str(),
+            Some(
+                "task_started"
+                    | "turn_started"
+                    | "task_complete"
+                    | "turn_complete"
+                    | "turn_aborted"
+                    | "user_message"
+                    | "model_reroute"
+            )
+        )
+    {
+        let event_type = payload["type"].as_str().unwrap_or_default();
+        Some(NormalizedRecord::TurnEvent {
+            timestamp: value["timestamp"].as_str().map(str::to_owned),
+            kind: match event_type {
+                "task_started" | "turn_started" => "started",
+                "task_complete" | "turn_complete" => "completed",
+                "turn_aborted" => "interrupted",
+                "user_message" => "user_activity",
+                _ => "served_model_fallback",
+            },
+            turn_id: string_field(payload, &["turn_id", "id"]),
+            requested_model: (event_type == "model_reroute")
+                .then(|| string_field(payload, &["from_model", "requested_model"]))
+                .flatten(),
+            served_model: (event_type == "model_reroute")
+                .then(|| string_field(payload, &["to_model", "model", "served_model"]))
+                .flatten(),
             raw_json: value.to_string(),
         })
     } else if typ == "response_item"
@@ -448,6 +492,12 @@ fn token_usage(value: &Value) -> Option<TokenUsage> {
     })
 }
 
+fn string_field(value: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value[*name].as_str().map(str::to_owned))
+}
+
 fn json_text(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) => Some(value.clone()),
@@ -488,11 +538,10 @@ fn next_session_status(status: &'static str, value: &Value) -> &'static str {
     let record_type = value["type"].as_str();
     let payload = &value["payload"];
     match (record_type, payload["type"].as_str()) {
-        (Some("event_msg"), Some("task_complete")) => "complete",
+        (Some("event_msg"), Some("task_complete" | "turn_complete")) => "complete",
         (Some("event_msg"), Some("turn_aborted")) => "aborted",
-        (Some("event_msg"), Some("task_started" | "user_message")) | (Some("turn_context"), _) => {
-            "unknown"
-        }
+        (Some("event_msg"), Some("task_started" | "turn_started" | "user_message"))
+        | (Some("turn_context"), _) => "unknown",
         (Some("response_item"), Some("message")) if payload["role"].as_str() == Some("user") => {
             "unknown"
         }

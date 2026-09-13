@@ -320,7 +320,14 @@ async fn ingest_rollout(
     let session_id: i64 = sqlx::query_scalar("INSERT INTO sessions(instance_id,source_file_id,external_id,stable_id,started_at,ended_at,cwd,model,status,title,derived_title,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,stable_id=excluded.stable_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,title=excluded.title,derived_title=excluded.derived_title,raw_metadata=excluded.raw_metadata RETURNING id")
         .bind(instance).bind(source_id).bind(&summary.external_id).bind(stable_id).bind(summary.started_at.as_deref()).bind(summary.ended_at.as_deref()).bind(summary.cwd.as_deref()).bind(summary.model.as_deref()).bind(summary.status).bind(fallback_title).bind(summary.derived_title.as_deref()).bind(&summary.raw_metadata).fetch_one(&mut *connection).await?;
     if existing.is_some() {
-        for table in ["messages", "tool_calls", "usage_events", "session_usage"] {
+        for table in [
+            "messages",
+            "tool_calls",
+            "usage_events",
+            "session_usage",
+            "turn_events",
+            "turns",
+        ] {
             sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
                 .bind(session_id)
                 .execute(&mut *connection)
@@ -389,14 +396,43 @@ async fn import_rollout_records(
     let mut messages = 0usize;
     let mut tools = 0usize;
     let mut usage_accounting = crate::usage::UsageAccounting::default();
+    let mut turn_tracker = crate::turns::TurnTracker::default();
     while let Some((sequence, record)) = records.next_record()? {
         match record {
             NormalizedRecord::Message {
                 timestamp,
                 role,
                 content,
+                opens_turn,
                 raw_json,
             } => {
+                if opens_turn {
+                    let update = turn_tracker.observe(
+                        sequence,
+                        timestamp.as_deref(),
+                        crate::turns::TurnSignal {
+                            kind: "user_activity",
+                            turn_id: None,
+                            requested_model: None,
+                            served_model: None,
+                        },
+                    );
+                    if update.opened {
+                        record_turn_signal(
+                            connection,
+                            session_id,
+                            sequence,
+                            timestamp.as_deref(),
+                            "user_activity",
+                            None,
+                            None,
+                            None,
+                            &raw_json,
+                            update,
+                        )
+                        .await?;
+                    }
+                }
                 sqlx::query("INSERT INTO messages(session_id,sequence,timestamp,role,content,raw_json) VALUES(?,?,?,?,?,?)")
                         .bind(session_id).bind(sequence).bind(timestamp).bind(role).bind(content).bind(raw_json).execute(&mut *connection).await?;
                 messages += 1;
@@ -409,8 +445,8 @@ async fn import_rollout_records(
                 kind,
                 raw_json,
             } => {
-                sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json,kind) VALUES(?,?,?,?,?,?,'called',?,?)")
-                        .bind(session_id).bind(sequence).bind(timestamp).bind(call_id).bind(tool_name).bind(arguments).bind(raw_json).bind(kind).execute(&mut *connection).await?;
+                sqlx::query("INSERT INTO tool_calls(session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json,kind,turn_ordinal) VALUES(?,?,?,?,?,?,'called',?,?,?)")
+                        .bind(session_id).bind(sequence).bind(timestamp).bind(call_id).bind(tool_name).bind(arguments).bind(raw_json).bind(kind).bind(turn_tracker.active_ordinal()).execute(&mut *connection).await?;
                 tools += 1;
             }
             NormalizedRecord::ToolOutput {
@@ -420,7 +456,7 @@ async fn import_rollout_records(
                 outcome,
                 raw_json,
             } => {
-                sqlx::query("INSERT INTO tool_results(session_id,source_sequence,timestamp,call_id,tool_call_id,output,outcome,raw_json) VALUES(?,?,?,?,(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1),?,?,?)")
+                sqlx::query("INSERT INTO tool_results(session_id,source_sequence,timestamp,call_id,tool_call_id,output,outcome,raw_json,turn_ordinal) VALUES(?,?,?,?,(SELECT id FROM tool_calls WHERE session_id=? AND call_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1),?,?,?,COALESCE((SELECT turn_ordinal FROM tool_calls WHERE session_id=? AND call_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1),?))")
                     .bind(session_id)
                     .bind(sequence)
                     .bind(timestamp)
@@ -431,6 +467,10 @@ async fn import_rollout_records(
                     .bind(output)
                     .bind(outcome)
                     .bind(raw_json)
+                    .bind(session_id)
+                    .bind(call_id.as_deref().filter(|call_id| !call_id.is_empty()))
+                    .bind(sequence)
+                    .bind(turn_tracker.active_ordinal())
                     .execute(&mut *connection)
                     .await?;
             }
@@ -480,7 +520,42 @@ async fn import_rollout_records(
                 .execute(&mut *connection)
                 .await?;
             }
+            NormalizedRecord::TurnEvent {
+                timestamp,
+                kind,
+                turn_id,
+                requested_model,
+                served_model,
+                raw_json,
+            } => {
+                let update = turn_tracker.observe(
+                    sequence,
+                    timestamp.as_deref(),
+                    crate::turns::TurnSignal {
+                        kind,
+                        turn_id: turn_id.as_deref(),
+                        requested_model: requested_model.as_deref(),
+                        served_model: served_model.as_deref(),
+                    },
+                );
+                record_turn_signal(
+                    connection,
+                    session_id,
+                    sequence,
+                    timestamp.as_deref(),
+                    kind,
+                    turn_id.as_deref(),
+                    requested_model.as_deref(),
+                    served_model.as_deref(),
+                    &raw_json,
+                    update,
+                )
+                .await?;
+            }
         }
+    }
+    if let Some(turn) = turn_tracker.finish() {
+        insert_turn(connection, session_id, turn).await?;
     }
     if usage_accounting.snapshot_count != 0 {
         let summary = usage_accounting.summary();
@@ -503,6 +578,64 @@ async fn import_rollout_records(
         .await?;
     }
     Ok((messages, tools, records.malformed_lines()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_turn_signal(
+    connection: &mut SqliteConnection,
+    session_id: i64,
+    sequence: i64,
+    timestamp: Option<&str>,
+    kind: &str,
+    turn_id: Option<&str>,
+    requested_model: Option<&str>,
+    served_model: Option<&str>,
+    raw_json: &str,
+    update: crate::turns::TurnUpdate,
+) -> Result<()> {
+    if let Some(turn) = update.finalized {
+        insert_turn(connection, session_id, turn).await?;
+    }
+    sqlx::query("INSERT INTO turn_events(session_id,turn_ordinal,source_sequence,timestamp,kind,turn_id,requested_model,served_model,is_resumption,is_model_change,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(session_id)
+        .bind(update.ordinal)
+        .bind(sequence)
+        .bind(timestamp)
+        .bind(kind)
+        .bind(turn_id)
+        .bind(requested_model)
+        .bind(served_model)
+        .bind(update.is_resumption)
+        .bind(update.is_model_change)
+        .bind(raw_json)
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn insert_turn(
+    connection: &mut SqliteConnection,
+    session_id: i64,
+    turn: crate::turns::FinalizedTurn,
+) -> Result<()> {
+    sqlx::query("INSERT INTO turns(session_id,ordinal,turn_id,start_sequence,start_timestamp,start_kind,end_sequence,end_timestamp,outcome,resumed,requested_model,requested_model_sequence,observed_model,observed_model_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(session_id)
+        .bind(turn.ordinal)
+        .bind(turn.turn_id)
+        .bind(turn.start_sequence)
+        .bind(turn.start_timestamp)
+        .bind(turn.start_kind)
+        .bind(turn.end_sequence)
+        .bind(turn.end_timestamp)
+        .bind(turn.outcome)
+        .bind(turn.resumed)
+        .bind(turn.requested_model)
+        .bind(turn.requested_model_sequence)
+        .bind(turn.observed_model)
+        .bind(turn.observed_model_sequence)
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 async fn record_file_error(

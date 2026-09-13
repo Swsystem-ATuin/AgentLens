@@ -27,7 +27,7 @@ Rendered regressions cover a 60-event tool-only timeline with 5,000-character bo
 
 ## Index upgrade and refresh
 
-The schema upgrade is automatic. Existing paired call outputs are exposed as order-unknown result rows without duplication on subsequent opens. The current Codex parser version is 5, so the first `refresh` from an older index reimports each rollout once to recover exact result sequence, raw result provenance, and correct token accounting. A full rebuild is optional and remains the repair path. Raw source files are never changed.
+The schema upgrade is automatic. Existing paired call outputs are exposed as order-unknown result rows without duplication on subsequent opens. Nullable turn associations are not guessed for legacy rows. The current Codex parser version is 6, so the first `refresh` from an older index reimports each rollout once to recover exact result sequence, raw result provenance, correct token accounting, and source-ordered turn associations. A full rebuild is optional and remains the repair path. Raw source files are never changed.
 
 ## Rebuild performance review
 

@@ -10,9 +10,12 @@ Rollout files are JSON Lines. Each record has `timestamp`, `type`, and `payload`
 - `response_item/function_call` and `custom_tool_call`, paired with corresponding output records by `call_id`. Arguments/inputs and outputs may be strings or structured JSON. Calls to `request_user_input` represent explicit questions and paired outputs represent answers.
 - `response_item/reasoning`: reasoning summary/content; deliberately not displayed as transcript messages.
 - `event_msg/token_count`: cumulative `total_token_usage` and latest-turn `last_token_usage` plus rate limits. Either usage object or the enclosing `info` may be missing/null. Cached input is a reported subset of input; reasoning output is a reported subset of output.
-- lifecycle/user-facing events such as `task_started`, `task_complete`, `turn_aborted`, `user_message`, and `agent_message`.
+- lifecycle/user-facing events such as `task_started`/`turn_started`, `task_complete`/`turn_complete`, `turn_aborted`, `user_message`, and `agent_message`.
+- optional structured `model_reroute` evidence with source and destination models. Some source versions do not persist this transient event, so its absence does not prove that no fallback occurred.
 
 Session lifecycle status is reduced in source-record order, not timestamp order. `task_complete` records completion and `turn_aborted` records interruption. A later `task_started`, `turn_context`, `event_msg/user_message`, or user-role `response_item/message` is evidence that work resumed and resets the coarse status to `unknown` until another terminal event appears. Other records, including trailing token counts, do not change the last outcome. See [session status semantics](session-status.md).
+
+Turn history uses the same source ordering and accepts the `turn_started`/`turn_complete` aliases. It retains terminal-only and end-of-file unclosed turns, uses structured turn IDs to separate adjacent work, records `turn_context.model` as requested-model evidence, and keeps a persisted reroute's served model distinct. Timestamp order never changes boundaries or outcomes. See [ordered turn and model history](turn-history.md).
 
 `history.jsonl` records contain `session_id`, Unix timestamp `ts`, and `text`. Optional `session_index.jsonl` records contain `id`, `thread_name`, and `updated_at`. AgentLens streams this file as advisory title metadata: valid `id`/`thread_name` string pairs can name sessions already discovered from rollouts, while unknown fields and malformed or partial records are ignored. It never creates a session from the advisory index. `history.jsonl` is not currently indexed because rollout files already contain canonical transcript data.
 

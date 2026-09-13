@@ -19,12 +19,12 @@ mod regression;
 
 use presentation::{
     FilterOptions, Pagination, TimelineItem, filtered_transcript_href, message_href,
-    present_recent_usage, present_timeline, present_usage_groups, present_usage_totals,
-    select_options, sessions_href, usage_href,
+    present_recent_usage, present_timeline, present_turns, present_usage_groups,
+    present_usage_totals, select_options, sessions_href, usage_href,
 };
 use queries::{
     MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
-    TRANSCRIPT_SECTION_SIZE, ToolChunk, USAGE_PAGE_SIZE, UsageFilters,
+    TRANSCRIPT_SECTION_SIZE, TURN_PAGE_SIZE, ToolChunk, USAGE_PAGE_SIZE, UsageFilters,
 };
 #[cfg(test)]
 use queries::{MessageRow, TimelineRow};
@@ -134,6 +134,14 @@ struct SessionTemplate {
     pagination: Pagination,
 }
 
+#[derive(Template)]
+#[template(path = "turns.html")]
+struct TurnsTemplate {
+    session: SessionRow,
+    turns: Vec<presentation::TurnView>,
+    pagination: Pagination,
+}
+
 #[derive(Deserialize, Default)]
 struct TranscriptQuery {
     section: Option<u32>,
@@ -143,6 +151,11 @@ struct TranscriptQuery {
 #[derive(Deserialize, Default)]
 struct MessageQuery {
     part: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+struct TurnHistoryQuery {
+    page: Option<u32>,
 }
 
 #[derive(Template)]
@@ -183,6 +196,7 @@ fn router_with_projects(
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
         .route("/sessions/{id}", get(session))
+        .route("/sessions/{id}/turns", get(turn_history))
         .route("/sessions/{id}/messages/{sequence}", get(message))
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
         .route("/sessions/{id}/results/{sequence}", get(tool_result))
@@ -565,7 +579,10 @@ async fn session(
 ) -> Result<Html<String>, WebError> {
     let section = bounded_page(query.section, "validate transcript section")?;
     let event_filter = query.event.as_deref().unwrap_or("all");
-    if !matches!(event_filter, "all" | "messages" | "tools" | "questions") {
+    if !matches!(
+        event_filter,
+        "all" | "messages" | "tools" | "questions" | "turns"
+    ) {
         return Err(WebError::invalid_filters());
     }
     let show_origin = queries::show_origins(&state.pool)
@@ -596,7 +613,7 @@ async fn session(
         section > 1 && matches!(event_filter, "all" | "messages"),
     );
     let event_options = select_options(
-        ["all", "messages", "tools", "questions"]
+        ["all", "messages", "tools", "questions", "turns"]
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -612,6 +629,39 @@ async fn session(
         }
         .render()
         .map_err(|error| WebError::template("render transcript", error))?,
+    ))
+}
+
+async fn turn_history(
+    State(state): State<AppState>,
+    Path(stable_id): Path<String>,
+    Query(query): Query<TurnHistoryQuery>,
+) -> Result<Html<String>, WebError> {
+    let page = bounded_page(query.page, "validate turn page")?;
+    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let mut rows = queries::session_turns(
+        &state.pool,
+        session.id,
+        i64::from(page - 1) * TURN_PAGE_SIZE as i64,
+    )
+    .await
+    .map_err(|error| WebError::database("load turn history", error))?;
+    let has_next = rows.len() > TURN_PAGE_SIZE;
+    rows.truncate(TURN_PAGE_SIZE);
+    Ok(Html(
+        TurnsTemplate {
+            turns: present_turns(rows, &stable_id),
+            session,
+            pagination: Pagination {
+                page,
+                previous_href: (page > 1)
+                    .then(|| format!("/sessions/{stable_id}/turns?page={}", page - 1)),
+                next_href: (has_next && page < MAX_SESSION_PAGE)
+                    .then(|| format!("/sessions/{stable_id}/turns?page={}", page + 1)),
+            },
+        }
+        .render()
+        .map_err(|error| WebError::template("render turn history", error))?,
     ))
 }
 
@@ -910,6 +960,7 @@ mod tests {
             "/sessions",
             "/usage",
             "/sessions/1",
+            "/sessions/1/turns",
             "/sessions/1/messages/0",
             "/sessions/invalid",
             "/missing",
@@ -949,6 +1000,7 @@ mod tests {
             ("/sessions", StatusCode::OK),
             ("/usage", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
+            ("/sessions/1/turns", StatusCode::NOT_FOUND),
             ("/missing", StatusCode::NOT_FOUND),
         ] {
             let response = app

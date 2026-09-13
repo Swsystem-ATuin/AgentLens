@@ -6,14 +6,14 @@ The first pass hashes the exact source bytes and derives only session-level meta
 
 Memory now grows with the largest individual JSONL record and retained session-metadata record, rather than the total number of records in a rollout. Message content and raw JSON serialization are also bounded to the current record. Malformed-line totals remain exact, while at most 20 sanitised line examples are stored; additional lines are represented by an omitted-count suffix. Individual record size is not capped, so a single exceptionally large JSON record can still require substantial memory.
 
-Tool calls and ordered results are inserted as they are read. Results pair to the latest preceding matching call through SQLite rather than an in-memory map. The supporting `(session_id, call_id, sequence)` index is created automatically whenever the database opens. Duplicate call IDs retain deterministic latest-preceding-call behavior, and unmatched outputs remain visible as orphan results. Usage accounting similarly retains only five counter states plus the current record; see [token accounting semantics](token-accounting.md).
+Tool calls and ordered results are inserted as they are read. Results pair to the latest preceding matching call through SQLite rather than an in-memory map. The supporting `(session_id, call_id, sequence)` index is created automatically whenever the database opens. Duplicate call IDs retain deterministic latest-preceding-call behavior, and unmatched outputs remain visible as orphan results. Turn reconstruction retains only the active pending turn and the last boundary state while writing evidence events in source order; completed summaries are inserted immediately. Usage accounting similarly retains only five counter states plus the current record; see [ordered turn history](turn-history.md) and [token accounting semantics](token-accounting.md).
 
 ## File I/O and query behavior
 
 - Full rebuilds and new or unverified refresh sources read each imported rollout twice: once for summary/hash validation and once for normalized writes.
 - A verified changed source is read three times: checkpoint verification, summary/hash validation, and normalized writes.
 - An unchanged verified source is read once for checksum verification and is not parsed.
-- Transaction and savepoint boundaries, normalized insert counts, and cleanup queries are unchanged.
+- Transaction and savepoint boundaries and cleanup queries are unchanged. Turn-aware imports add one evidence insert per normalized boundary/model event, one summary insert per reconstructed turn, and nullable turn ordinals on calls/results.
 - Output pairing executes one indexed result insert and compatibility update per output. Usage events execute one ordered insert with bounded delta reduction plus one summary insert per session. Their lookups and uniqueness checks use supporting sequence/call indexes instead of file-sized in-memory maps.
 
 The extra sequential read is the deliberate tradeoff for removing file-sized decoded-record retention. Raw sources remain immutable.

@@ -278,6 +278,48 @@ async fn usage_dashboard_app() -> (tempfile::TempDir, SqlitePool, Router) {
     (dir, pool, app)
 }
 
+async fn turn_history_app() -> (tempfile::TempDir, SqlitePool, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'codex','Codex');
+        INSERT INTO hosts VALUES(1,'host');
+        INSERT INTO users VALUES(1,1,'user');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,model) VALUES
+          (1,1,'turns','turn-history','Synthetic turn history','initial-model');
+        INSERT INTO turns(session_id,ordinal,turn_id,start_sequence,start_timestamp,start_kind,end_sequence,end_timestamp,outcome,resumed,requested_model,requested_model_sequence,observed_model,observed_model_sequence) VALUES
+          (1,1,'turn-one',1,'2026-01-01T00:00:00Z','requested_model',6,'2026-01-01T00:01:02Z','complete',0,'requested-a2',2,'served-b',3),
+          (1,2,'turn-two',7,'2026-01-03T00:00:00Z','requested_model',9,'2026-01-02T00:00:00Z','interrupted',1,'requested-c',7,NULL,NULL),
+          (1,3,NULL,10,'2026-01-04T00:00:00Z','user_activity',NULL,NULL,'unclosed',1,NULL,NULL,NULL,NULL),
+          (1,4,NULL,NULL,NULL,'unknown',12,'2026-01-05T00:00:00Z','complete',0,NULL,NULL,NULL,NULL);
+        INSERT INTO turn_events(session_id,turn_ordinal,source_sequence,timestamp,kind,turn_id,requested_model,served_model,is_resumption,is_model_change,raw_json) VALUES
+          (1,1,1,'2026-01-01T00:00:00Z','requested_model','turn-one','requested-a',NULL,0,0,'{}'),
+          (1,1,2,'2026-01-01T00:00:01Z','requested_model','turn-one','requested-a2',NULL,0,1,'{}'),
+          (1,1,3,'2026-01-01T00:00:02Z','served_model_fallback','turn-one','requested-a2','served-b',0,0,'{}'),
+          (1,1,6,'2026-01-01T00:01:02Z','completed','turn-one',NULL,NULL,0,0,'{}'),
+          (1,2,7,'2026-01-03T00:00:00Z','requested_model','turn-two','requested-c',NULL,1,0,'{}'),
+          (1,2,9,'2026-01-02T00:00:00Z','interrupted','turn-two',NULL,NULL,0,0,'{}'),
+          (1,3,10,'2026-01-04T00:00:00Z','user_activity',NULL,NULL,NULL,1,0,'{}'),
+          (1,4,12,'2026-01-05T00:00:00Z','completed',NULL,NULL,NULL,0,0,'{}');
+        INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,status,turn_ordinal) VALUES
+          (1,1,3,'ok','one','called',1),(2,1,4,'failed','two','called',1),(3,1,8,'unknown','three','called',2);
+        INSERT INTO tool_results(session_id,source_sequence,call_id,tool_call_id,outcome,turn_ordinal) VALUES
+          (1,4,'ok',1,'observed',1),(1,5,'failed',2,'failed',1);
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool.clone(), crate::auth::Credentials::load(&auth).unwrap());
+    (dir, pool, app)
+}
+
 async fn paginated_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -673,6 +715,86 @@ async fn usage_dashboard_bounds_rows_and_preserves_range_navigation() {
         "rel=\"next\" href=\"/usage?period=day&#38;group=session&#38;from=2026-02-10&#38;to=2026-02-10&#38;page=2\""
     ));
     let (_, second) = get(&app, &format!("/usage?{query}&page=2")).await;
+    assert!(second.contains("rel=\"prev\""));
+    assert!(!second.contains("rel=\"next\""));
+}
+
+#[tokio::test]
+async fn turn_history_renders_models_durations_tool_outcomes_and_evidence_links() {
+    let (_dir, _pool, app) = turn_history_app().await;
+    let (status, html) = get(&app, "/sessions/turn-history/turns").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Turn and model history"));
+    assert!(html.contains("Turn 1 · complete"));
+    assert!(html.contains("Duration 1m 2s"));
+    assert!(html.contains("Requested: <a href="));
+    assert!(html.contains(">requested-a2</a>"));
+    assert!(html.contains("Observed served fallback: <a href="));
+    assert!(html.contains(">served-b</a>"));
+    assert!(
+        html.contains("Tools: 2 requested · 2 results observed · 1 failed · 0 outcome unknown")
+    );
+    assert!(
+        html.contains("Tools: 1 requested · 0 results observed · 0 failed · 1 outcome unknown")
+    );
+    assert!(html.contains("Turn 2 · interrupted <span class=\"timeline-state\">resumed</span>"));
+    assert!(html.matches("Duration Unavailable").count() >= 3);
+    assert!(html.contains("Turn 3 · unclosed"));
+    assert!(html.contains("Terminal evidence unavailable"));
+    assert!(html.contains("Opening evidence unavailable"));
+    assert_eq!(html.matches(">Opening evidence</a>").count(), 3);
+    assert_eq!(html.matches(">Terminal evidence</a>").count(), 3);
+    assert!(html.contains("event-2-turns"));
+    assert!(html.contains("event-9-turns"));
+
+    let (status, timeline) = get(&app, "/sessions/turn-history?event=turns").await;
+    assert_eq!(status, StatusCode::OK);
+    for evidence in [
+        "Requested model",
+        "Requested model changed",
+        "Observed served-model fallback",
+        "Turn completed",
+        "Turn interrupted",
+        "Turn resumed",
+    ] {
+        assert!(timeline.contains(evidence), "{evidence}: {timeline}");
+    }
+    assert!(timeline.find("Requested model").unwrap() < timeline.find("Turn completed").unwrap());
+    assert!(timeline.contains("Requested model: requested-a"));
+    assert!(timeline.contains("Observed served model: served-b"));
+    assert!(timeline.contains("Turn turn-one"));
+    assert!(!timeline.contains("Tool request:"));
+    assert!(!timeline.contains("Synthetic turn history</strong>"));
+
+    assert_eq!(
+        get(&app, "/sessions/turn-history/turns?page=0").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get(&app, "/sessions/missing/turns").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn turn_history_is_bounded_and_paginated() {
+    let (_dir, pool, app) = turn_history_app().await;
+    let mut transaction = pool.begin().await.unwrap();
+    for ordinal in 5..=55_i64 {
+        sqlx::query("INSERT INTO turns(session_id,ordinal,start_kind,outcome) VALUES(1,?,'unknown','unclosed')")
+            .bind(ordinal)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let (status, first) = get(&app, "/sessions/turn-history/turns").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("<article class=\"message turn\"").count(), 50);
+    assert!(first.len() < 192 * 1024);
+    assert!(first.contains("rel=\"next\" href=\"/sessions/turn-history/turns?page=2\""));
+    let (_, second) = get(&app, "/sessions/turn-history/turns?page=2").await;
+    assert_eq!(second.matches("<article class=\"message turn\"").count(), 5);
     assert!(second.contains("rel=\"prev\""));
     assert!(!second.contains("rel=\"next\""));
 }
