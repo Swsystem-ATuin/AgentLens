@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Visible session pages now offer authenticated, deterministic Markdown and JSON postmortems containing aggregate turn, usage, model, tool, pressure, and evidence-gap facts. A fixed redaction profile excludes transcript and tool bodies, sensitive paths, credentials, native identifiers, and user annotations; adversarial synthetic regressions enforce the boundary.
+
 - An authenticated diagnostics page now retains and displays timestamped context-window and rate-limit snapshots, including rate-only events with missing token information, source scope, recent/stale/expired/unavailable states, and exact evidence links. Deterministic summaries explain interruptions, incomplete turns, accounting anomalies, and explicitly failed tools without inferring live allowances, task failure, or quality.
 
 - Session pages now link to a paginated ordered turn history with completion, interruption, resumption, unclosed/terminal-only preservation, evidence-based duration, requested-model changes, separately observed served-model fallbacks, associated tool outcomes, and links to supporting timeline events. Existing indexes upgrade safely; parser version 6 populates history on refresh.

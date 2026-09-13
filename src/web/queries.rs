@@ -248,6 +248,41 @@ pub(super) struct DiagnosticEvidenceRow {
     pub(super) position: i64,
 }
 
+#[derive(FromRow)]
+pub(crate) struct PostmortemRow {
+    pub(crate) stable_id: String,
+    pub(crate) agent_kind: String,
+    pub(crate) session_status: String,
+    pub(crate) source_status: String,
+    pub(crate) turn_count: i64,
+    pub(crate) completed_turn_count: i64,
+    pub(crate) interrupted_turn_count: i64,
+    pub(crate) unclosed_turn_count: i64,
+    pub(crate) terminal_only_turn_count: i64,
+    pub(crate) resumed_turn_count: i64,
+    pub(crate) requested_model_observation_count: i64,
+    pub(crate) requested_model_change_count: i64,
+    pub(crate) served_model_fallback_count: i64,
+    pub(crate) input_tokens: Option<i64>,
+    pub(crate) output_tokens: Option<i64>,
+    pub(crate) cached_input_tokens: Option<i64>,
+    pub(crate) reasoning_output_tokens: Option<i64>,
+    pub(crate) total_tokens: Option<i64>,
+    pub(crate) usage_observation_count: i64,
+    pub(crate) usage_reset_count: i64,
+    pub(crate) usage_missing_count: i64,
+    pub(crate) usage_inconsistent_count: i64,
+    pub(crate) tool_request_count: i64,
+    pub(crate) tool_result_count: i64,
+    pub(crate) observed_tool_failure_count: i64,
+    pub(crate) unknown_tool_outcome_count: i64,
+    pub(crate) context_observation_count: i64,
+    pub(crate) context_gap_count: i64,
+    pub(crate) rate_observation_count: i64,
+    pub(crate) rate_gap_count: i64,
+    pub(crate) timestamp_gap_count: i64,
+}
+
 pub(super) async fn sessions(
     pool: &SqlitePool,
     filters: &SessionFilters<'_>,
@@ -499,6 +534,40 @@ pub(super) async fn session_turns(
     .bind((TURN_PAGE_SIZE + 1) as i64)
     .bind(offset)
     .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn postmortem(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<PostmortemRow, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.stable_id,a.kind agent_kind,COALESCE(s.status,'unknown') session_status,COALESCE(sf.parse_status,'unknown') source_status, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id) turn_count, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.outcome='complete') completed_turn_count, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.outcome='interrupted') interrupted_turn_count, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.outcome='unclosed') unclosed_turn_count, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.start_sequence IS NULL) terminal_only_turn_count, \
+         (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.resumed) resumed_turn_count, \
+         (SELECT count(*) FROM turn_events e WHERE e.session_id=s.id AND e.kind='requested_model') requested_model_observation_count, \
+         (SELECT count(*) FROM turn_events e WHERE e.session_id=s.id AND e.is_model_change) requested_model_change_count, \
+         (SELECT count(*) FROM turn_events e WHERE e.session_id=s.id AND e.kind='served_model_fallback') served_model_fallback_count, \
+         su.input_tokens,su.output_tokens,su.cached_input_tokens,su.reasoning_output_tokens,su.total_tokens, \
+         (SELECT count(*) FROM usage_events u WHERE u.session_id=s.id) usage_observation_count, \
+         COALESCE(su.reset_count,0) usage_reset_count,COALESCE(su.missing_count,0) usage_missing_count,COALESCE(su.inconsistent_count,0) usage_inconsistent_count, \
+         (SELECT count(*) FROM tool_calls c WHERE c.session_id=s.id) tool_request_count, \
+         (SELECT count(*) FROM tool_results r WHERE r.session_id=s.id) tool_result_count, \
+         (SELECT count(*) FROM tool_results r WHERE r.session_id=s.id AND r.outcome='failed') observed_tool_failure_count, \
+         (SELECT count(*) FROM tool_calls c WHERE c.session_id=s.id AND NOT EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id)) unknown_tool_outcome_count, \
+         (SELECT count(*) FROM usage_events u WHERE u.session_id=s.id AND u.context_window IS NOT NULL AND u.context_tokens IS NOT NULL) context_observation_count, \
+         (SELECT count(*) FROM usage_events u WHERE u.session_id=s.id AND (u.context_window IS NULL OR u.context_tokens IS NULL)) context_gap_count, \
+         (SELECT count(*) FROM usage_events u WHERE u.session_id=s.id AND (u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL)) rate_observation_count, \
+         (SELECT count(*) FROM usage_events u WHERE u.session_id=s.id AND u.primary_used_percent IS NULL AND u.secondary_used_percent IS NULL) rate_gap_count, \
+         ((SELECT count(*) FROM turn_events e WHERE e.session_id=s.id AND datetime(e.timestamp) IS NULL)+(SELECT count(*) FROM usage_events u WHERE u.session_id=s.id AND datetime(u.timestamp) IS NULL)+(SELECT count(*) FROM tool_calls c WHERE c.session_id=s.id AND datetime(c.timestamp) IS NULL)+(SELECT count(*) FROM tool_results r WHERE r.session_id=s.id AND datetime(r.timestamp) IS NULL)) timestamp_gap_count \
+         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id LEFT JOIN source_files sf ON sf.id=s.source_file_id LEFT JOIN session_usage su ON su.session_id=s.id WHERE s.id=?",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
     .await
 }
 

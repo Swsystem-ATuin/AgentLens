@@ -3,6 +3,7 @@ mod db;
 mod fingerprint;
 mod identity;
 mod ingest;
+mod postmortem;
 mod projects;
 mod search;
 mod sources;

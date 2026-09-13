@@ -364,6 +364,49 @@ async fn diagnostics_app() -> (tempfile::TempDir, SqlitePool, Router) {
     (dir, pool, app)
 }
 
+async fn postmortem_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'PRIVATE_AGENT_KIND','PRIVATE_AGENT_NAME');
+        INSERT INTO hosts VALUES(1,'PRIVATE_HOST');
+        INSERT INTO users VALUES(1,1,'PRIVATE_USER');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'/PRIVATE_HOME');
+        INSERT INTO ingest_runs(id,status) VALUES(1,'complete');
+        INSERT INTO source_files(id,instance_id,ingest_run_id,path,kind,size_bytes,parse_status,parse_error) VALUES(1,1,1,'/PRIVATE_PATH','sessions',1,'partial','PRIVATE_PARSE_DETAIL');
+        INSERT INTO sessions(id,instance_id,source_file_id,external_id,stable_id,title,cwd,model,status,raw_metadata) VALUES(1,1,1,'PRIVATE_NATIVE','postmortem','PRIVATE_TITLE','/PRIVATE_PROJECT','PRIVATE_MODEL','unknown','PRIVATE_CREDENTIAL');
+        INSERT INTO messages(session_id,sequence,role,content,raw_json) VALUES(1,1,'user','PRIVATE_PROMPT and PRIVATE_CODE','PRIVATE_MESSAGE_RAW');
+        INSERT INTO turns(session_id,ordinal,start_sequence,start_kind,end_sequence,outcome,resumed,requested_model,observed_model) VALUES
+          (1,1,1,'started',2,'complete',0,'PRIVATE_MODEL_A',NULL),
+          (1,2,NULL,'unknown',3,'interrupted',1,'PRIVATE_MODEL_B','PRIVATE_SERVED_MODEL'),
+          (1,3,4,'user_activity',NULL,'unclosed',0,NULL,NULL);
+        INSERT INTO turn_events(session_id,turn_ordinal,source_sequence,kind,requested_model,served_model,is_model_change,raw_json) VALUES
+          (1,1,1,'requested_model','PRIVATE_MODEL_A',NULL,0,'PRIVATE_TURN_RAW'),
+          (1,2,2,'requested_model','PRIVATE_MODEL_B',NULL,1,'PRIVATE_TURN_RAW'),
+          (1,2,3,'served_model_fallback','PRIVATE_MODEL_B','PRIVATE_SERVED_MODEL',0,'PRIVATE_TURN_RAW');
+        INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,context_window,context_tokens,rate_limit_id,primary_used_percent,has_reset,has_missing,has_inconsistent,raw_json) VALUES
+          (1,5,1,'2026-01-01T00:00:00Z',100,20,40,5,120,1000,500,'PRIVATE_SCOPE',75.0,1,1,1,'PRIVATE_USAGE_RAW'),
+          (1,6,1,NULL,10,2,4,1,12,NULL,NULL,NULL,NULL,0,0,0,'PRIVATE_USAGE_RAW');
+        INSERT INTO session_usage(session_id,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens,snapshot_count,per_turn_observation_count,reset_count,duplicate_count,missing_count,inconsistent_count) VALUES(1,110,22,44,6,132,2,1,1,0,1,1);
+        INSERT INTO tool_calls(id,session_id,sequence,timestamp,call_id,tool_name,arguments,status,raw_json,kind) VALUES
+          (1,1,7,NULL,'PRIVATE_CALL','PRIVATE_TOOL','PRIVATE_ARGUMENT','failed','PRIVATE_TOOL_RAW','tool'),
+          (2,1,9,NULL,'PRIVATE_UNKNOWN_CALL','PRIVATE_TOOL','PRIVATE_ARGUMENT','called','PRIVATE_TOOL_RAW','tool');
+        INSERT INTO tool_results(session_id,source_sequence,sequence_known,timestamp,call_id,tool_call_id,output,outcome,raw_json) VALUES
+          (1,8,1,NULL,'PRIVATE_CALL',1,'PRIVATE_OUTPUT','failed','PRIVATE_RESULT_RAW');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
 async fn paginated_app() -> (tempfile::TempDir, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -457,20 +500,7 @@ async fn bounded_transcript_app() -> (tempfile::TempDir, Router) {
 }
 
 async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .header(
-                    header::AUTHORIZATION,
-                    format!("bAsIc {}", STANDARD.encode("synthetic:password")),
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = authenticated_response(app, uri).await;
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert!(
         response
@@ -487,6 +517,22 @@ async fn get(app: &Router, uri: &str) -> (StatusCode, String) {
     )
     .unwrap();
     (status, body)
+}
+
+async fn authenticated_response(app: &Router, uri: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("bAsIc {}", STANDARD.encode("synthetic:password")),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -927,6 +973,108 @@ async fn diagnostics_bound_snapshot_and_evidence_queries() {
         html.len() < 256 * 1024,
         "diagnostics page was {} bytes",
         html.len()
+    );
+}
+
+#[tokio::test]
+async fn postmortem_exports_are_deterministic_aggregate_only_and_redacted() {
+    let (_dir, app) = postmortem_app().await;
+    let json_response = authenticated_response(&app, "/sessions/postmortem/postmortem/json").await;
+    assert_eq!(json_response.status(), StatusCode::OK);
+    assert_eq!(
+        json_response.headers()[header::CONTENT_TYPE],
+        "application/json; charset=utf-8"
+    );
+    assert_eq!(
+        json_response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"agent-lens-postmortem.json\""
+    );
+    assert_eq!(json_response.headers()[header::CACHE_CONTROL], "no-store");
+    let json = String::from_utf8(
+        to_bytes(json_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["format_version"], 1);
+    assert_eq!(value["redaction"]["profile"], "aggregate-only");
+    assert_eq!(value["session"]["stable_id"], "postmortem");
+    assert_eq!(value["session"]["agent_kind"], "other");
+    assert_eq!(value["turns"]["completed"], 1);
+    assert_eq!(value["turns"]["interrupted"], 1);
+    assert_eq!(value["turns"]["unclosed"], 1);
+    assert_eq!(value["turns"]["terminal_only"], 1);
+    assert_eq!(value["usage"]["reported_total_tokens"], 132);
+    assert_eq!(value["models"]["requested_model_changes"], 1);
+    assert_eq!(value["models"]["observed_served_model_fallbacks"], 1);
+    assert_eq!(value["tools"]["failures_observed"], 1);
+    assert_eq!(value["tools"]["outcomes_unknown"], 1);
+    assert_eq!(value["pressure"]["context_observations"], 1);
+    assert_eq!(value["pressure"]["rate_limit_observations"], 1);
+    assert_eq!(value["reason_codes"].as_array().unwrap().len(), 14);
+
+    let (session_status, session_html) = get(&app, "/sessions/postmortem").await;
+    assert_eq!(session_status, StatusCode::OK);
+    assert!(session_html.contains("href=\"/sessions/postmortem/postmortem/json\""));
+    assert!(session_html.contains("href=\"/sessions/postmortem/postmortem/md\""));
+
+    let second_json = get(&app, "/sessions/postmortem/postmortem/json").await.1;
+    assert_eq!(json, second_json, "exports must be deterministic");
+
+    let markdown_response =
+        authenticated_response(&app, "/sessions/postmortem/postmortem/md").await;
+    assert_eq!(markdown_response.status(), StatusCode::OK);
+    assert_eq!(
+        markdown_response.headers()[header::CONTENT_TYPE],
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(
+        markdown_response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"agent-lens-postmortem.md\""
+    );
+    let markdown = String::from_utf8(
+        to_bytes(markdown_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(markdown.contains("# Redacted AgentLens postmortem"));
+    assert!(markdown.contains("`turn_interrupted` (1)"));
+    assert!(markdown.contains("this does not establish task failure"));
+    assert!(markdown.contains("## Excluded by redaction"));
+
+    for private in [
+        "PRIVATE_",
+        "PRIVATE_PROMPT",
+        "PRIVATE_CODE",
+        "PRIVATE_ARGUMENT",
+        "PRIVATE_OUTPUT",
+        "PRIVATE_PATH",
+        "PRIVATE_HOST",
+        "PRIVATE_USER",
+        "PRIVATE_MODEL",
+        "PRIVATE_CREDENTIAL",
+    ] {
+        assert!(!json.contains(private), "JSON disclosed {private}: {json}");
+        assert!(
+            !markdown.contains(private),
+            "Markdown disclosed {private}: {markdown}"
+        );
+    }
+
+    assert_eq!(
+        get(&app, "/sessions/postmortem/postmortem/xml").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, _, hidden_app) = diagnostics_app().await;
+    assert_eq!(
+        get(&hidden_app, "/sessions/hidden-diagnostics/postmortem/json")
+            .await
+            .0,
+        StatusCode::NOT_FOUND
     );
 }
 

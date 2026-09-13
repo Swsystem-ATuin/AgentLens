@@ -3,8 +3,8 @@ use askama::Template;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use tower_http::trace::TraceLayer;
 
 mod markdown;
 mod presentation;
-mod queries;
+pub(crate) mod queries;
 #[cfg(test)]
 mod regression;
 
@@ -211,6 +211,7 @@ fn router_with_projects(
         .route("/diagnostics", get(diagnostics))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/turns", get(turn_history))
+        .route("/sessions/{id}/postmortem/{format}", get(postmortem))
         .route("/sessions/{id}/messages/{sequence}", get(message))
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
         .route("/sessions/{id}/results/{sequence}", get(tool_result))
@@ -713,6 +714,41 @@ async fn turn_history(
     ))
 }
 
+async fn postmortem(
+    State(state): State<AppState>,
+    Path((stable_id, format)): Path<(String, String)>,
+) -> Result<Response, WebError> {
+    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let row = queries::postmortem(&state.pool, session.id)
+        .await
+        .map_err(|error| WebError::database("load postmortem", error))?;
+    let report = crate::postmortem::PostmortemReport::from_row(row);
+    let (content_type, filename, body) = match format.as_str() {
+        "json" => (
+            "application/json; charset=utf-8",
+            "agent-lens-postmortem.json",
+            report.json().map_err(|_| WebError::export())?,
+        ),
+        "md" => (
+            "text/markdown; charset=utf-8",
+            "agent-lens-postmortem.md",
+            report.markdown(),
+        ),
+        _ => return Err(WebError::not_found()),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
 async fn load_session(
     pool: &SqlitePool,
     stable_id: &str,
@@ -940,6 +976,16 @@ impl WebError {
             error_code: None,
         }
     }
+
+    fn export() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "Internal server error",
+            operation: "serialize postmortem",
+            error_kind: "serialization",
+            error_code: None,
+        }
+    }
 }
 
 fn classify_database_error(error: &sqlx::Error) -> (&'static str, Option<String>) {
@@ -1010,6 +1056,8 @@ mod tests {
             "/diagnostics",
             "/sessions/1",
             "/sessions/1/turns",
+            "/sessions/1/postmortem/json",
+            "/sessions/1/postmortem/md",
             "/sessions/1/messages/0",
             "/sessions/invalid",
             "/missing",
@@ -1051,6 +1099,8 @@ mod tests {
             ("/diagnostics", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
+            ("/sessions/1/postmortem/json", StatusCode::NOT_FOUND),
+            ("/sessions/1/postmortem/md", StatusCode::NOT_FOUND),
             ("/missing", StatusCode::NOT_FOUND),
         ] {
             let response = app
