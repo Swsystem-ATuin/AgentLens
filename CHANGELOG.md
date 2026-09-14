@@ -83,6 +83,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Release preparation now includes Cargo package metadata, source-package and locked release-build verification, an atomic `main`/annotated-tag publication procedure, and a 0.1.0 upgrade checklist. Public distribution remains gated on choosing a repository license.
+
 - The conditional database-backend review retains SQLite for the measured single-host, single-index-writer deployment and now explicitly enables WAL for persistent account/session state. PostgreSQL migration triggers are multiple instances, remote storage, sustained independent writers, measured lock/checkpoint pressure, or managed HA/replication/PITR requirements; the decision records SQLite-specific migration work and evidence gates.
 
 - The pre-account-management framework gate retains Rust/Axum and selects established server-side session authentication with locally provisioned Argon2id-backed application identities. The decision records the Django comparison, separate persistent-state boundary, provisioning/recovery and revocation expectations, OIDC deferral, implementation security contract, and evidence that would trigger reconsideration.

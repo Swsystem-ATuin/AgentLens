@@ -149,6 +149,8 @@ During initial MVP development, changes are committed directly to `develop`:
 
 Record user-visible changes in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`. Releases follow semantic versioning where practical.
 
+The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.1.0 upgrade checklist. The repository does not yet declare a software license; choose one before public distribution or registry publication.
+
 The canonical repository is <https://git.s4w.uk/infrastructure/agent-lens.git>.
 
 ## Privacy and data handling
