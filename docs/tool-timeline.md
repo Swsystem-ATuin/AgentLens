@@ -19,7 +19,7 @@ Structured arguments and outputs are retained as compact JSON. String values are
 
 ## Bounds and navigation
 
-A timeline query fetches at most 51 events and renders 50 to detect the next section. Each event preview contains at most 2,048 SQLite characters. Longer tool arguments, results, and messages link to authenticated detail routes that read at most 16,384 characters per part. Tool names and call IDs projected into pages are capped at 160 characters. Filters are parameterized, pagination preserves the selected event kind, and detail routes first resolve the public stable session ID so one session cannot retrieve another session's event.
+A timeline query fetches at most 51 events and renders 50 to detect the next section. Each event preview contains at most 2,048 SQLite characters. Longer tool arguments, results, and messages link to authenticated detail routes that read at most 16,384 characters per part. Tool names and call IDs projected into pages are capped at 160 characters. Filters are parameterized, pagination preserves the selected event kind, and detail routes first resolve an authorized public stable session ID so an ungranted or different session cannot retrieve another session's event.
 
 `EXPLAIN QUERY PLAN` on the generated benchmark index selects the message, tool-call sequence, and tool-result sequence indexes and merges the three ordered branches without a temporary sort. The 51-event limit can therefore stop the merged scan; deeper offset sections still read their skipped events.
 

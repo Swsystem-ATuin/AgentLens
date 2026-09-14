@@ -42,6 +42,10 @@ fn serve_help_documents_loopback_port_and_session_options() {
         "disable",
         "enable",
         "revoke-sessions",
+        "set-role",
+        "grant-source",
+        "revoke-source",
+        "permissions",
     ] {
         assert!(account_output.contains(command));
     }
@@ -126,8 +130,8 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
     ))
     .await
     .unwrap();
-    let (hash, enabled, generation): (String, bool, i64) = sqlx::query_as(
-        "SELECT password_hash,enabled,session_generation FROM accounts WHERE username='alice'",
+    let (hash, enabled, generation, role): (String, bool, i64, String) = sqlx::query_as(
+        "SELECT password_hash,enabled,session_generation,role FROM accounts WHERE username='alice'",
     )
     .fetch_one(&state)
     .await
@@ -136,7 +140,91 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
     assert!(!hash.contains("first synthetic passphrase"));
     assert!(enabled);
     assert_eq!(generation, 0);
+    assert_eq!(role, "admin");
     state.close().await;
+
+    let create_viewer = run(
+        dir.path(),
+        &[
+            "account",
+            "create",
+            "--username",
+            "viewer",
+            "--password-file",
+            "password",
+        ],
+    );
+    assert!(create_viewer.status.success());
+    let index = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        dir.path().join("agent-lens.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let source_id: String = sqlx::query_scalar("SELECT source_key FROM agent_instances")
+        .fetch_one(&index)
+        .await
+        .unwrap();
+    index.close().await;
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "account",
+                "grant-source",
+                "--username",
+                "viewer",
+                "--source-id",
+                &source_id,
+            ],
+        )
+        .status
+        .success()
+    );
+    let rebuilt_with_grant = run(dir.path(), &["rebuild", "--data", "sources"]);
+    assert!(
+        rebuilt_with_grant.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuilt_with_grant.stderr)
+    );
+    let permissions = run(
+        dir.path(),
+        &["account", "permissions", "--username", "viewer"],
+    );
+    assert!(permissions.status.success());
+    let permissions = String::from_utf8(permissions.stdout).unwrap();
+    assert!(permissions.contains("role: viewer"));
+    assert!(permissions.contains(&format!("source: {source_id}")));
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "account",
+                "revoke-source",
+                "--username",
+                "viewer",
+                "--source-id",
+                &source_id,
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "account",
+                "set-role",
+                "--username",
+                "viewer",
+                "--role",
+                "admin",
+            ],
+        )
+        .status
+        .success()
+    );
 
     #[cfg(unix)]
     {

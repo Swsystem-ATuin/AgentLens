@@ -35,15 +35,22 @@ const CSRF_TOKEN: &str = "auth.csrf";
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','1');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','2');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
     password_hash TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('admin','viewer')),
     session_generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     password_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS account_source_grants (
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(account_id,source_key)
 );
 "#;
 
@@ -66,6 +73,85 @@ pub struct StateStore {
 pub struct CurrentUser {
     pub id: String,
     pub username: String,
+    pub access: AccessScope,
+}
+
+#[derive(Clone, Debug)]
+pub struct AccessScope {
+    role: AccountRole,
+    source_keys_json: String,
+    source_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountRole {
+    Admin,
+    Viewer,
+}
+
+impl AccountRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
+impl AccessScope {
+    pub fn is_admin(&self) -> bool {
+        self.role == AccountRole::Admin
+    }
+
+    pub fn role(&self) -> &'static str {
+        self.role.as_str()
+    }
+
+    pub fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    pub(crate) fn unrestricted(&self) -> bool {
+        self.is_admin()
+    }
+
+    pub(crate) fn source_keys_json(&self) -> &str {
+        &self.source_keys_json
+    }
+
+    fn permits_route(&self, path: &str) -> bool {
+        if self.is_admin() {
+            return true;
+        }
+        if matches!(
+            path,
+            "/" | "/account"
+                | "/logout"
+                | "/sessions"
+                | "/usage"
+                | "/diagnostics"
+                | "/assets/live-reader.js"
+        ) {
+            return true;
+        }
+        let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        matches!(
+            parts.as_slice(),
+            ["sessions", _]
+                | ["sessions", _, "live-status" | "turns"]
+                | ["sessions", _, "postmortem", "json" | "md"]
+                | ["sessions", _, "messages" | "tools" | "results", _]
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all() -> Self {
+        Self {
+            role: AccountRole::Admin,
+            source_keys_json: "[]".to_owned(),
+            source_count: 0,
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -74,7 +160,14 @@ struct AccountRow {
     username: String,
     password_hash: String,
     enabled: bool,
+    role: String,
     session_generation: i64,
+}
+
+pub struct AccountPermissions {
+    pub username: String,
+    pub role: &'static str,
+    pub source_keys: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,10 +196,44 @@ impl StateStore {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .context("restrict persistent application state permissions")?;
         }
+        let has_metadata: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_state_metadata')")
+            .fetch_one(&pool)
+            .await
+            .context("inspect application state schema")?;
+        if has_metadata {
+            let schema_version: String = sqlx::query_scalar(
+                "SELECT value FROM app_state_metadata WHERE key='schema_version'",
+            )
+            .fetch_one(&pool)
+            .await
+            .context("read application state schema version")?;
+            let schema_version = schema_version
+                .parse::<u32>()
+                .context("invalid application state schema version")?;
+            ensure!(
+                schema_version <= 2,
+                "application state schema is newer than this Agent Lens binary"
+            );
+        }
         sqlx::raw_sql(STATE_SCHEMA)
             .execute(&pool)
             .await
             .context("migrate persistent application state")?;
+        let account_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('accounts')")
+                .fetch_all(&pool)
+                .await
+                .context("inspect application account schema")?;
+        if !account_columns.iter().any(|column| column == "role") {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'admin' CHECK(role IN ('admin','viewer'))")
+                .execute(&pool)
+                .await
+                .context("add application account roles")?;
+        }
+        sqlx::query("UPDATE app_state_metadata SET value='2' WHERE key='schema_version'")
+            .execute(&pool)
+            .await
+            .context("record application state schema version")?;
         let sessions = SqliteStore::new(pool.clone());
         sessions
             .migrate()
@@ -146,18 +273,95 @@ pub async fn create_account(
     state: &StateStore,
     username: &str,
     password_file: &Path,
+    requested_role: Option<AccountRole>,
 ) -> Result<()> {
     let username = validate_username(username)?;
     let password = read_password(password_file)?;
     let hash = hash_password(&password)?;
-    sqlx::query("INSERT INTO accounts(id,username,password_hash) VALUES(?,?,?)")
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
+        .await
+        .context("begin account creation")?;
+    let account_count: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
+        .fetch_one(&mut *transaction)
+        .await
+        .context("count application accounts")?;
+    let role = requested_role.unwrap_or(if account_count == 0 {
+        AccountRole::Admin
+    } else {
+        AccountRole::Viewer
+    });
+    sqlx::query("INSERT INTO accounts(id,username,password_hash,role) VALUES(?,?,?,?)")
         .bind(random_token())
         .bind(username)
         .bind(hash)
-        .execute(&state.auth.pool)
+        .bind(role.as_str())
+        .execute(&mut *transaction)
         .await
         .map_err(|error| map_account_write_error("create application account", error))?;
+    transaction
+        .commit()
+        .await
+        .context("commit account creation")?;
     Ok(())
+}
+
+pub async fn set_role(state: &StateStore, username: &str, role: AccountRole) -> Result<()> {
+    let username = validate_username(username)?;
+    let result = sqlx::query("UPDATE accounts SET role=? WHERE username=? COLLATE NOCASE")
+        .bind(role.as_str())
+        .bind(username)
+        .execute(&state.auth.pool)
+        .await
+        .context("change application account role")?;
+    ensure!(result.rows_affected() == 1, "application account not found");
+    Ok(())
+}
+
+pub async fn grant_source(state: &StateStore, username: &str, source_key: &str) -> Result<()> {
+    let account_id = account_id(state, username).await?;
+    validate_source_key(source_key)?;
+    sqlx::query("INSERT OR IGNORE INTO account_source_grants(account_id,source_key) VALUES(?,?)")
+        .bind(account_id)
+        .bind(source_key)
+        .execute(&state.auth.pool)
+        .await
+        .context("grant source access")?;
+    Ok(())
+}
+
+pub async fn revoke_source(state: &StateStore, username: &str, source_key: &str) -> Result<()> {
+    let account_id = account_id(state, username).await?;
+    validate_source_key(source_key)?;
+    sqlx::query("DELETE FROM account_source_grants WHERE account_id=? AND source_key=?")
+        .bind(account_id)
+        .bind(source_key)
+        .execute(&state.auth.pool)
+        .await
+        .context("revoke source access")?;
+    Ok(())
+}
+
+pub async fn account_permissions(state: &StateStore, username: &str) -> Result<AccountPermissions> {
+    let username = validate_username(username)?;
+    let account: Option<(String, String, String)> =
+        sqlx::query_as("SELECT id,username,role FROM accounts WHERE username=? COLLATE NOCASE")
+            .bind(username)
+            .fetch_optional(&state.auth.pool)
+            .await
+            .context("load application account permissions")?;
+    let Some((id, username, role)) = account else {
+        anyhow::bail!("application account not found");
+    };
+    let role = parse_role(&role)?;
+    let source_keys = source_grants(&state.auth.pool, &id).await?;
+    Ok(AccountPermissions {
+        username,
+        role: role.as_str(),
+        source_keys,
+    })
 }
 
 pub async fn reset_password(
@@ -203,7 +407,7 @@ impl AuthState {
             return Ok(None);
         }
         let account = if validate_username(username).is_ok() {
-            sqlx::query_as::<_, AccountRow>("SELECT id,username,password_hash,enabled,session_generation FROM accounts WHERE username=? COLLATE NOCASE")
+            sqlx::query_as::<_, AccountRow>("SELECT id,username,password_hash,enabled,role,session_generation FROM accounts WHERE username=? COLLATE NOCASE")
                 .bind(username).fetch_optional(&self.pool).await.context("load application account")?
         } else {
             None
@@ -216,15 +420,11 @@ impl AuthState {
         let valid = tokio::task::spawn_blocking(move || verify_password(&hash, &password))
             .await
             .context("join password verification")?;
-        Ok(account.and_then(|account| {
-            (valid && account.enabled).then_some((
-                CurrentUser {
-                    id: account.id,
-                    username: account.username,
-                },
-                account.session_generation,
-            ))
-        }))
+        let Some(account) = account.filter(|account| valid && account.enabled) else {
+            return Ok(None);
+        };
+        let generation = account.session_generation;
+        Ok(Some((self.current_account(account).await?, generation)))
     }
 
     async fn current_user(&self, session: &Session) -> Result<Option<CurrentUser>> {
@@ -242,7 +442,7 @@ impl AuthState {
             return Ok(None);
         }
         let account = sqlx::query_as::<_, AccountRow>(
-            "SELECT id,username,password_hash,enabled,session_generation FROM accounts WHERE id=?",
+            "SELECT id,username,password_hash,enabled,role,session_generation FROM accounts WHERE id=?",
         )
         .bind(account_id)
         .fetch_optional(&self.pool)
@@ -256,10 +456,24 @@ impl AuthState {
             session.flush().await?;
             return Ok(None);
         }
-        Ok(Some(CurrentUser {
+        Ok(Some(self.current_account(account).await?))
+    }
+
+    async fn current_account(&self, account: AccountRow) -> Result<CurrentUser> {
+        let role = parse_role(&account.role)?;
+        let source_keys = source_grants(&self.pool, &account.id).await?;
+        let source_count = source_keys.len();
+        let source_keys_json = serde_json::to_string(&source_keys)
+            .context("encode application account source grants")?;
+        Ok(CurrentUser {
             id: account.id,
             username: account.username,
-        }))
+            access: AccessScope {
+                role,
+                source_keys_json,
+                source_count,
+            },
+        })
     }
 
     #[cfg(test)]
@@ -342,6 +556,9 @@ pub async fn require_auth(
     }
     match auth.current_user(&session).await {
         Ok(Some(user)) => {
+            if !user.access.permits_route(request.uri().path()) {
+                return (StatusCode::FORBIDDEN, "Administrator access required").into_response();
+            }
             request.extensions_mut().insert(user);
             next.run(request).await
         }
@@ -352,6 +569,7 @@ pub async fn require_auth(
                 request.extensions_mut().insert(CurrentUser {
                     id: "test-account".into(),
                     username: "synthetic".into(),
+                    access: AccessScope::all(),
                 });
                 return next.run(request).await;
             }
@@ -360,6 +578,10 @@ pub async fn require_auth(
             {
                 match auth.authenticate(&username, &password).await {
                     Ok(Some((user, _))) => {
+                        if !user.access.permits_route(request.uri().path()) {
+                            return (StatusCode::FORBIDDEN, "Administrator access required")
+                                .into_response();
+                        }
                         request.headers_mut().remove(header::AUTHORIZATION);
                         request.extensions_mut().insert(user);
                         return next.run(request).await;
@@ -469,6 +691,44 @@ fn validate_username(username: &str) -> Result<&str> {
         "username may contain only ASCII letters, digits, '.', '_', and '-'"
     );
     Ok(username)
+}
+
+fn validate_source_key(source_key: &str) -> Result<()> {
+    ensure!(
+        source_key.len() == 68
+            && source_key.starts_with("src_")
+            && source_key[4..].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "source ID must be a stable Agent Lens source ID"
+    );
+    Ok(())
+}
+
+fn parse_role(role: &str) -> Result<AccountRole> {
+    match role {
+        "admin" => Ok(AccountRole::Admin),
+        "viewer" => Ok(AccountRole::Viewer),
+        _ => anyhow::bail!("invalid application account role"),
+    }
+}
+
+async fn account_id(state: &StateStore, username: &str) -> Result<String> {
+    let username = validate_username(username)?;
+    sqlx::query_scalar("SELECT id FROM accounts WHERE username=? COLLATE NOCASE")
+        .bind(username)
+        .fetch_optional(&state.auth.pool)
+        .await
+        .context("load application account")?
+        .ok_or_else(|| anyhow::anyhow!("application account not found"))
+}
+
+async fn source_grants(pool: &SqlitePool, account_id: &str) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT source_key FROM account_source_grants WHERE account_id=? ORDER BY source_key",
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await
+    .context("load application account source grants")
 }
 
 fn read_password(path: &Path) -> Result<String> {
@@ -639,9 +899,29 @@ mod tests {
             .await
             .unwrap();
         let first = password_file(dir.path(), "first synthetic passphrase\n");
-        create_account(&state, "Synthetic.User", &first)
+        create_account(&state, "Synthetic.User", &first, None)
             .await
             .unwrap();
+        let permissions = account_permissions(&state, "synthetic.user").await.unwrap();
+        assert_eq!(permissions.role, "admin");
+        assert!(permissions.source_keys.is_empty());
+        create_account(&state, "viewer", &first, None)
+            .await
+            .unwrap();
+        let source_key = format!("src_{}", "a".repeat(64));
+        grant_source(&state, "viewer", &source_key).await.unwrap();
+        let permissions = account_permissions(&state, "viewer").await.unwrap();
+        assert_eq!(permissions.role, "viewer");
+        assert_eq!(permissions.source_keys.len(), 1);
+        assert_eq!(permissions.source_keys[0], source_key);
+        revoke_source(&state, "viewer", &source_key).await.unwrap();
+        set_role(&state, "viewer", AccountRole::Admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            account_permissions(&state, "viewer").await.unwrap().role,
+            "admin"
+        );
         let stored: String = sqlx::query_scalar("SELECT password_hash FROM accounts")
             .fetch_one(&state.auth.pool)
             .await
@@ -721,5 +1001,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = read_password(dir.path()).unwrap_err().to_string();
         assert!(error.contains("regular file"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn pre_permission_accounts_migrate_to_administrators() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-state.sqlite");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE app_state_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO app_state_metadata VALUES('schema_version','1'); CREATE TABLE accounts(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,password_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,session_generation INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,password_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO accounts(id,username,password_hash) VALUES('legacy-id','legacy','$argon2id$invalid');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let state = StateStore::open(&path).await.unwrap();
+        let permissions = account_permissions(&state, "legacy").await.unwrap();
+        assert_eq!(permissions.role, "admin");
+        let version: String =
+            sqlx::query_scalar("SELECT value FROM app_state_metadata WHERE key='schema_version'")
+                .fetch_one(&state.auth.pool)
+                .await
+                .unwrap();
+        assert_eq!(version, "2");
+    }
+
+    #[tokio::test]
+    async fn newer_state_schema_fails_without_downgrading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future-state.sqlite");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE app_state_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO app_state_metadata VALUES('schema_version','99')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let error = match StateStore::open(&path).await {
+            Ok(_) => panic!("newer state schema must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("newer"), "{error}");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        let version: String =
+            sqlx::query_scalar("SELECT value FROM app_state_metadata WHERE key='schema_version'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, "99");
     }
 }

@@ -734,10 +734,11 @@ async fn usage_dashboard_uses_event_time_and_reconciles_grouped_detail() {
         from: Some("2026-02-01"),
         to: Some("2026-02-28"),
     };
-    let totals = queries::usage_totals(&pool, &filters, &projects)
+    let access = crate::auth::AccessScope::all();
+    let totals = queries::usage_totals(&pool, &filters, &projects, &access)
         .await
         .unwrap();
-    let detail = queries::usage_groups(&pool, &filters, &projects, 0)
+    let detail = queries::usage_groups(&pool, &filters, &projects, &access, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -1007,9 +1008,16 @@ async fn diagnostics_bound_snapshot_and_evidence_queries() {
     }
     transaction.commit().await.unwrap();
 
-    assert_eq!(queries::pressure_snapshots(&pool).await.unwrap().len(), 50);
+    let access = crate::auth::AccessScope::all();
     assert_eq!(
-        queries::diagnostic_evidence(&pool, "interruption")
+        queries::pressure_snapshots(&pool, &access)
+            .await
+            .unwrap()
+            .len(),
+        50
+    );
+    assert_eq!(
+        queries::diagnostic_evidence(&pool, "interruption", &access)
             .await
             .unwrap()
             .len(),

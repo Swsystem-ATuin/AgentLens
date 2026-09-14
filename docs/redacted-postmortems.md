@@ -7,7 +7,7 @@ Each visible session page links to authenticated JSON and Markdown downloads:
 /sessions/{stable_id}/postmortem/md
 ```
 
-The endpoints use the same individual server-side session authentication, hidden-session policy, and `Cache-Control: no-store` response policy as the browser UI. Unsupported formats and hidden or unknown stable IDs return `404`. Downloads use fixed filenames so identifying values are not copied into response headers.
+The endpoints use the same individual server-side session authentication, source-grant policy, hidden-session policy, and `Cache-Control: no-store` response policy as the browser UI. Unsupported formats and hidden, ungranted, or unknown stable IDs return `404`. Downloads use fixed filenames so identifying values are not copied into response headers.
 
 ## Export contract
 

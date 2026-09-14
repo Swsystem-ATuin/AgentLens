@@ -35,7 +35,7 @@ The external columns below summarise the sources above. AgentLens findings come 
 | Activity and failures | Live session reading | Inferred activity plus machine freshness | Response outcomes and advisory decisions | Coarse completion/abort status; event-order fix R0, evidence-based diagnostics R3 |
 | Refresh and scale | Bounded paging and incremental file reads | Watchers, JSON refresh and sync | Live proxy stream | Manual full rebuild; bounded loading R1, incremental updates R4 |
 | Multiple machines | Configured local home | Explicit metadata pooling | Wrapped traffic observation | Multiple copied homes already indexed; collection freshness and optional summaries R4 |
-| Access | Network boundary; optional TLS/mTLS | Local terminal boundary | Local observability stack | Individual application accounts and sessions; per-user permissions remain M2–M4 |
+| Access | Network boundary; optional TLS/mTLS | Local terminal boundary | Local observability stack | Individual accounts, sessions, roles, and persistent stable source grants |
 | Agent control | Opt-in tmux input/preview | Launch/resume/attach | Wrapper and advisory guard | No control surface; keep execution outside this roadmap |
 | Additional agents | Codex adapter seam | Codex-specific board | Codex Responses focus | Generic database identities but Codex-coupled ingestion/presentation; R1 then R5 |
 

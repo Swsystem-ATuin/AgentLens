@@ -1,6 +1,6 @@
 # Context, rate pressure, and diagnostics
 
-The authenticated `/diagnostics` page reports bounded historical evidence from copied source files. It does not query a provider, claim a current subscription allowance, automatically block work, or assign task-quality scores.
+The authenticated `/diagnostics` page reports bounded historical evidence from copied source files authorized for the current account. Totals and evidence limits are applied after source authorization. It does not query a provider, claim a current subscription allowance, automatically block work, or assign task-quality scores.
 
 ## Context and rate observations
 

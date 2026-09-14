@@ -16,7 +16,7 @@ The client serializes probes, retries after errors, and labels the index connect
 
 The live bar keeps three concepts separate from the session's evidence-derived lifecycle status:
 
-- **Last successful import** is the commit time of the newest completed zero-error ingest run in this index. It can refer to a refresh of another configured source root; a newer run with localized file errors can still advance the revision and its affected source observations without replacing this value.
+- **Last successful import** is the commit time of the ingest run that last projected this session's source file. The revision is that source file's ingest-run ID, so a viewer cannot infer refresh activity belonging only to another source.
 - **Source observed** is updated transactionally whenever refresh checks that source, including an unchanged checksum or a localized parse error. It is `recent` for an age from zero through 120 seconds, `stale` when older or future-dated, and `unavailable` when absent or unparsable.
 - **Source projection** is the allowlisted `ok`, `partial`, `error`, or `unknown` checkpoint state.
 

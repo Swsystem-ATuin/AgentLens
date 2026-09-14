@@ -1,6 +1,6 @@
 # Historical usage dashboard
 
-The authenticated `/usage` route aggregates the checked cumulative-counter deltas described in [token accounting semantics](token-accounting.md). It never sums raw cumulative snapshots or assigns a session's lifetime summary to its last-modified date.
+The authenticated `/usage` route aggregates the checked cumulative-counter deltas described in [token accounting semantics](token-accounting.md), limited to the current account's authorized sources before totals, groups, recent rows, or pagination are computed. It never sums raw cumulative snapshots or assigns a session's lifetime summary to its last-modified date.
 
 ## Time and grouping
 

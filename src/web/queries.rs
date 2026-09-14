@@ -296,6 +296,7 @@ pub(super) async fn sessions(
     pool: &SqlitePool,
     filters: &SessionFilters<'_>,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
     offset: i64,
 ) -> Result<Vec<SessionRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
@@ -311,6 +312,7 @@ pub(super) async fn sessions(
         .push(" OR s.model IS NULL OR s.model NOT LIKE ")
         .push_bind(model_exclusion.pattern)
         .push(")");
+    push_source_access(&mut query, access);
     push_optional_equality(&mut query, "h.name", filters.host);
     push_optional_equality(&mut query, "u.os_user", filters.user);
     push_optional_equality(&mut query, "s.model", filters.model);
@@ -389,46 +391,78 @@ pub(super) async fn filter_values(
     pool: &SqlitePool,
     include_origins: bool,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
 ) -> Result<FilterValues, sqlx::Error> {
     let (hosts, users) = if include_origins {
+        let mut hosts = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT h.name FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id WHERE 1=1",
+        );
+        push_source_access(&mut hosts, access);
+        hosts.push(" ORDER BY h.name");
+        let mut users = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT u.os_user FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN users u ON u.id=i.user_id WHERE 1=1",
+        );
+        push_source_access(&mut users, access);
+        users.push(" ORDER BY u.os_user");
         (
-            sqlx::query_scalar("SELECT name FROM hosts ORDER BY name")
-                .fetch_all(pool)
-                .await?,
-            sqlx::query_scalar("SELECT DISTINCT os_user FROM users ORDER BY os_user")
-                .fetch_all(pool)
-                .await?,
+            hosts.build_query_scalar::<String>().fetch_all(pool).await?,
+            users.build_query_scalar::<String>().fetch_all(pool).await?,
         )
     } else {
         (Vec::new(), Vec::new())
     };
     let model_exclusion = crate::sources::model_exclusion();
-    let models = sqlx::query_scalar(
-        "SELECT DISTINCT s.model FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE s.model IS NOT NULL AND s.model <> '' AND (a.kind<>? OR s.model NOT LIKE ?) ORDER BY s.model",
-    )
-    .bind(model_exclusion.source_kind)
-    .bind(model_exclusion.pattern)
-    .fetch_all(pool)
-    .await?;
-    let statuses = sqlx::query_scalar(
-        "SELECT DISTINCT status FROM sessions WHERE status IS NOT NULL AND status <> '' ORDER BY status",
-    )
-    .fetch_all(pool)
-    .await?;
-    let agents = sqlx::query_scalar(
-        "SELECT DISTINCT a.kind FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) ORDER BY a.kind",
-    )
-    .bind(model_exclusion.source_kind)
-    .bind(model_exclusion.pattern)
-    .fetch_all(pool)
-    .await?;
-    let archives = sqlx::query_scalar(
-        "SELECT DISTINCT CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END FROM sessions s LEFT JOIN source_files sf ON sf.id=s.source_file_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) ORDER BY 1",
-    )
-    .bind(model_exclusion.source_kind)
-    .bind(model_exclusion.pattern)
-    .fetch_all(pool)
-    .await?;
+    let mut models = QueryBuilder::<Sqlite>::new(
+        "SELECT DISTINCT s.model FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE s.model IS NOT NULL AND s.model<>'' AND (a.kind<>",
+    );
+    models
+        .push_bind(model_exclusion.source_kind)
+        .push(" OR s.model NOT LIKE ")
+        .push_bind(model_exclusion.pattern)
+        .push(")");
+    push_source_access(&mut models, access);
+    models.push(" ORDER BY s.model");
+    let models = models
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
+    let mut statuses = QueryBuilder::<Sqlite>::new(
+        "SELECT DISTINCT s.status FROM sessions s JOIN agent_instances i ON i.id=s.instance_id WHERE s.status IS NOT NULL AND s.status<>''",
+    );
+    push_source_access(&mut statuses, access);
+    statuses.push(" ORDER BY s.status");
+    let statuses = statuses
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
+    let mut agents = QueryBuilder::<Sqlite>::new(
+        "SELECT DISTINCT a.kind FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>",
+    );
+    agents
+        .push_bind(model_exclusion.source_kind)
+        .push(" OR s.model IS NULL OR s.model NOT LIKE ")
+        .push_bind(model_exclusion.pattern)
+        .push(")");
+    push_source_access(&mut agents, access);
+    agents.push(" ORDER BY a.kind");
+    let agents = agents
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
+    let mut archives = QueryBuilder::<Sqlite>::new(
+        "SELECT DISTINCT CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END FROM sessions s LEFT JOIN source_files sf ON sf.id=s.source_file_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>",
+    );
+    archives
+        .push_bind(model_exclusion.source_kind)
+        .push(" OR s.model IS NULL OR s.model NOT LIKE ")
+        .push_bind(model_exclusion.pattern)
+        .push(")");
+    push_source_access(&mut archives, access);
+    archives.push(" ORDER BY 1");
+    let archives = archives
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
     let mut project_query = QueryBuilder::<Sqlite>::new("SELECT DISTINCT project FROM (SELECT ");
     push_project_case(&mut project_query, projects);
     project_query
@@ -436,7 +470,9 @@ pub(super) async fn filter_values(
         .push_bind(model_exclusion.source_kind)
         .push(" OR s.model IS NULL OR s.model NOT LIKE ")
         .push_bind(model_exclusion.pattern)
-        .push(") ) WHERE project IS NOT NULL ORDER BY project");
+        .push(")");
+    push_source_access(&mut project_query, access);
+    project_query.push(") WHERE project IS NOT NULL ORDER BY project");
     let project_values = project_query
         .build_query_scalar::<String>()
         .fetch_all(pool)
@@ -465,11 +501,13 @@ pub(super) async fn usage_totals(
     pool: &SqlitePool,
     filters: &UsageFilters<'_>,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
 ) -> Result<UsageTotalsRow, sqlx::Error> {
     let mut query = QueryBuilder::<Sqlite>::new(
         "WITH scoped AS (SELECT u.* FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE ",
     );
     push_visible_model(&mut query);
+    push_source_access(&mut query, access);
     query.push("), attributed AS (SELECT * FROM scoped u WHERE datetime(u.timestamp) IS NOT NULL");
     push_usage_date_boundaries(&mut query, filters, projects.timezone());
     query.push(
@@ -485,6 +523,7 @@ pub(super) async fn usage_groups(
     pool: &SqlitePool,
     filters: &UsageFilters<'_>,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
     offset: i64,
 ) -> Result<Vec<UsageGroupRow>, sqlx::Error> {
     let mut query = QueryBuilder::<Sqlite>::new("SELECT ");
@@ -501,6 +540,7 @@ pub(super) async fn usage_groups(
         " stable_id,SUM(u.delta_input_tokens) input_tokens,SUM(u.delta_output_tokens) output_tokens,SUM(u.delta_cached_input_tokens) cached_input_tokens,SUM(u.delta_reasoning_output_tokens) reasoning_output_tokens,SUM(u.delta_total_tokens) total_tokens,COUNT(u.delta_input_tokens) input_available_count,COUNT(u.delta_output_tokens) output_available_count,COUNT(u.delta_cached_input_tokens) cached_available_count,COUNT(u.delta_reasoning_output_tokens) reasoning_available_count,COUNT(u.delta_total_tokens) total_available_count,COUNT(DISTINCT s.id) session_count,COUNT(*) observation_count,SUM(CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 1 ELSE 0 END) anomaly_count FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users usr ON usr.id=i.user_id JOIN hosts h ON h.id=usr.host_id WHERE datetime(u.timestamp) IS NOT NULL AND ",
     );
     push_visible_model(&mut query);
+    push_source_access(&mut query, access);
     push_usage_date_boundaries(&mut query, filters, projects.timezone());
     query.push(" GROUP BY period,dimension,stable_id ORDER BY period DESC,total_tokens DESC,dimension LIMIT ")
         .push_bind((USAGE_PAGE_SIZE + 1) as i64)
@@ -516,11 +556,13 @@ pub(super) async fn recent_usage(
     pool: &SqlitePool,
     filters: &UsageFilters<'_>,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
 ) -> Result<Vec<RecentUsageRow>, sqlx::Error> {
     let mut query = QueryBuilder::<Sqlite>::new(
         "SELECT u.timestamp,s.stable_id,COALESCE(s.title,s.external_id) title,COALESCE(NULLIF(s.model,''),'Unknown model') model,u.delta_input_tokens input_tokens,u.delta_output_tokens output_tokens,u.delta_cached_input_tokens cached_input_tokens,u.delta_reasoning_output_tokens reasoning_output_tokens,u.delta_total_tokens total_tokens,(u.has_reset OR u.has_missing OR u.has_inconsistent) anomalous FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE datetime(u.timestamp) IS NOT NULL AND ",
     );
     push_visible_model(&mut query);
+    push_source_access(&mut query, access);
     push_usage_date_boundaries(&mut query, filters, projects.timezone());
     query
         .push(" ORDER BY julianday(u.timestamp) DESC,u.id DESC LIMIT ")
@@ -582,24 +624,32 @@ pub(crate) async fn postmortem(
 
 pub(super) async fn diagnostic_totals(
     pool: &SqlitePool,
+    access: &crate::auth::AccessScope,
 ) -> Result<DiagnosticTotalsRow, sqlx::Error> {
     let exclusion = crate::sources::model_exclusion();
     sqlx::query_as(
-        "WITH visible AS (SELECT s.id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') SELECT (SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='interrupted') interruption_count,(SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='unclosed') incomplete_count,(SELECT count(*) FROM usage_events u JOIN visible v ON v.id=u.session_id WHERE u.has_reset OR u.has_missing OR u.has_inconsistent) accounting_anomaly_count,(SELECT count(*) FROM tool_results r JOIN visible v ON v.id=r.session_id WHERE r.outcome='failed') observed_failure_count",
+        "WITH visible AS (SELECT s.id FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?)))) SELECT (SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='interrupted') interruption_count,(SELECT count(*) FROM turns t JOIN visible v ON v.id=t.session_id WHERE t.outcome='unclosed') incomplete_count,(SELECT count(*) FROM usage_events u JOIN visible v ON v.id=u.session_id WHERE u.has_reset OR u.has_missing OR u.has_inconsistent) accounting_anomaly_count,(SELECT count(*) FROM tool_results r JOIN visible v ON v.id=r.session_id WHERE r.outcome='failed') observed_failure_count",
     )
     .bind(exclusion.source_kind)
     .bind(exclusion.pattern)
+    .bind(access.unrestricted())
+    .bind(access.source_keys_json())
     .fetch_one(pool)
     .await
 }
 
-pub(super) async fn pressure_snapshots(pool: &SqlitePool) -> Result<Vec<PressureRow>, sqlx::Error> {
+pub(super) async fn pressure_snapshots(
+    pool: &SqlitePool,
+    access: &crate::auth::AccessScope,
+) -> Result<Vec<PressureRow>, sqlx::Error> {
     let exclusion = crate::sources::model_exclusion();
     sqlx::query_as(
-        "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,a.kind agent_kind,h.name hostname,usr.os_user,u.source_sequence,u.timestamp,u.context_window,u.context_tokens,u.rate_limit_id,u.rate_limit_name,u.primary_used_percent,u.primary_window_minutes,u.primary_resets_at,u.primary_resets_in_seconds,u.secondary_used_percent,u.secondary_window_minutes,u.secondary_resets_at,u.secondary_resets_in_seconds,u.plan_type,u.rate_limit_reached_type,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) evidence_position,unixepoch('now')-unixepoch(u.timestamp) observation_age_seconds,COALESCE(u.primary_resets_at-unixepoch('now'),u.primary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) primary_reset_remaining_seconds,COALESCE(u.secondary_resets_at-unixepoch('now'),u.secondary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) secondary_reset_remaining_seconds FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users usr ON usr.id=i.user_id JOIN hosts h ON h.id=usr.host_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL OR u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL OR u.rate_limit_id IS NOT NULL OR u.rate_limit_name IS NOT NULL OR u.rate_limit_reached_type IS NOT NULL) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?",
+        "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,a.kind agent_kind,h.name hostname,usr.os_user,u.source_sequence,u.timestamp,u.context_window,u.context_tokens,u.rate_limit_id,u.rate_limit_name,u.primary_used_percent,u.primary_window_minutes,u.primary_resets_at,u.primary_resets_in_seconds,u.secondary_used_percent,u.secondary_window_minutes,u.secondary_resets_at,u.secondary_resets_in_seconds,u.plan_type,u.rate_limit_reached_type,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) evidence_position,unixepoch('now')-unixepoch(u.timestamp) observation_age_seconds,COALESCE(u.primary_resets_at-unixepoch('now'),u.primary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) primary_reset_remaining_seconds,COALESCE(u.secondary_resets_at-unixepoch('now'),u.secondary_resets_in_seconds-(unixepoch('now')-unixepoch(u.timestamp))) secondary_reset_remaining_seconds FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users usr ON usr.id=i.user_id JOIN hosts h ON h.id=usr.host_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL OR u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL OR u.rate_limit_id IS NOT NULL OR u.rate_limit_name IS NOT NULL OR u.rate_limit_reached_type IS NOT NULL) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?))) ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?",
     )
     .bind(exclusion.source_kind)
     .bind(exclusion.pattern)
+    .bind(access.unrestricted())
+    .bind(access.source_keys_json())
     .bind(PRESSURE_SNAPSHOT_LIMIT)
     .fetch_all(pool)
     .await
@@ -608,19 +658,20 @@ pub(super) async fn pressure_snapshots(pool: &SqlitePool) -> Result<Vec<Pressure
 pub(super) async fn diagnostic_evidence(
     pool: &SqlitePool,
     kind: &str,
+    access: &crate::auth::AccessScope,
 ) -> Result<Vec<DiagnosticEvidenceRow>, sqlx::Error> {
     let sql = match kind {
         "interruption" => {
-            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.end_timestamp timestamp,t.end_sequence sequence,t.ordinal,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.end_sequence) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='interrupted' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(t.end_timestamp) IS NULL,datetime(t.end_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.end_timestamp timestamp,t.end_sequence sequence,t.ordinal,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.end_sequence) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='interrupted' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?))) ORDER BY datetime(t.end_timestamp) IS NULL,datetime(t.end_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
         }
         "incomplete" => {
-            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.start_timestamp timestamp,t.start_sequence sequence,t.ordinal,(SELECT count(*) FROM turns newer WHERE newer.session_id=t.session_id AND newer.ordinal>t.ordinal) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='unclosed' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(t.start_timestamp) IS NULL,datetime(t.start_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,t.start_timestamp timestamp,t.start_sequence sequence,t.ordinal,(SELECT count(*) FROM turns newer WHERE newer.session_id=t.session_id AND newer.ordinal>t.ordinal) position FROM turns t JOIN sessions s ON s.id=t.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE t.outcome='unclosed' AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?))) ORDER BY datetime(t.start_timestamp) IS NULL,datetime(t.start_timestamp) DESC,s.stable_id,t.ordinal DESC LIMIT ?"
         }
         "accounting" => {
-            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,u.timestamp,u.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) position FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.has_reset OR u.has_missing OR u.has_inconsistent) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?"
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,u.timestamp,u.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM usage_events p WHERE p.session_id=u.session_id AND p.sequence_known AND p.source_sequence<u.source_sequence) position FROM usage_events u JOIN sessions s ON s.id=u.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE u.sequence_known AND u.source_sequence IS NOT NULL AND (u.has_reset OR u.has_missing OR u.has_inconsistent) AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?))) ORDER BY datetime(u.timestamp) IS NULL,datetime(u.timestamp) DESC,s.stable_id,u.source_sequence DESC LIMIT ?"
         }
         "failure" => {
-            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,r.timestamp,r.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM (SELECT c2.sequence,1 event_order FROM tool_calls c2 WHERE c2.session_id=r.session_id AND c2.kind!='user_input' UNION ALL SELECT r2.source_sequence,2 FROM tool_results r2 LEFT JOIN tool_calls c2 ON c2.id=r2.tool_call_id WHERE r2.session_id=r.session_id AND COALESCE(c2.kind,'tool')!='user_input') WHERE sequence<r.source_sequence OR sequence=r.source_sequence AND event_order<2) position FROM tool_results r JOIN sessions s ON s.id=r.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE r.outcome='failed' AND r.sequence_known AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') ORDER BY datetime(r.timestamp) IS NULL,datetime(r.timestamp) DESC,s.stable_id,r.source_sequence DESC LIMIT ?"
+            "SELECT s.stable_id,COALESCE(s.title,s.external_id) title,r.timestamp,r.source_sequence sequence,NULL ordinal,(SELECT count(*) FROM (SELECT c2.sequence,1 event_order FROM tool_calls c2 WHERE c2.session_id=r.session_id AND c2.kind!='user_input' UNION ALL SELECT r2.source_sequence,2 FROM tool_results r2 LEFT JOIN tool_calls c2 ON c2.id=r2.tool_call_id WHERE r2.session_id=r.session_id AND COALESCE(c2.kind,'tool')!='user_input') WHERE sequence<r.source_sequence OR sequence=r.source_sequence AND event_order<2) position FROM tool_results r JOIN sessions s ON s.id=r.session_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE r.outcome='failed' AND r.sequence_known AND (a.kind<>? OR lower(COALESCE(s.model,'')) NOT LIKE ? ESCAPE '\\') AND (? OR i.source_key IN (SELECT value FROM json_each(?))) ORDER BY datetime(r.timestamp) IS NULL,datetime(r.timestamp) DESC,s.stable_id,r.source_sequence DESC LIMIT ?"
         }
         _ => return Ok(Vec::new()),
     };
@@ -628,6 +679,8 @@ pub(super) async fn diagnostic_evidence(
     sqlx::query_as(sql)
         .bind(exclusion.source_kind)
         .bind(exclusion.pattern)
+        .bind(access.unrestricted())
+        .bind(access.source_keys_json())
         .bind(DIAGNOSTIC_EVIDENCE_LIMIT)
         .fetch_all(pool)
         .await
@@ -710,6 +763,7 @@ pub(super) async fn session(
     pool: &SqlitePool,
     stable_id: &str,
     projects: &ProjectConfig,
+    access: &crate::auth::AccessScope,
 ) -> Result<Option<SessionRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
     let mut query = QueryBuilder::<Sqlite>::new(
@@ -724,6 +778,7 @@ pub(super) async fn session(
         .push(" OR s.model IS NULL OR s.model NOT LIKE ")
         .push_bind(model_exclusion.pattern)
         .push(")");
+    push_source_access(&mut query, access);
     query
         .build_query_as::<SessionRow>()
         .fetch_optional(pool)
@@ -733,22 +788,37 @@ pub(super) async fn session(
 pub(super) async fn live_status(
     pool: &SqlitePool,
     stable_id: &str,
+    access: &crate::auth::AccessScope,
 ) -> Result<Option<LiveStatusRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
     sqlx::query_as(
-        "SELECT COALESCE((SELECT max(id) FROM ingest_runs WHERE status='complete'),0) revision, \
-         (SELECT finished_at FROM ingest_runs WHERE status='complete' AND errors=0 ORDER BY id DESC LIMIT 1) last_successful_import, \
+        "SELECT COALESCE(sf.ingest_run_id,0) revision, \
+         ir.finished_at last_successful_import, \
          sf.observed_at source_observed_at, \
          CAST(unixepoch('now')-unixepoch(sf.observed_at) AS INTEGER) source_age_seconds, \
          COALESCE(sf.parse_status,'unknown') source_status \
-         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id LEFT JOIN source_files sf ON sf.id=s.source_file_id \
-         WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?)",
+         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id LEFT JOIN source_files sf ON sf.id=s.source_file_id LEFT JOIN ingest_runs ir ON ir.id=sf.ingest_run_id AND ir.status='complete' \
+         WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) AND (? OR i.source_key IN (SELECT value FROM json_each(?)))",
     )
     .bind(stable_id)
     .bind(model_exclusion.source_kind)
     .bind(model_exclusion.pattern)
+    .bind(access.unrestricted())
+    .bind(access.source_keys_json())
     .fetch_optional(pool)
     .await
+}
+
+fn push_source_access<'a>(
+    query: &mut QueryBuilder<'a, Sqlite>,
+    access: &'a crate::auth::AccessScope,
+) {
+    query
+        .push(" AND (")
+        .push_bind(access.unrestricted())
+        .push(" OR i.source_key IN (SELECT value FROM json_each(")
+        .push_bind(access.source_keys_json())
+        .push(")))");
 }
 
 fn push_optional_equality<'a>(

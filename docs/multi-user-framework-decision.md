@@ -1,6 +1,6 @@
 # Multi-user framework and authentication decision
 
-Status: accepted for the M1-M3 implementation gate on 2026-09-14.
+Status: accepted and implemented for M1-M3 on 2026-09-14.
 
 ## Decision
 
@@ -12,7 +12,7 @@ Accounts will use an opaque stable application identity and a unique login name.
 
 There will be no public registration, email dependency, security questions, or browser-based forgotten-password flow in the initial self-hosted design. Provisioning, password reset/recovery, account disablement, and session revocation will be explicit local administrator CLI operations. Password input must be interactive or accepted through a protected file descriptor, never a command-line argument. A password reset and account disablement revoke existing sessions.
 
-Accounts, password hashes, and server-side sessions now live in a persistent application-state SQLite database with its own schema, without sharing lifecycle or row identifiers with the disposable agent index. M3 will complete persistent permission mappings and their migration/backup acceptance criteria. M2 will decide and enforce the visibility policy before shared deployment. Until M2-M3 are complete, all enabled accounts share visibility and deployment remains gated.
+Accounts, password hashes, server-side sessions, roles, and stable source grants now live in a persistent application-state SQLite database with its own schema, without sharing lifecycle or row identifiers with the disposable agent index. M2 selects and enforces source-scoped viewers plus all-access administrators. M3 persists those mappings by stable source identity and verifies migration, rebuild survival, backup, and recovery independently of the disposable index.
 
 OpenID Connect remains a future integration option when a real deployment has an established identity provider. It is not the default now because Agent Lens has no confirmed provider, issuer, client-registration, claim-mapping, or logout-capability requirements. Adding nominal OIDC support without those facts would not establish revocation: [RP-initiated logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html) and [provider-to-application back-channel logout](https://openid.net/specs/openid-connect-backchannel-1_0.html) are separate standardized capabilities. A later OIDC decision must specify discovery and issuer pinning, Authorization Code with PKCE and state/nonce validation, stable subject mapping using issuer plus subject, local session lifetime, RP-initiated logout, and provider-triggered revocation behavior.
 
@@ -45,4 +45,4 @@ Re-open the framework decision only when evidence changes materially: a committe
 
 ## Operational effect
 
-This decision changes no executable code, schema, authentication behavior, or deployment command. It requires no migration, refresh, rebuild, or restart. M1 implementation will deliberately be a separate behavioral change with its own upgrade and rollback instructions.
+M1 and M2 now implement the selected authentication and source-scoped authorization model. Existing pre-M2 accounts migrate to administrators to preserve visibility; later accounts default to viewers. No agent-index rebuild is required. See [application authentication](application-authentication.md) and [access permissions](access-permissions.md) for current commands and migration behavior.

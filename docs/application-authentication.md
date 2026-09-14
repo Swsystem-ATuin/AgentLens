@@ -2,7 +2,7 @@
 
 Agent Lens uses locally provisioned application accounts and opaque server-side sessions. Application identities are independent of the operating-system users found in copied agent homes. The persistent state database defaults to `agent-lens-state.sqlite`; the normalized agent index remains disposable in `agent-lens.sqlite`.
 
-This implements identity, not source permissions. Every enabled account currently has the same visibility. Do not treat the application as ready for mutually untrusted users until M2 defines and enforces access policy on every query and direct URL.
+Authentication identifies the application account; [source-scoped authorization](access-permissions.md) separately determines which indexed records it can read. Administrators see all sources and operational endpoints. Viewers see only explicitly granted stable source IDs.
 
 ## Provisioning and recovery
 
@@ -14,7 +14,7 @@ ${EDITOR:-vi} /tmp/agent-lens-password
 cargo run -- account create --username alice --password-file /tmp/agent-lens-password
 ```
 
-Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, security-question recovery, or browser password reset. Local administrators use:
+Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, security-question recovery, or browser password reset. The first account defaults to `admin`, later accounts to `viewer`, and `account create --role` can override that default. Local administrators use:
 
 ```bash
 cargo run -- account reset-password --username alice --password-file /tmp/agent-lens-password
@@ -47,6 +47,8 @@ All responses, including login and authentication failures, retain `Cache-Contro
 ## Prometheus authentication
 
 `/metrics` accepts either a current browser session or HTTP Basic credentials for one enabled application account. Basic credentials are Argon2id-verified on every scrape, stripped before the metrics handler, and affected immediately by password reset or account disablement. This preserves ordinary Prometheus `basic_auth` configuration without restoring shared plaintext credential storage. Use HTTPS and a conservative scrape interval; password verification is intentionally expensive.
+
+Only accounts with the `admin` role can read `/metrics`; valid viewer session or Basic credentials receive `403`.
 
 ## Persistent state, rebuilds, and backup
 

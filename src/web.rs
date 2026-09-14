@@ -62,6 +62,8 @@ struct LoginTemplate {
 #[template(path = "account.html")]
 struct AccountTemplate {
     username: String,
+    role: &'static str,
+    source_count: usize,
     csrf_token: String,
 }
 
@@ -443,6 +445,8 @@ async fn account(
     Ok(Html(
         AccountTemplate {
             username: user.username,
+            role: user.access.role(),
+            source_count: user.access.source_count(),
             csrf_token,
         }
         .render()
@@ -481,6 +485,7 @@ fn percent_encode_component(value: &str) -> String {
 
 async fn usage(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Query(mut query): Query<UsageQuery>,
 ) -> Result<Html<String>, WebError> {
     query.normalize();
@@ -501,14 +506,15 @@ async fn usage(
         to: query.to.as_deref(),
     };
     let (totals, mut rows, recent) = tokio::try_join!(
-        queries::usage_totals(&state.pool, &filters, &state.projects),
+        queries::usage_totals(&state.pool, &filters, &state.projects, &user.access),
         queries::usage_groups(
             &state.pool,
             &filters,
             &state.projects,
+            &user.access,
             i64::from(page - 1) * USAGE_PAGE_SIZE as i64,
         ),
-        queries::recent_usage(&state.pool, &filters, &state.projects),
+        queries::recent_usage(&state.pool, &filters, &state.projects, &user.access),
     )
     .map_err(|error| WebError::database("load usage dashboard", error))?;
     let has_next = rows.len() > USAGE_PAGE_SIZE;
@@ -563,15 +569,18 @@ async fn usage(
     ))
 }
 
-async fn diagnostics(State(state): State<AppState>) -> Result<Html<String>, WebError> {
+async fn diagnostics(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+) -> Result<Html<String>, WebError> {
     let (totals, pressure, interruptions, incomplete, accounting, failures, show_origins) =
         tokio::try_join!(
-            queries::diagnostic_totals(&state.pool),
-            queries::pressure_snapshots(&state.pool),
-            queries::diagnostic_evidence(&state.pool, "interruption"),
-            queries::diagnostic_evidence(&state.pool, "incomplete"),
-            queries::diagnostic_evidence(&state.pool, "accounting"),
-            queries::diagnostic_evidence(&state.pool, "failure"),
+            queries::diagnostic_totals(&state.pool, &user.access),
+            queries::pressure_snapshots(&state.pool, &user.access),
+            queries::diagnostic_evidence(&state.pool, "interruption", &user.access),
+            queries::diagnostic_evidence(&state.pool, "incomplete", &user.access),
+            queries::diagnostic_evidence(&state.pool, "accounting", &user.access),
+            queries::diagnostic_evidence(&state.pool, "failure", &user.access),
             queries::show_origins(&state.pool),
         )
         .map_err(|error| WebError::database("load diagnostics", error))?;
@@ -592,8 +601,12 @@ async fn diagnostics(State(state): State<AppState>) -> Result<Html<String>, WebE
 
 async fn health(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Query(query): Query<HealthQuery>,
 ) -> Result<Html<String>, WebError> {
+    if !user.access.is_admin() {
+        return Err(WebError::forbidden());
+    }
     let page = bounded_page(query.page, "validate health page")?;
     let (mut snapshot, show_origins) = tokio::try_join!(
         crate::health::snapshot(
@@ -623,7 +636,13 @@ async fn health(
     ))
 }
 
-async fn metrics(State(state): State<AppState>) -> Result<Response, WebError> {
+async fn metrics(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+) -> Result<Response, WebError> {
+    if !user.access.is_admin() {
+        return Err(WebError::forbidden());
+    }
     let body = crate::metrics::render(&state.pool)
         .await
         .map_err(|error| WebError::database("load operational metrics", error))?;
@@ -687,6 +706,7 @@ impl UsageQuery {
 
 async fn sessions(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
@@ -699,7 +719,7 @@ async fn sessions(
         filters.host = None;
         filters.user = None;
     }
-    let values = queries::filter_values(&state.pool, show_origins, &state.projects)
+    let values = queries::filter_values(&state.pool, show_origins, &state.projects, &user.access)
         .await
         .map_err(|error| WebError::database("load filter options", error))?;
     let query_filters = filters.as_query();
@@ -708,6 +728,7 @@ async fn sessions(
         &state.pool,
         &query_filters,
         &state.projects,
+        &user.access,
         i64::from(page - 1) * SESSION_PAGE_SIZE as i64,
     )
     .await
@@ -898,6 +919,7 @@ fn valid_date(value: &str) -> bool {
 
 async fn session(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path(stable_id): Path<String>,
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
@@ -912,8 +934,8 @@ async fn session(
     let show_origin = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
-    let row = load_session(&state.pool, &stable_id, &state.projects).await?;
-    let live = queries::live_status(&state.pool, &stable_id)
+    let row = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
+    let live = queries::live_status(&state.pool, &stable_id, &user.access)
         .await
         .map_err(|error| WebError::database("load live reader status", error))?
         .ok_or_else(WebError::not_found)?
@@ -971,10 +993,11 @@ async fn session(
 
 async fn live_status(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path(stable_id): Path<String>,
 ) -> Result<Json<LiveStatus>, WebError> {
     Ok(Json(
-        queries::live_status(&state.pool, &stable_id)
+        queries::live_status(&state.pool, &stable_id, &user.access)
             .await
             .map_err(|error| WebError::database("load live reader status", error))?
             .ok_or_else(WebError::not_found)?
@@ -994,11 +1017,12 @@ async fn live_reader_script() -> impl IntoResponse {
 
 async fn turn_history(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path(stable_id): Path<String>,
     Query(query): Query<TurnHistoryQuery>,
 ) -> Result<Html<String>, WebError> {
     let page = bounded_page(query.page, "validate turn page")?;
-    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let mut rows = queries::session_turns(
         &state.pool,
         session.id,
@@ -1027,9 +1051,10 @@ async fn turn_history(
 
 async fn postmortem(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path((stable_id, format)): Path<(String, String)>,
 ) -> Result<Response, WebError> {
-    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let row = queries::postmortem(&state.pool, session.id)
         .await
         .map_err(|error| WebError::database("load postmortem", error))?;
@@ -1064,8 +1089,9 @@ async fn load_session(
     pool: &SqlitePool,
     stable_id: &str,
     projects: &crate::projects::ProjectConfig,
+    access: &crate::auth::AccessScope,
 ) -> Result<SessionRow, WebError> {
-    queries::session(pool, stable_id, projects)
+    queries::session(pool, stable_id, projects, access)
         .await
         .map_err(|error| WebError::database("load session", error))?
         .ok_or_else(WebError::not_found)
@@ -1073,11 +1099,12 @@ async fn load_session(
 
 async fn message(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
     let part = bounded_page(query.part, "validate message part")?;
-    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
     let message = queries::message_chunk(&state.pool, session.id, sequence, offset)
         .await
@@ -1115,29 +1142,32 @@ async fn message(
 
 async fn tool_call(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
-    tool_detail(state, stable_id, sequence, query.part, false).await
+    tool_detail(state, user.access, stable_id, sequence, query.part, false).await
 }
 
 async fn tool_result(
     State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
     Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
-    tool_detail(state, stable_id, sequence, query.part, true).await
+    tool_detail(state, user.access, stable_id, sequence, query.part, true).await
 }
 
 async fn tool_detail(
     state: AppState,
+    access: crate::auth::AccessScope,
     stable_id: String,
     sequence: i64,
     requested_part: Option<u32>,
     result: bool,
 ) -> Result<Html<String>, WebError> {
     let part = bounded_page(requested_part, "validate tool detail part")?;
-    let session = load_session(&state.pool, &stable_id, &state.projects).await?;
+    let session = load_session(&state.pool, &stable_id, &state.projects, &access).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
     let item = if result {
         queries::tool_result_chunk(&state.pool, session.id, sequence, offset).await
@@ -1233,6 +1263,16 @@ struct WebError {
     error_code: Option<String>,
 }
 impl WebError {
+    fn forbidden() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            public_message: "administrator access required",
+            operation: "authorize administrator route",
+            error_kind: "forbidden",
+            error_code: None,
+        }
+    }
+
     fn authentication(operation: &'static str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1457,7 +1497,7 @@ mod tests {
         let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
             .await
             .unwrap();
-        crate::auth::create_account(&state, "test", &password)
+        crate::auth::create_account(&state, "test", &password, None)
             .await
             .unwrap();
         let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -1677,7 +1717,7 @@ mod tests {
         let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
             .await
             .unwrap();
-        crate::auth::create_account(&state, "alice", &password_file)
+        crate::auth::create_account(&state, "alice", &password_file, None)
             .await
             .unwrap();
         let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -1787,6 +1827,207 @@ mod tests {
         assert_eq!(
             account_response(&expiring, &cookie).await.status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn source_permissions_scope_every_data_surface_and_update_immediately() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+
+        async fn get(app: &Router, cookie: &str, path: &str) -> (StatusCode, String) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = String::from_utf8(
+                to_bytes(response.into_body(), 256 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            (status, body)
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "synthetic-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "admin", &password_file, None)
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "viewer", &password_file, None)
+            .await
+            .unwrap();
+        let source_a = format!("src_{}", "a".repeat(64));
+        let source_b = format!("src_{}", "b".repeat(64));
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agents(id,kind,display_name) VALUES(1,'codex','Codex')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("INSERT INTO hosts(id,name) VALUES(1,'host-a'),(2,'host-b'); INSERT INTO users(id,host_id,os_user) VALUES(1,1,'user-a'),(2,2,'user-b'); INSERT INTO ingest_runs(id,finished_at,status,files_seen,errors) VALUES(1,CURRENT_TIMESTAMP,'complete',2,0);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agent_instances(id,agent_id,user_id,source_home,source_key) VALUES(1,1,1,'/synthetic/a',?),(2,1,2,'/synthetic/b',?)")
+            .bind(&source_a)
+            .bind(&source_b)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("INSERT INTO source_files(id,instance_id,ingest_run_id,path,kind,observed_at,parse_status) VALUES(1,1,1,'a.jsonl','sessions',CURRENT_TIMESTAMP,'ok'),(2,2,1,'b.jsonl','sessions',CURRENT_TIMESTAMP,'ok'); INSERT INTO sessions(id,instance_id,source_file_id,external_id,stable_id,started_at,status,title) VALUES(1,1,1,'native-a','ses_allowed','2026-01-01T00:00:00Z','complete','Allowed synthetic session'),(2,2,2,'native-b','ses_denied','2026-01-02T00:00:00Z','complete','Denied synthetic session'); INSERT INTO messages(session_id,sequence,role,content) VALUES(1,1,'user','allowed searchable phrase'),(2,1,'user','denied searchable phrase'); INSERT INTO tool_calls(id,session_id,sequence,call_id,tool_name,arguments) VALUES(1,1,3,'call-a','allowed-tool','allowed arguments'),(2,2,3,'call-b','denied-tool','denied arguments'); INSERT INTO tool_results(session_id,source_sequence,call_id,tool_call_id,output,outcome) VALUES(1,4,'call-a',1,'allowed output','observed'),(2,4,'call-b',2,'denied output','observed'); INSERT INTO usage_events(session_id,source_sequence,sequence_known,timestamp,delta_total_tokens,cumulative_present) VALUES(1,2,1,'2026-01-01T00:01:00Z',11,1),(2,2,1,'2026-01-02T00:01:00Z',99,1); INSERT INTO turns(session_id,ordinal,start_sequence,start_kind,end_sequence,outcome) VALUES(1,0,1,'user',2,'interrupted'),(2,0,1,'user',2,'interrupted');")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = session_router(pool, state.clone());
+        let admin_cookie = login_cookie(&app, "admin", "synthetic-password").await;
+        let viewer_cookie = login_cookie(&app, "viewer", "synthetic-password").await;
+
+        let (status, empty_viewer) = get(&app, &viewer_cookie, "/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!empty_viewer.contains("Allowed synthetic session"));
+        assert!(!empty_viewer.contains("Denied synthetic session"));
+        let (_, account) = get(&app, &viewer_cookie, "/account").await;
+        assert!(account.contains("<dd>viewer</dd>"));
+        assert!(account.contains("<dd>0</dd>"));
+        crate::auth::grant_source(&state, "viewer", &source_a)
+            .await
+            .unwrap();
+
+        let (status, admin_sessions) = get(&app, &admin_cookie, "/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(admin_sessions.contains("Allowed synthetic session"));
+        assert!(admin_sessions.contains("Denied synthetic session"));
+
+        let (status, viewer_sessions) = get(&app, &viewer_cookie, "/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(viewer_sessions.contains("Allowed synthetic session"));
+        assert!(!viewer_sessions.contains("Denied synthetic session"));
+        assert!(viewer_sessions.contains("host-a"));
+        assert!(!viewer_sessions.contains("host-b"));
+
+        let (_, search) = get(&app, &viewer_cookie, "/sessions?q=searchable").await;
+        assert!(search.contains("Allowed synthetic session"));
+        assert!(search.contains("allowed"));
+        assert!(!search.contains("Denied synthetic session"));
+        assert!(!search.contains("denied"));
+        let (_, usage) = get(&app, &viewer_cookie, "/usage?group=session").await;
+        assert!(usage.contains("Allowed synthetic session"));
+        assert!(!usage.contains("Denied synthetic session"));
+        assert!(!usage.contains(">99<"));
+        let (_, diagnostics) = get(&app, &viewer_cookie, "/diagnostics").await;
+        assert!(diagnostics.contains("Allowed synthetic session"));
+        assert!(!diagnostics.contains("Denied synthetic session"));
+
+        for path in [
+            "/sessions/ses_denied",
+            "/sessions/ses_denied/live-status",
+            "/sessions/ses_denied/turns",
+            "/sessions/ses_denied/postmortem/json",
+            "/sessions/ses_denied/messages/1",
+            "/sessions/ses_denied/tools/3",
+            "/sessions/ses_denied/results/4",
+        ] {
+            assert_eq!(
+                get(&app, &viewer_cookie, path).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        for path in [
+            "/sessions/ses_allowed",
+            "/sessions/ses_allowed/live-status",
+            "/sessions/ses_allowed/turns",
+            "/sessions/ses_allowed/postmortem/json",
+            "/sessions/ses_allowed/messages/1",
+            "/sessions/ses_allowed/tools/3",
+            "/sessions/ses_allowed/results/4",
+        ] {
+            assert_eq!(
+                get(&app, &viewer_cookie, path).await.0,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            get(&app, &viewer_cookie, "/health").await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            get(&app, &viewer_cookie, "/metrics").await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            get(&app, &viewer_cookie, "/future-data").await.0,
+            StatusCode::FORBIDDEN
+        );
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let viewer_basic = format!("Basic {}", STANDARD.encode("viewer:synthetic-password"));
+        let basic_metrics = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, viewer_basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(basic_metrics.status(), StatusCode::FORBIDDEN);
+        assert_eq!(get(&app, &admin_cookie, "/health").await.0, StatusCode::OK);
+        assert_eq!(get(&app, &admin_cookie, "/metrics").await.0, StatusCode::OK);
+
+        crate::auth::revoke_source(&state, "viewer", &source_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
+            StatusCode::NOT_FOUND
+        );
+        crate::auth::grant_source(&state, "viewer", &source_b)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_denied").await.0,
+            StatusCode::OK
+        );
+        crate::auth::set_role(&state, "viewer", crate::auth::AccountRole::Admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/metrics").await.0,
+            StatusCode::OK
+        );
+        crate::auth::set_role(&state, "viewer", crate::auth::AccountRole::Viewer)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
+            StatusCode::NOT_FOUND
         );
     }
 

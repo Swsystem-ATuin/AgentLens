@@ -14,7 +14,7 @@ mod usage;
 mod web;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -73,6 +73,9 @@ enum AccountCommand {
         username: String,
         #[arg(long)]
         password_file: PathBuf,
+        /// Account role; the first account defaults to admin and later accounts to viewer.
+        #[arg(long, value_enum)]
+        role: Option<RoleArg>,
     },
     /// Replace an account password and revoke all existing sessions.
     ResetPassword {
@@ -96,6 +99,47 @@ enum AccountCommand {
         #[arg(long)]
         username: String,
     },
+    /// Change whether an account administers all data or sees granted sources.
+    SetRole {
+        #[arg(long)]
+        username: String,
+        #[arg(long, value_enum)]
+        role: RoleArg,
+    },
+    /// Allow a viewer to read one stable source ID.
+    GrantSource {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        source_id: String,
+    },
+    /// Remove a viewer's access to one stable source ID.
+    RevokeSource {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        source_id: String,
+    },
+    /// Print an account's role and stable source grants.
+    Permissions {
+        #[arg(long)]
+        username: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RoleArg {
+    Admin,
+    Viewer,
+}
+
+impl From<RoleArg> for auth::AccountRole {
+    fn from(value: RoleArg) -> Self {
+        match value {
+            RoleArg::Admin => Self::Admin,
+            RoleArg::Viewer => Self::Viewer,
+        }
+    }
 }
 
 #[tokio::main]
@@ -156,8 +200,10 @@ async fn main() -> Result<()> {
                 AccountCommand::Create {
                     username,
                     password_file,
+                    role,
                 } => {
-                    auth::create_account(&state, &username, &password_file).await?;
+                    auth::create_account(&state, &username, &password_file, role.map(Into::into))
+                        .await?;
                     println!("application account created");
                 }
                 AccountCommand::ResetPassword {
@@ -178,6 +224,32 @@ async fn main() -> Result<()> {
                 AccountCommand::RevokeSessions { username } => {
                     auth::revoke_sessions(&state, &username).await?;
                     println!("application account sessions revoked");
+                }
+                AccountCommand::SetRole { username, role } => {
+                    auth::set_role(&state, &username, role.into()).await?;
+                    println!("application account role changed");
+                }
+                AccountCommand::GrantSource {
+                    username,
+                    source_id,
+                } => {
+                    auth::grant_source(&state, &username, &source_id).await?;
+                    println!("application account source access granted");
+                }
+                AccountCommand::RevokeSource {
+                    username,
+                    source_id,
+                } => {
+                    auth::revoke_source(&state, &username, &source_id).await?;
+                    println!("application account source access revoked");
+                }
+                AccountCommand::Permissions { username } => {
+                    let permissions = auth::account_permissions(&state, &username).await?;
+                    println!("username: {}", permissions.username);
+                    println!("role: {}", permissions.role);
+                    for source_key in permissions.source_keys {
+                        println!("source: {source_key}");
+                    }
                 }
             }
         }

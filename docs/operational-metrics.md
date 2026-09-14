@@ -2,7 +2,7 @@
 
 Agent Lens exposes an authenticated Prometheus text-format endpoint at `/metrics`. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
 
-The endpoint accepts a current browser session or HTTP Basic credentials for an enabled individual application account. Other browser routes use server-side session authentication. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
+The endpoint requires an administrator account and accepts either its current browser session or HTTP Basic credentials. Other browser routes use server-side session authentication. Valid viewer credentials receive `403`. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
 
 ```bash
 curl --user alice http://127.0.0.1:3001/metrics
@@ -21,7 +21,7 @@ scrape_configs:
       password_file: /run/secrets/agent_lens_password
 ```
 
-The username and password files contain one provisioned Agent Lens account's credentials. Password reset or account disablement takes effect on the next scrape. Use HTTPS through the documented reverse-proxy boundary if the scraper is not on the same trusted host. The core UI and all CLI workflows remain independent of Prometheus. No Grafana dashboard is included because there is no deployment requirement for one.
+The username and password files contain one provisioned Agent Lens administrator's credentials. Password reset, account disablement, or role demotion takes effect on the next scrape. Use HTTPS through the documented reverse-proxy boundary if the scraper is not on the same trusted host. The core UI and all CLI workflows remain independent of Prometheus. No Grafana dashboard is included because there is no deployment requirement for one.
 
 ## Metric contract
 

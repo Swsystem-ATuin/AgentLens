@@ -1,6 +1,6 @@
 # Ordered turn and model history
 
-Each session page links to an authenticated, paginated turn history at `/sessions/{public_id}/turns`. The newest 50 turns are shown first, with stable links back to the source-ordered timeline evidence that supports each boundary or model observation.
+Each session page links to an authenticated, source-authorized, paginated turn history at `/sessions/{public_id}/turns`. Ungranted and unknown public IDs both return `404`. The newest 50 turns are shown first, with stable links back to the source-ordered timeline evidence that supports each boundary or model observation.
 
 ## Boundary and outcome semantics
 
