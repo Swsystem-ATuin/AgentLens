@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-14
+
 ### Fixed
 
 - Incremental refresh now traverses source directories deterministically and converges legacy duplicate winners on the active-area, lexically earliest logical source selected by a fresh rebuild. The snapshot publication, append validation, retry, I/O, memory, and performance contracts are documented and regression-tested.
