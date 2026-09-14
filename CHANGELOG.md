@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- A multi-stage Docker build now produces a minimal non-root runtime image with persistent SQLite paths, an all-interface web bind, and documented read-only source mounts.
+
 ## [0.1.0] - 2026-09-14
 
 ### Fixed

@@ -119,6 +119,47 @@ cargo run -- --database /tmp/agent-lens.sqlite rebuild --data data
 
 The `AGENT_LENS_DB` environment variable provides the same override.
 
+## Run with Docker
+
+Build the production image from the repository root:
+
+```bash
+docker build --tag agent-lens .
+docker volume create agent-lens-state
+```
+
+The image runs as an unprivileged user, listens on port 3001, and stores both SQLite databases in `/var/lib/agent-lens`. Keep that directory on the named volume. Mount copied agent homes read-only at `/data`; the raw files remain external to the image and are never modified.
+
+Build the disposable index from the mounted sources:
+
+```bash
+docker run --rm \
+  --mount type=bind,src="$(pwd)/data",dst=/data,readonly \
+  --mount type=volume,src=agent-lens-state,dst=/var/lib/agent-lens \
+  agent-lens rebuild --data /data
+```
+
+Create the first account using an owner-only password file from the host. The short-lived shell copies standard input to an owner-only file inside the container so the unprivileged runtime user can read it without weakening host file permissions:
+
+```bash
+docker run --rm --interactive \
+  --mount type=volume,src=agent-lens-state,dst=/var/lib/agent-lens \
+  --entrypoint /bin/sh agent-lens \
+  -c 'umask 077; password_file=/tmp/account-password; cp /dev/stdin "$password_file"; exec /usr/local/bin/agent-lens account create --username alice --password-file "$password_file"' \
+  < /tmp/agent-lens-password
+```
+
+Then run the authenticated web application:
+
+```bash
+docker run --detach --name agent-lens \
+  --publish 3001:3001 \
+  --mount type=volume,src=agent-lens-state,dst=/var/lib/agent-lens \
+  agent-lens
+```
+
+Open <http://127.0.0.1:3001/sessions>. Run future `refresh --data /data` commands in a temporary container with the same read-only data mount and state volume. Stop the web container before a full `rebuild`, because rebuild publication refuses to replace an index held open by the server. For HTTPS deployments, terminate TLS at a reverse proxy and add `--env AGENT_LENS_SECURE_COOKIES=true` to the serving container.
+
 ## Development
 
 Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). Update the roadmap as work is completed or requirements change. The former TODO checklist has been consolidated into the roadmap.
