@@ -18,7 +18,7 @@ use password_hash::{
 use serde::Deserialize;
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use subtle::ConstantTimeEq;
 use tower_sessions::{Session, session_store::ExpiredDeletion};
@@ -184,7 +184,8 @@ impl StateStore {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -898,6 +899,11 @@ mod tests {
         let state = StateStore::open(&dir.path().join("state.sqlite"))
             .await
             .unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&state.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
         let first = password_file(dir.path(), "first synthetic passphrase\n");
         create_account(&state, "Synthetic.User", &first, None)
             .await

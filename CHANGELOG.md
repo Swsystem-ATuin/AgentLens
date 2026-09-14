@@ -83,6 +83,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- The conditional database-backend review retains SQLite for the measured single-host, single-index-writer deployment and now explicitly enables WAL for persistent account/session state. PostgreSQL migration triggers are multiple instances, remote storage, sustained independent writers, measured lock/checkpoint pressure, or managed HA/replication/PITR requirements; the decision records SQLite-specific migration work and evidence gates.
+
 - The pre-account-management framework gate retains Rust/Axum and selects established server-side session authentication with locally provisioned Argon2id-backed application identities. The decision records the Django comparison, separate persistent-state boundary, provisioning/recovery and revocation expectations, OIDC deferral, implementation security contract, and evidence that would trigger reconsideration.
 
 - Web database reads and transcript/view-model construction now live in focused query and presentation modules. Route handlers are limited to request validation, orchestration, error mapping, and template responses without changing existing routes or rendering behavior.

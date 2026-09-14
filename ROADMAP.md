@@ -111,7 +111,7 @@ These remain conditional decisions from TODO, not scheduled rewrites.
 
 - [x] **C1 — Evaluate HTMX when adding partial page updates.** Consider it for filtering and transcript section loading while retaining server-rendered HTML. Introduce a separate frontend only if interactive timelines, graphs, or substantial browser state justify it. Evaluated with R4.2: HTMX would not remove the custom state-restoration/retry logic, so the implementation retains server-rendered HTML plus one dependency-free same-origin script; [decision and load measurements](docs/live-reading.md#polling-and-c1-decision).
 
-- [ ] **C2 — Reassess SQLite if deployment changes.** Evaluate PostgreSQL if multiple application instances or substantial concurrent writing become requirements; retain SQLite for the current local importer and predominantly read-only browsing workload.
+- [x] **C2 — Reassess SQLite if deployment changes.** Retain two local SQLite databases for the current single-instance, one-index-writer, predominantly read-only workload. WAL permits readers during the refresh writer, and the persistent account/session state now explicitly uses WAL for short session writes. PostgreSQL remains the target when multiple instances, remote storage, sustained independent writers, measured lock/checkpoint pressure, or managed HA/replication/PITR becomes real. The decision inventories SQLite-specific migration work and required evidence in the [database backend reassessment](docs/database-backend-decision.md).
 
 ## Deferred or excluded scope
 
