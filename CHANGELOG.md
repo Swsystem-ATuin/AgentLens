@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Agent Lens is now licensed under GPL-3.0-or-later so recipients can use and continue developing it while distributed derivatives preserve notices, identify modifications, and provide corresponding source under the same license.
+
 - Source-scoped application authorization now separates all-access administrators from viewers with explicit stable source-ID grants. Lists, search, filter values, usage, diagnostics, transcripts, live status, turns, message/tool details, and postmortem exports are scoped before pagination or aggregation; ungranted session IDs return `404`, installation-wide health and metrics require an administrator, and future routes fail closed for viewers. Local role/grant commands, immediate policy updates, a separate owner-only schema-v2 state store, migration of existing accounts to administrators, rebuild-stable mappings, backup/recovery documentation, and two-account regressions complete M2 and M3.
 
 - Individual application accounts now replace the interim shared plaintext credential file. Local CLI provisioning and recovery store salted Argon2id hashes in a separate owner-only persistent SQLite state database; browser login/logout use CSRF-protected opaque server-side sessions with identifier rotation, 30-minute inactivity and 12-hour absolute expiry, restart persistence, and immediate password-reset, disablement, and account-wide revocation enforcement. Every data route remains protected, and `/metrics` supports individual-account Basic authentication for Prometheus.
@@ -83,7 +85,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
-- Release preparation now includes Cargo package metadata, source-package and locked release-build verification, an atomic `main`/annotated-tag publication procedure, and a 0.1.0 upgrade checklist. Public distribution remains gated on choosing a repository license.
+- Release preparation now includes Cargo package metadata, source-package and locked release-build verification, an atomic `main`/annotated-tag publication procedure, and a 0.1.0 upgrade checklist.
 
 - The conditional database-backend review retains SQLite for the measured single-host, single-index-writer deployment and now explicitly enables WAL for persistent account/session state. PostgreSQL migration triggers are multiple instances, remote storage, sustained independent writers, measured lock/checkpoint pressure, or managed HA/replication/PITR requirements; the decision records SQLite-specific migration work and evidence gates.
 

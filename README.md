@@ -149,9 +149,15 @@ During initial MVP development, changes are committed directly to `develop`:
 
 Record user-visible changes in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`. Releases follow semantic versioning where practical.
 
-The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.1.0 upgrade checklist. The repository does not yet declare a software license; choose one before public distribution or registry publication.
+The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.1.0 upgrade checklist.
 
 The canonical repository is <https://git.s4w.uk/infrastructure/agent-lens.git>.
+
+## License
+
+Copyright (C) 2026 Agent Lens contributors.
+
+Agent Lens is free software licensed under the [GNU General Public License, version 3 or later](LICENSE). You may use, modify, and redistribute it under those terms. Distributed modified versions must preserve the required notices, identify their changes, and make the corresponding source available under the same license.
 
 ## Privacy and data handling
 

@@ -1,6 +1,6 @@
 # Release procedure
 
-Agent Lens releases are cut from `develop` only after the intended roadmap scope is complete. `main` contains released commits, and annotated `vMAJOR.MINOR.PATCH` tags identify releases. The repository does not currently declare a software license or publish to crates.io; choose and add a license before any public distribution or registry publication.
+Agent Lens releases are cut from `develop` only after the intended roadmap scope is complete. `main` contains released commits, and annotated `vMAJOR.MINOR.PATCH` tags identify releases. Source and binary distributions are licensed under GPL-3.0-or-later and must include the license, corresponding source, preserved notices, and identification of modifications required by those terms. The project does not currently publish to crates.io.
 
 ## Prepare a release
 
