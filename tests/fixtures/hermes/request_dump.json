@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-01-01T00:00:05Z",
+  "session_id": "hermes-synthetic",
+  "reason": "max_retries_exhausted",
+  "request": {
+    "method": "POST",
+    "url": "https://synthetic.invalid/v1/responses",
+    "headers": {"Authorization": "PRIVATE_SENTINEL_CREDENTIAL"},
+    "body": {
+      "model": "synthetic-hermes-model",
+      "instructions": "Synthetic Hermes instructions",
+      "input": [
+        {"role": "user", "content": "Synthetic Hermes request", "future": true},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Synthetic prior response"}]},
+        {"type": "function_call", "call_id": "call-synthetic", "name": "synthetic_tool", "arguments": "{\"path\":\"synthetic\"}"},
+        {"type": "function_call_output", "call_id": "call-synthetic", "output": "Synthetic tool result"},
+        {"type": "reasoning", "encrypted_content": "PRIVATE_SENTINEL_REASONING"},
+        {"role": "assistant", "content": "Synthetic final prior response"}
+      ],
+      "tools": [{"name": "ignored_definition", "api_key": "PRIVATE_SENTINEL_INLINE_KEY"}],
+      "future": true
+    }
+  },
+  "error": {
+    "message": "PRIVATE_SENTINEL_ERROR",
+    "response_text": "PRIVATE_SENTINEL_RESPONSE",
+    "future": true
+  },
+  "future": true
+}

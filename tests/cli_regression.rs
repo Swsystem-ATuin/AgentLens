@@ -611,6 +611,75 @@ async fn cli_rebuild_and_refresh_accept_a_direct_gemini_home() {
 }
 
 #[tokio::test]
+async fn cli_rebuild_and_refresh_accept_a_direct_hermes_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("single/.hermes/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("request_dump_synthetic.json"),
+        include_bytes!("fixtures/hermes/request_dump.json"),
+    )
+    .unwrap();
+    let rebuild = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "rebuild",
+            "--data",
+            "single/.hermes",
+        ],
+    );
+    assert!(
+        rebuild.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rebuild.stdout)
+            .contains("indexed 1 sessions, 5 messages, 1 tool calls")
+    );
+
+    let refresh = run(
+        dir.path(),
+        &[
+            "--database",
+            "index.sqlite",
+            "refresh",
+            "--data",
+            "single/.hermes",
+        ],
+    );
+    assert!(
+        refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+    assert!(String::from_utf8_lossy(&refresh.stdout).contains("skipped 1 unchanged files"));
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("index.sqlite")),
+        )
+        .await
+        .unwrap();
+    let origin: (String, String, String, String) = sqlx::query_as(
+        "SELECT a.kind,h.name,u.os_user,(SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1) FROM agent_instances i JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        origin,
+        (
+            "hermes".into(),
+            String::new(),
+            String::new(),
+            "direct-hermes-home".into()
+        )
+    );
+}
+
+#[tokio::test]
 async fn failed_cli_rebuild_preserves_the_previous_index_and_removes_staging_files() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("sources/host/user/.codex/sessions");

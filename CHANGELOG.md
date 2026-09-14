@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file. The format 
 
 - A multi-stage Docker build now produces a minimal non-root runtime image with persistent SQLite paths, an all-interface web bind, and documented read-only source mounts.
 
+- Hermes Agent request snapshots are now discovered from `.hermes/sessions/request_dump_*.json`, including OpenAI Responses and Anthropic message/tool shapes, direct-home operation, sanitised failure presentation, and strict exclusion of transport credentials and error payloads. Canonical Hermes `state.db` ingestion remains unsupported and is documented explicitly.
+
 ## [0.1.0] - 2026-09-14
 
 ### Fixed

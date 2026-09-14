@@ -77,6 +77,133 @@ fn write_gemini_fixture(root: &Path) -> PathBuf {
     path
 }
 
+fn write_hermes_fixture(root: &Path) -> PathBuf {
+    let directory = root.join("synthetic-host/synthetic-user/.hermes/sessions");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("request_dump_synthetic.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../../tests/fixtures/hermes/request_dump.json"),
+    )
+    .unwrap();
+    std::fs::write(directory.join("sessions.json"), "{\"_README\":\"ignored\"}").unwrap();
+    path
+}
+
+#[tokio::test]
+async fn hermes_request_snapshots_are_indexed_without_transport_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hermes_fixture(dir.path());
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (
+            report.sessions,
+            report.messages,
+            report.tool_calls,
+            report.files_seen,
+            report.errors,
+        ),
+        (1, 5, 1, 1, 0)
+    );
+    let session: (String, String, Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT a.kind,s.title,s.model,s.status,s.ended_at FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        session,
+        (
+            "hermes".into(),
+            "Synthetic Hermes request".into(),
+            Some("synthetic-hermes-model".into()),
+            "unknown".into(),
+            None,
+        )
+    );
+    let messages: Vec<(String, String)> =
+        sqlx::query_as("SELECT role,content FROM messages ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        messages,
+        [
+            ("developer".into(), "Synthetic Hermes instructions".into()),
+            ("user".into(), "Synthetic Hermes request".into()),
+            ("assistant".into(), "Synthetic prior response".into()),
+            ("assistant".into(), "Synthetic final prior response".into()),
+            (
+                "error".into(),
+                "Hermes provider request failed after retry attempts.".into(),
+            ),
+        ]
+    );
+    let tool: (String, String, String) = sqlx::query_as(
+        "SELECT c.tool_name,r.output,r.outcome FROM tool_calls c JOIN tool_results r ON r.tool_call_id=c.id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tool,
+        (
+            "synthetic_tool".into(),
+            "Synthetic tool result".into(),
+            "observed".into(),
+        )
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws('',s.raw_metadata,group_concat(m.raw_json,''),group_concat(c.raw_json,''),group_concat(r.raw_json,'')) FROM sessions s LEFT JOIN messages m ON m.session_id=s.id LEFT JOIN tool_calls c ON c.session_id=s.id LEFT JOIN tool_results r ON r.session_id=s.id GROUP BY s.id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("PRIVATE_SENTINEL"));
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().skipped,
+        1
+    );
+
+    let rebuilt = crate::db::open(&dir.path().join("rebuilt.sqlite"))
+        .await
+        .unwrap();
+    ingest_data_root(&rebuilt, dir.path()).await.unwrap();
+    assert_eq!(projection(&pool).await, projection(&rebuilt).await);
+}
+
+#[tokio::test]
+async fn malformed_hermes_snapshots_are_localized_without_exposing_content() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hermes_fixture(dir.path());
+    let invalid = dir
+        .path()
+        .join("synthetic-host/synthetic-user/.hermes/sessions/request_dump_invalid.json");
+    std::fs::write(&invalid, "{PRIVATE_SENTINEL_MALFORMED").unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.sessions, report.files_seen, report.errors),
+        (1, 2, 1)
+    );
+    let (status, error): (String, String) = sqlx::query_as(
+        "SELECT parse_status,parse_error FROM source_files WHERE path LIKE '%invalid.json'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "error");
+    assert!(error.contains("parse Hermes request snapshot"));
+    assert!(!error.contains("PRIVATE_SENTINEL"));
+}
+
 #[tokio::test]
 async fn codex_and_gemini_share_views_without_identity_or_projection_collisions() {
     let dir = tempfile::tempdir().unwrap();

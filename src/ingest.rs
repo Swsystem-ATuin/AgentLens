@@ -1,6 +1,6 @@
 use crate::{
     fingerprint::hash_file,
-    sources::{self, Adapter, NormalizedRecord, SourceLayout, codex, gemini},
+    sources::{self, Adapter, NormalizedRecord, SourceLayout, codex, gemini, hermes},
 };
 use anyhow::{Context, Result, ensure};
 use sqlx::{Acquire, SqliteConnection, SqlitePool};
@@ -117,6 +117,11 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                     .into_iter()
                     .map(|path| (path, "chats")),
             ),
+            Adapter::Hermes => {
+                if let Some(path) = hermes::session_root(&home.path)? {
+                    roots.push((path, "sessions"));
+                }
+            }
         }
         for (dir, area) in roots {
             for entry in WalkDir::new(&dir)
@@ -140,6 +145,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                     && match adapter {
                         Adapter::Codex => entry.path().extension().is_some_and(|x| x == "jsonl"),
                         Adapter::Gemini => gemini::is_session_file(entry.path()),
+                        Adapter::Hermes => hermes::is_session_file(entry.path()),
                     }
                 {
                     report.files_seen += 1;
@@ -242,6 +248,7 @@ async fn prune_missing_sources(
             let adapter = match agent_kind.as_str() {
                 codex::KIND => Adapter::Codex,
                 gemini::KIND => Adapter::Gemini,
+                hermes::KIND => Adapter::Hermes,
                 _ => continue,
             };
             let home = Path::new(&home);
@@ -367,6 +374,7 @@ async fn ingest_source(
     let summary = match adapter {
         Adapter::Codex => codex::scan_rollout(path)?,
         Adapter::Gemini => gemini::scan_session(path)?,
+        Adapter::Hermes => hermes::scan_session(path)?,
     };
     if previous.as_ref().is_some_and(|row| row.has_session) {
         ensure!(
@@ -494,6 +502,7 @@ async fn apply_codex_titles(
 enum SourceRecords<'a> {
     Codex(codex::RolloutRecords<'a>),
     Gemini(gemini::SessionRecords),
+    Hermes(hermes::SessionRecords),
 }
 
 impl SourceRecords<'_> {
@@ -501,6 +510,7 @@ impl SourceRecords<'_> {
         match self {
             Self::Codex(records) => records.next_record(),
             Self::Gemini(records) => Ok(records.next_record()),
+            Self::Hermes(records) => Ok(records.next_record()),
         }
     }
 
@@ -508,6 +518,7 @@ impl SourceRecords<'_> {
         match self {
             Self::Codex(records) => records.malformed_lines(),
             Self::Gemini(records) => records.malformed_lines(),
+            Self::Hermes(_) => 0,
         }
     }
 }
@@ -522,6 +533,7 @@ async fn import_source_records(
     let mut records = match adapter {
         Adapter::Codex => SourceRecords::Codex(codex::RolloutRecords::open(path, metadata)?),
         Adapter::Gemini => SourceRecords::Gemini(gemini::SessionRecords::open(path, metadata)?),
+        Adapter::Hermes => SourceRecords::Hermes(hermes::SessionRecords::open(path, metadata)?),
     };
     let mut messages = 0usize;
     let mut tools = 0usize;

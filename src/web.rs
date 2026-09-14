@@ -2090,6 +2090,63 @@ mod tests {
     }
 
     #[test]
+    fn hermes_instructions_and_failures_render_with_ordinary_conversation() {
+        for resumed in [false, true] {
+            let mut messages = Vec::new();
+            if resumed {
+                messages.push(message(0, "user", "Earlier synthetic request"));
+                messages.push(message(1, "assistant", "Earlier synthetic response"));
+            }
+            messages.push(message(2, "developer", "Synthetic Hermes instructions"));
+            messages.push(message(3, "user", "Ordinary synthetic request"));
+            messages.push(message(4, "assistant", "Ordinary synthetic response"));
+            messages.push(message(
+                5,
+                "error",
+                "Hermes provider request failed after retry attempts.",
+            ));
+            let html = SessionTemplate {
+                session: SessionRow {
+                    id: 1,
+                    stable_id: "stable-hermes-session".into(),
+                    agent_kind: "hermes".into(),
+                    external_id: "synthetic-hermes-session".into(),
+                    title: "Synthetic Hermes title".into(),
+                    started_at: None,
+                    last_activity: None,
+                    model: None,
+                    status: None,
+                    cwd: None,
+                    project: None,
+                    archive_state: "unknown".into(),
+                    hostname: "synthetic-host".into(),
+                    os_user: "synthetic-user".into(),
+                    message_count: messages.len() as i64,
+                    match_sequence: None,
+                    match_snippet: None,
+                },
+                segments: group_transcript_for_source(messages, "hermes", false),
+                event_options: vec![],
+                show_origin: true,
+                pagination: no_pagination(),
+                live: test_live_status(),
+            }
+            .render()
+            .expect("Hermes transcript should render");
+            assert!(html.contains("<strong>Hermes instructions</strong>"));
+            assert!(html.contains("<strong>Hermes request failure</strong>"));
+            assert!(html.contains("Ordinary synthetic request"));
+            assert!(html.contains("Ordinary synthetic response"));
+            assert!(html.contains(
+                "<details class=\"message developer\"><summary><strong>Hermes instructions</strong>"
+            ));
+            assert!(html.contains(
+                "<details class=\"message error\" open><summary><strong>Hermes request failure</strong>"
+            ));
+        }
+    }
+
+    #[test]
     fn multi_agent_role_is_collapsed_in_rendered_initial_and_resumed_transcripts() {
         for resumed in [false, true] {
             let mut messages = Vec::new();

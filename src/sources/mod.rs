@@ -6,11 +6,13 @@ use std::{
 
 pub(crate) mod codex;
 pub(crate) mod gemini;
+pub(crate) mod hermes;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Adapter {
     Codex,
     Gemini,
+    Hermes,
 }
 
 impl Adapter {
@@ -18,6 +20,7 @@ impl Adapter {
         match self {
             Self::Codex => codex::KIND,
             Self::Gemini => gemini::KIND,
+            Self::Hermes => hermes::KIND,
         }
     }
 
@@ -25,6 +28,7 @@ impl Adapter {
         match self {
             Self::Codex => codex::DISPLAY_NAME,
             Self::Gemini => gemini::DISPLAY_NAME,
+            Self::Hermes => hermes::DISPLAY_NAME,
         }
     }
 
@@ -32,6 +36,7 @@ impl Adapter {
         match self {
             Self::Codex => codex::PARSER_VERSION,
             Self::Gemini => gemini::PARSER_VERSION,
+            Self::Hermes => hermes::PARSER_VERSION,
         }
     }
 
@@ -41,6 +46,9 @@ impl Adapter {
                 .iter()
                 .position(|candidate| *candidate == kind),
             Self::Gemini => gemini::SOURCE_AREAS
+                .iter()
+                .position(|candidate| *candidate == kind),
+            Self::Hermes => hermes::SOURCE_AREAS
                 .iter()
                 .position(|candidate| *candidate == kind),
         }
@@ -93,9 +101,14 @@ pub(crate) fn discover(root: &Path) -> Result<DiscoveredSources> {
     if root.file_name() == Some(std::ffi::OsStr::new(".gemini")) {
         return gemini::discover(root);
     }
+    if root.file_name() == Some(std::ffi::OsStr::new(".hermes")) {
+        return hermes::discover(root);
+    }
     let mut codex = codex::discover(root)?;
     let gemini = gemini::discover(root)?;
+    let hermes = hermes::discover(root)?;
     codex.homes.extend(gemini.homes);
+    codex.homes.extend(hermes.homes);
     Ok(codex)
 }
 
@@ -113,6 +126,7 @@ pub(crate) fn home_belongs_to_root(
                     == Some(std::ffi::OsStr::new(match adapter {
                         Adapter::Codex => ".codex",
                         Adapter::Gemini => ".gemini",
+                        Adapter::Hermes => ".hermes",
                     }))
         }),
     }
@@ -244,6 +258,7 @@ pub(crate) fn classify_message(
     match source_kind {
         codex::KIND => codex::classify_message(role, content, before_conversation),
         gemini::KIND => gemini::classify_message(role),
+        hermes::KIND => hermes::classify_message(role),
         _ => None,
     }
 }

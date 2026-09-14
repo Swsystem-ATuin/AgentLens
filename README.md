@@ -1,17 +1,18 @@
 # Agent Lens
 
-Agent Lens is a local, self-hosted Rust web application for indexing and browsing coding-agent activity from Codex and Gemini CLI. Its storage model uses generic agents, hosts, users, and instances so additional sources can be added without imposing Codex-specific concepts.
+Agent Lens is a local, self-hosted Rust web application for indexing and browsing coding-agent activity from Codex, Gemini CLI, and Hermes Agent request snapshots. Its storage model uses generic agents, hosts, users, and instances so additional sources can be added without imposing source-specific concepts.
 
 Raw agent files are always the source of truth. The SQLite database is a disposable local index: it can be deleted and rebuilt without changing anything under `data/`.
 
 SQLite remains a deliberate fit for the current single-host, single-index-writer deployment. Both the disposable index and persistent application state use WAL; PostgreSQL is deferred until multiple instances, remote storage, sustained concurrent writers, measured lock pressure, or managed high-availability requirements exist. See the [database backend reassessment](docs/database-backend-decision.md).
 
-Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Discovery, raw-record interpretation, parser versioning, capabilities, and presentation markers live in Codex and Gemini modules; normalized database orchestration and web rendering remain source-neutral. The web application separately defines its [route, query, and presentation boundaries](docs/web-architecture.md).
+Source-specific behavior is isolated behind [source adapters](docs/source-adapters.md). Discovery, raw-record interpretation, parser versioning, capabilities, and presentation markers live in dedicated Codex, Gemini, and Hermes modules; normalized database orchestration and web rendering remain source-neutral. The web application separately defines its [route, query, and presentation boundaries](docs/web-architecture.md).
 
 ## Current functionality
 
-- Discovers Codex and Gemini CLI homes at `data/{hostname}/{os_user}/{.codex,.gemini}/`, or accepts one `.codex/` or `.gemini/` directory directly.
+- Discovers Codex, Gemini CLI, and Hermes Agent homes at `data/{hostname}/{os_user}/{.codex,.gemini,.hermes}/`, or accepts one agent home directly.
 - Reads Codex rollout JSONL from `sessions/` and `archived_sessions/`, plus Gemini current JSONL and legacy JSON chats from `tmp/*/chats/`, recursively. See the [Gemini adapter contract](docs/gemini-adapter.md).
+- Reads Hermes `sessions/request_dump_*.json` provider-failure snapshots while excluding transport headers, URLs, error bodies, encrypted reasoning, and arbitrary unknown fields from SQLite. These snapshots are request attempts rather than canonical completed sessions; `state.db` is not yet read. See the [Hermes adapter contract](docs/hermes-adapter.md).
 - Normalizes sessions, ordered turns and model evidence, messages, tool calls and ordered results, token usage, source files, and ingest runs into SQLite.
 - Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes or agents remain distinct. Session lists show readable titles from valid source advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).
 - Groups working directories into optional host-aware projects and subprojects at request time. The sessions browser includes agent, project, archive-state, and inclusive activity-date filters alongside host, user, model, and status; it displays last observed activity and uses stable activity/public-ID ordering. See [project navigation and date semantics](docs/projects.md).
@@ -42,7 +43,7 @@ Transcript setup blocks are labeled and collapsed even after a session resumes, 
 ## Requirements
 
 - A recent stable Rust toolchain
-- Copied Codex and/or Gemini CLI homes beneath `data/{hostname}/{os_user}/`, or one copied `.codex/` or `.gemini/` home
+- Copied Codex, Gemini CLI, and/or Hermes Agent homes beneath `data/{hostname}/{os_user}/`, or one copied agent home
 
 Fixture data and generated SQLite indexes are intentionally excluded from Git.
 
@@ -55,6 +56,7 @@ cargo run -- refresh --data data
 # Or index one home without host/user labels:
 cargo run -- refresh --data /path/to/.codex
 cargo run -- refresh --data /path/to/.gemini
+cargo run -- refresh --data /path/to/.hermes
 ```
 
 Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, hard file errors, partial files, malformed lines, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort and roll back projection changes while retaining only a fixed sanitised failure code and timing for health diagnostics. A direct-agent refresh is accepted for a new index or one whose previous successful rebuild/refresh used the same direct-home adapter. Changing adapters or switching between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
@@ -72,6 +74,7 @@ cargo run -- rebuild --data data
 # Or rebuild from one home without host/user labels:
 cargo run -- rebuild --data /path/to/.codex
 cargo run -- rebuild --data /path/to/.gemini
+cargo run -- rebuild --data /path/to/.hermes
 ```
 
 Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.

@@ -494,7 +494,9 @@ pub(super) async fn show_origins(pool: &SqlitePool) -> Result<bool, sqlx::Error>
     )
     .fetch_optional(pool)
     .await?;
-    Ok(layout.as_deref() != Some("direct-codex-home"))
+    Ok(!layout
+        .as_deref()
+        .is_some_and(|layout| layout.starts_with("direct-")))
 }
 
 pub(super) async fn usage_totals(

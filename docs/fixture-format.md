@@ -34,3 +34,5 @@ Messages beginning `<turn_aborted>` occur with user or developer roles and indic
 These raw-format and presentation rules are implemented only in the [Codex source adapter](source-adapters.md). Generic ingestion receives normalized records and does not inspect these Codex fields or markers.
 
 Gemini CLI uses a separate, upstream-pinned [raw format and capability contract](gemini-adapter.md) with its own tiny synthetic fixture.
+
+Hermes Agent request snapshots use a separate [sanitised adapter contract](hermes-adapter.md) and tiny synthetic fixture. The checked-in fixture contains credential sentinels only in fields that must be excluded from SQLite; it contains no observed private values.
