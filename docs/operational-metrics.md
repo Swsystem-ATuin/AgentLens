@@ -2,10 +2,10 @@
 
 Agent Lens exposes an authenticated Prometheus text-format endpoint at `/metrics`. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
 
-The endpoint uses the same mandatory HTTP Basic authentication as every web route. It does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
+The endpoint accepts a current browser session or HTTP Basic credentials for an enabled individual application account. Other browser routes use server-side session authentication. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
 
 ```bash
-curl --user agent-lens-user http://127.0.0.1:3001/metrics
+curl --user alice http://127.0.0.1:3001/metrics
 ```
 
 Prometheus supports Basic authentication when scraping targets. A local example using separately protected secret files is:
@@ -21,7 +21,7 @@ scrape_configs:
       password_file: /run/secrets/agent_lens_password
 ```
 
-Use HTTPS through the documented reverse-proxy boundary if the scraper is not on the same trusted host. The core UI and all CLI workflows remain independent of Prometheus. No Grafana dashboard is included because there is no deployment requirement for one.
+The username and password files contain one provisioned Agent Lens account's credentials. Password reset or account disablement takes effect on the next scrape. Use HTTPS through the documented reverse-proxy boundary if the scraper is not on the same trusted host. The core UI and all CLI workflows remain independent of Prometheus. No Grafana dashboard is included because there is no deployment requirement for one.
 
 ## Metric contract
 

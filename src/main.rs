@@ -22,6 +22,13 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, env = "AGENT_LENS_DB", default_value = "agent-lens.sqlite")]
     database: PathBuf,
+    /// Persistent accounts and sessions, kept separate from the disposable index.
+    #[arg(
+        long,
+        env = "AGENT_LENS_STATE_DB",
+        default_value = "agent-lens-state.sqlite"
+    )]
+    state_database: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
@@ -40,15 +47,54 @@ enum Command {
     },
     /// Print a sanitised diagnostic summary of the disposable index.
     Health,
+    /// Provision, recover, disable, or revoke application accounts.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
     /// Serve the local web UI.
     Serve {
         #[arg(long, default_value = "127.0.0.1:3001")]
         bind: String,
-        #[arg(long, env = "AGENT_LENS_AUTH_FILE", default_value = "auth.local.json")]
-        auth_file: PathBuf,
         /// Optional project roots and display timezone JSON file.
         #[arg(long, env = "AGENT_LENS_PROJECTS_FILE")]
         projects_file: Option<PathBuf>,
+        /// Mark session cookies Secure; required behind an HTTPS reverse proxy.
+        #[arg(long, env = "AGENT_LENS_SECURE_COOKIES")]
+        secure_cookies: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Create a locally managed application account.
+    Create {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        password_file: PathBuf,
+    },
+    /// Replace an account password and revoke all existing sessions.
+    ResetPassword {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        password_file: PathBuf,
+    },
+    /// Disable an account and revoke all existing sessions.
+    Disable {
+        #[arg(long)]
+        username: String,
+    },
+    /// Re-enable a disabled account without restoring revoked sessions.
+    Enable {
+        #[arg(long)]
+        username: String,
+    },
+    /// Revoke every current session for an account.
+    RevokeSessions {
+        #[arg(long)]
+        username: String,
     },
 }
 
@@ -104,15 +150,47 @@ async fn main() -> Result<()> {
             let pool = db::open(&cli.database).await?;
             print!("{}", health::cli_report(&pool).await?);
         }
+        Command::Account { command } => {
+            let state = auth::StateStore::open(&cli.state_database).await?;
+            match command {
+                AccountCommand::Create {
+                    username,
+                    password_file,
+                } => {
+                    auth::create_account(&state, &username, &password_file).await?;
+                    println!("application account created");
+                }
+                AccountCommand::ResetPassword {
+                    username,
+                    password_file,
+                } => {
+                    auth::reset_password(&state, &username, &password_file).await?;
+                    println!("application account password reset; sessions revoked");
+                }
+                AccountCommand::Disable { username } => {
+                    auth::set_enabled(&state, &username, false).await?;
+                    println!("application account disabled; sessions revoked");
+                }
+                AccountCommand::Enable { username } => {
+                    auth::set_enabled(&state, &username, true).await?;
+                    println!("application account enabled");
+                }
+                AccountCommand::RevokeSessions { username } => {
+                    auth::revoke_sessions(&state, &username).await?;
+                    println!("application account sessions revoked");
+                }
+            }
+        }
         Command::Serve {
             bind,
-            auth_file,
             projects_file,
+            secure_cookies,
         } => {
-            let credentials = auth::Credentials::load(&auth_file)?;
             let projects = projects::ProjectConfig::load(projects_file.as_deref())?;
+            let state = auth::StateStore::open(&cli.state_database).await?;
+            state.require_active_account().await?;
             let pool = db::open(&cli.database).await?;
-            web::serve(pool, &bind, credentials, projects).await?;
+            web::serve(pool, &bind, state, projects, secure_cookies).await?;
         }
     }
     Ok(())

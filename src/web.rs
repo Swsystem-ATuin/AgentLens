@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use askama::Template;
 use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
+    Form, Json, Router,
+    extract::{Extension, Path, Query, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -36,6 +36,33 @@ const MAX_SESSION_PAGE: u32 = 100_000;
 struct AppState {
     pool: SqlitePool,
     projects: crate::projects::ProjectConfig,
+    auth: crate::auth::AuthState,
+}
+
+#[derive(Deserialize, Default)]
+struct LoginQuery {
+    return_to: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LogoutForm {
+    csrf_token: String,
+}
+
+#[derive(Template)]
+#[template(path = "login.html")]
+struct LoginTemplate {
+    csrf_token: String,
+    return_to: String,
+    failed: bool,
+}
+
+#[derive(Template)]
+#[template(path = "account.html")]
+struct AccountTemplate {
+    username: String,
+    csrf_token: String,
 }
 
 #[cfg(test)]
@@ -256,16 +283,24 @@ fn router(pool: SqlitePool, credentials: crate::auth::Credentials) -> Router {
     router_with_projects(pool, credentials, crate::projects::ProjectConfig::default())
 }
 
-fn router_with_projects(
+fn app_routes(
     pool: SqlitePool,
-    credentials: crate::auth::Credentials,
+    auth: crate::auth::AuthState,
     projects: crate::projects::ProjectConfig,
 ) -> Router {
+    let state = AppState {
+        pool,
+        projects,
+        auth: auth.clone(),
+    };
     Router::new()
+        .route("/login", get(login).post(login_submit))
         .route(
             "/",
             get(|| async { axum::response::Redirect::temporary("/sessions") }),
         )
+        .route("/account", get(account))
+        .route("/logout", post(logout))
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
         .route("/diagnostics", get(diagnostics))
@@ -279,33 +314,169 @@ fn router_with_projects(
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
         .route("/sessions/{id}/results/{sequence}", get(tool_result))
         .route("/assets/live-reader.js", get(live_reader_script))
-        // Query strings can contain user-supplied private values. Keep request
-        // spans useful without recording the URI in server diagnostics.
+        // Query strings can contain private filter values. Keep request spans
+        // useful without recording the URI or authentication material.
         .layer(TraceLayer::new_for_http().make_span_with(
             |request: &axum::http::Request<axum::body::Body>| {
                 tracing::info_span!("http_request", method = %request.method())
             },
         ))
-        .with_state(AppState { pool, projects })
-        .layer(axum::middleware::from_fn_with_state(
-            credentials,
-            crate::auth::require_auth,
-        ))
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(auth, crate::auth::require_auth))
+        .layer(axum::middleware::from_fn(crate::auth::security_headers))
+}
+
+#[cfg(test)]
+fn router_with_projects(
+    pool: SqlitePool,
+    credentials: crate::auth::Credentials,
+    projects: crate::projects::ProjectConfig,
+) -> Router {
+    use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer, cookie::time::Duration};
+    let auth = crate::auth::test_state(credentials);
+    app_routes(pool, auth, projects).layer(
+        SessionManagerLayer::new(MemoryStore::default())
+            .with_secure(false)
+            .with_expiry(Expiry::OnInactivity(Duration::minutes(
+                crate::auth::INACTIVITY_MINUTES,
+            )))
+            .with_always_save(true),
+    )
+}
+
+#[cfg(test)]
+fn session_router(pool: SqlitePool, state: crate::auth::StateStore) -> Router {
+    use tower_sessions::{Expiry, SessionManagerLayer, cookie::time::Duration};
+    let layer = SessionManagerLayer::new(state.sessions)
+        .with_name("agent_lens_session")
+        .with_secure(false)
+        .with_expiry(Expiry::OnInactivity(Duration::minutes(
+            crate::auth::INACTIVITY_MINUTES,
+        )))
+        .with_always_save(true);
+    app_routes(pool, state.auth, crate::projects::ProjectConfig::default()).layer(layer)
 }
 
 pub async fn serve(
     pool: SqlitePool,
     bind: &str,
-    credentials: crate::auth::Credentials,
+    state_store: crate::auth::StateStore,
     projects: crate::projects::ProjectConfig,
+    secure_cookies: bool,
 ) -> Result<()> {
-    let app = router_with_projects(pool, credentials, projects);
+    use tower_sessions::{Expiry, SessionManagerLayer, cookie::time::Duration};
+    let session_layer = SessionManagerLayer::new(state_store.sessions)
+        .with_name("agent_lens_session")
+        .with_http_only(true)
+        .with_same_site(tower_sessions::cookie::SameSite::Lax)
+        .with_secure(secure_cookies)
+        .with_expiry(Expiry::OnInactivity(Duration::minutes(
+            crate::auth::INACTIVITY_MINUTES,
+        )))
+        .with_always_save(true);
+    let app = app_routes(pool, state_store.auth, projects).layer(session_layer);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
     tracing::info!(%bind, "Agent Lens listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn login(
+    session: tower_sessions::Session,
+    Query(query): Query<LoginQuery>,
+) -> Result<Html<String>, WebError> {
+    let csrf_token = crate::auth::csrf_token(&session)
+        .await
+        .map_err(|_| WebError::authentication("prepare login"))?;
+    let return_to =
+        crate::auth::safe_return_to(query.return_to.as_deref().unwrap_or("/sessions")).to_owned();
+    Ok(Html(
+        LoginTemplate {
+            csrf_token,
+            return_to,
+            failed: query.error.is_some(),
+        }
+        .render()
+        .map_err(|error| WebError::template("render login", error))?,
+    ))
+}
+
+async fn login_submit(
+    State(state): State<AppState>,
+    session: tower_sessions::Session,
+    Form(form): Form<crate::auth::LoginForm>,
+) -> Result<Response, WebError> {
+    if !crate::auth::verify_csrf(&session, &form.csrf_token)
+        .await
+        .map_err(|_| WebError::authentication("verify login request"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    let return_to = crate::auth::safe_return_to(&form.return_to).to_owned();
+    if let Some((user, generation)) = state
+        .auth
+        .authenticate(&form.username, &form.password)
+        .await
+        .map_err(|_| WebError::authentication("authenticate account"))?
+    {
+        crate::auth::establish_session(&session, &user, generation)
+            .await
+            .map_err(|_| WebError::authentication("establish session"))?;
+        return Ok(axum::response::Redirect::to(&return_to).into_response());
+    }
+    let location = format!(
+        "/login?error=1&return_to={}",
+        percent_encode_component(&return_to)
+    );
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)], "").into_response())
+}
+
+async fn account(
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+) -> Result<Html<String>, WebError> {
+    let csrf_token = crate::auth::csrf_token(&session)
+        .await
+        .map_err(|_| WebError::authentication("prepare account page"))?;
+    Ok(Html(
+        AccountTemplate {
+            username: user.username,
+            csrf_token,
+        }
+        .render()
+        .map_err(|error| WebError::template("render account page", error))?,
+    ))
+}
+
+async fn logout(
+    session: tower_sessions::Session,
+    Form(form): Form<LogoutForm>,
+) -> Result<Response, WebError> {
+    if !crate::auth::verify_csrf(&session, &form.csrf_token)
+        .await
+        .map_err(|_| WebError::authentication("verify logout request"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    session
+        .flush()
+        .await
+        .map_err(|_| WebError::authentication("end session"))?;
+    Ok(axum::response::Redirect::to("/login").into_response())
+}
+
+fn percent_encode_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 async fn usage(
@@ -1062,6 +1233,26 @@ struct WebError {
     error_code: Option<String>,
 }
 impl WebError {
+    fn authentication(operation: &'static str) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "Internal server error",
+            operation,
+            error_kind: "authentication",
+            error_code: None,
+        }
+    }
+
+    fn invalid_auth_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            public_message: "invalid authentication request",
+            operation: "validate authentication request",
+            error_kind: "invalid_input",
+            error_code: None,
+        }
+    }
+
     fn not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -1166,29 +1357,113 @@ impl IntoResponse for WebError {
 mod tests {
     use super::*;
 
+    async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let html = String::from_utf8(
+            to_bytes(login.into_body(), 32 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let csrf = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let body = format!(
+            "username={username}&password={password}&csrf_token={csrf}&return_to=%2Fsessions"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn account_response(app: &Router, cookie: &str) -> Response {
+        use axum::{
+            body::Body,
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn every_route_requires_authentication() {
         use axum::{
             body::{Body, to_bytes},
             http::{Request, header},
         };
-        use base64::{Engine, engine::general_purpose::STANDARD};
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("auth.json");
-        std::fs::write(
-            &config,
-            r#"{"username":"test","password":"synthetic:password"}"#,
-        )
-        .unwrap();
+        let password = dir.path().join("password");
+        std::fs::write(&password, "synthetic:password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "test", &password)
+            .await
+            .unwrap();
         let pool = crate::db::open(&dir.path().join("index.sqlite"))
             .await
             .unwrap();
-        let app = router(pool, crate::auth::Credentials::load(&config).unwrap());
-        let valid = format!("Basic {}", STANDARD.encode("test:synthetic:password"));
-        let wrong_password = format!("Basic {}", STANDARD.encode("test:wrong"));
-        let wrong_user = format!("Basic {}", STANDARD.encode("wrong:synthetic:password"));
+        let app = session_router(pool, state);
         for path in [
             "/",
             "/sessions",
@@ -1196,6 +1471,8 @@ mod tests {
             "/diagnostics",
             "/health",
             "/metrics",
+            "/account",
+            "/logout",
             "/sessions/1",
             "/sessions/1/live-status",
             "/sessions/1/turns",
@@ -1206,36 +1483,149 @@ mod tests {
             "/sessions/invalid",
             "/missing",
         ] {
-            for auth in [
-                None,
-                Some("Basic !!!"),
-                Some("Bearer token"),
-                Some(wrong_password.as_str()),
-                Some(wrong_user.as_str()),
-            ] {
-                let mut request = Request::builder().uri(path);
-                if let Some(auth) = auth {
-                    request = request.header(header::AUTHORIZATION, auth);
-                }
-                let response = app
-                    .clone()
-                    .oneshot(request.body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
-                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
-                assert!(
-                    response.headers()[header::WWW_AUTHENTICATE]
-                        .to_str()
-                        .unwrap()
-                        .starts_with("Basic ")
-                );
-                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-                assert_eq!(
-                    to_bytes(response.into_body(), 1024).await.unwrap(),
-                    "Authentication required"
-                );
-            }
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                to_bytes(response.into_body(), 1024).await.unwrap(),
+                "Authentication required"
+            );
         }
+
+        let redirected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions?model=private")
+                    .header(header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirected.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            redirected.headers()[header::LOCATION],
+            "/login?return_to=%2Fsessions%3Fmodel%3Dprivate"
+        );
+        let invalid_csrf = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "username=test&password=synthetic%3Apassword&csrf_token=wrong",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_csrf.status(), StatusCode::BAD_REQUEST);
+
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let metrics_basic = format!("Basic {}", STANDARD.encode("test:synthetic:password"));
+        let metrics = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, metrics_basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), StatusCode::OK);
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login?return_to=%2Fsessions%3Fmodel%3Dx")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let anonymous_cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let login_html = String::from_utf8(
+            to_bytes(login.into_body(), 32 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let csrf = login_html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let failed_body = format!(
+            "username=test&password=wrong-password&csrf_token={csrf}&return_to=%2Fsessions"
+        );
+        let failed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &anonymous_cookie)
+                    .body(Body::from(failed_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), StatusCode::SEE_OTHER);
+        let location = failed.headers()[header::LOCATION].to_str().unwrap();
+        assert!(location.starts_with("/login?error=1"));
+        assert!(!location.contains("test"));
+        assert!(!location.contains("wrong-password"));
+        let body = format!(
+            "username=test&password=synthetic%3Apassword&csrf_token={csrf}&return_to=%2Fsessions%3Fmodel%3Dx"
+        );
+        let logged_in = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &anonymous_cookie)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logged_in.status(), StatusCode::SEE_OTHER);
+        assert_eq!(logged_in.headers()[header::LOCATION], "/sessions?model=x");
+        let authenticated_cookie = logged_in.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_ne!(
+            anonymous_cookie, authenticated_cookie,
+            "login must rotate the session identifier"
+        );
+
         for (path, status) in [
             ("/", StatusCode::TEMPORARY_REDIRECT),
             ("/sessions", StatusCode::OK),
@@ -1243,6 +1633,7 @@ mod tests {
             ("/diagnostics", StatusCode::OK),
             ("/health", StatusCode::OK),
             ("/metrics", StatusCode::OK),
+            ("/account", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/live-status", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
@@ -1256,7 +1647,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .uri(path)
-                        .header(header::AUTHORIZATION, &valid)
+                        .header(header::COOKIE, &authenticated_cookie)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -1265,18 +1656,138 @@ mod tests {
             assert_eq!(response.status(), status);
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         }
-        let response = app
+    }
+
+    #[tokio::test]
+    async fn sessions_survive_restart_and_support_logout_expiry_disable_and_revocation() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "synthetic-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "alice", &password_file)
+            .await
+            .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = session_router(pool.clone(), state.clone());
+
+        let cookie = login_cookie(&app, "alice", "synthetic-password").await;
+        let restarted = session_router(pool.clone(), state.clone());
+        let account = account_response(&restarted, &cookie).await;
+        assert_eq!(account.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(account.into_body(), 32 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("Signed in as <strong>alice</strong>"));
+
+        crate::auth::revoke_sessions(&state, "alice").await.unwrap();
+        assert_eq!(
+            account_response(&restarted, &cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        crate::auth::set_enabled(&state, "alice", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            account_response(&restarted, &cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        crate::auth::set_enabled(&state, "alice", true)
+            .await
+            .unwrap();
+
+        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        sqlx::query("UPDATE tower_sessions SET expiry_date=0")
+            .execute(crate::auth::state_pool(&state))
+            .await
+            .unwrap();
+        assert_eq!(
+            account_response(&restarted, &cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        let account = account_response(&restarted, &cookie).await;
+        let html = String::from_utf8(
+            to_bytes(account.into_body(), 32 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let csrf = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let invalid = restarted
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/sessions")
-                    .header(header::AUTHORIZATION, &valid)
-                    .header(header::AUTHORIZATION, &valid)
-                    .body(Body::empty())
+                    .method("POST")
+                    .uri("/logout")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("csrf_token=wrong"))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            account_response(&restarted, &cookie).await.status(),
+            StatusCode::OK
+        );
+        let logout = restarted
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!("csrf_token={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::SEE_OTHER);
+        assert_eq!(logout.headers()[header::LOCATION], "/login");
+        assert_eq!(
+            account_response(&restarted, &cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut short_state = state.clone();
+        crate::auth::expire_immediately(&mut short_state);
+        let expiring = session_router(pool, short_state);
+        let cookie = login_cookie(&expiring, "alice", "synthetic-password").await;
+        assert_eq!(
+            account_response(&expiring, &cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]

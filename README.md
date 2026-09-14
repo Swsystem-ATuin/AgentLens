@@ -21,6 +21,7 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 - Surfaces timestamped [context-window and rate-limit observations](docs/diagnostics.md) with source scope and explicit recent/stale/expired/unavailable states. The diagnostics page provides provenance-backed counts for interruptions, incomplete turns, accounting anomalies, and observed tool failures without claiming live allowance, task failure, or quality scores.
 - Reports sanitised [source health](docs/source-health.md) in an authenticated, 100-row-paged view and a local `health` CLI command, including ingest duration, partial/error counts, fixed failure reason codes, and recent/stale/clock-skew observations without exposing paths or parser details. The same document defines the security and retention gates for a future opt-in push collector; no remote collector is enabled today.
 - Exposes authenticated, fixed-cardinality [operational metrics](docs/operational-metrics.md) at `/metrics` in Prometheus text format. Gauges cover indexed ingest/source health and supported session, usage, tool, and turn outcomes without labels containing prompts, identities, paths, raw model values, or tool data.
+- Provides individually authenticated [application accounts](docs/application-authentication.md) with Argon2id password hashes, server-side sessions, login/logout, inactivity and absolute expiry, and immediate disable/reset/revocation enforcement. Accounts and sessions use a persistent SQLite state file separate from the disposable agent index; local administrator commands own provisioning and recovery.
 - Downloads deterministic, authenticated [redacted postmortems](docs/redacted-postmortems.md) from each visible session as Markdown or JSON. Exports contain aggregate outcomes, usage, model/tool observations, and bounded evidence-gap reason codes while excluding transcript bodies, paths, credentials, and other sensitive source fields.
 - Reduces cumulative token snapshots into deterministic per-field session totals without double-counting. The authenticated [historical usage dashboard](docs/usage-dashboard.md) groups observation-time deltas by day, week, or month and by session, model, project, host, user, or agent, with cache ratios, recent transcript drill-down, anomaly counts, and explicit partial/unavailable evidence. See [token accounting semantics](docs/token-accounting.md).
 - Continues past malformed lines and files, retaining valid records and reporting hard failures, partial files, and malformed-line totals separately.
@@ -72,14 +73,15 @@ cargo run -- rebuild --data /path/to/.gemini
 
 Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.
 
-Create the local authentication file and restrict its permissions:
+Create the first application account. Put the password in an owner-only temporary file so it does not appear in shell history or process arguments:
 
 ```bash
-(umask 077; cp -n auth.example.json auth.local.json)
-chmod 600 auth.local.json
+(umask 077; touch /tmp/agent-lens-password)
+${EDITOR:-vi} /tmp/agent-lens-password
+cargo run -- account create --username alice --password-file /tmp/agent-lens-password
 ```
 
-Edit `auth.local.json` and fill in `username` and `password` with your own username and a strong, unique password. Both placeholders are deliberately empty, so the example cannot be used to log in. The real file and its backup files (`auth.local.json.*`) are ignored by Git; never commit credentials.
+Remove the temporary file through your operating system's secure local workflow after provisioning. Password files must be UTF-8, owner-only on Unix, at least 15 characters and at most 1,024 bytes after one trailing newline is removed, and contain no control characters. The password is stored only as a salted Argon2id PHC hash.
 
 Start the web server:
 
@@ -96,13 +98,13 @@ cargo run -- serve --projects-file projects.local.json
 
 `AGENT_LENS_PROJECTS_FILE` provides the same override. Project configuration is loaded only by the web server, never written into copied agent homes, and does not require a refresh or rebuild. Restart the server after editing it.
 
-The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>, <http://127.0.0.1:3001/usage>, <http://127.0.0.1:3001/diagnostics>, <http://127.0.0.1:3001/health>, or the machine-readable <http://127.0.0.1:3001/metrics>. Use `--bind` to select another address. Your browser will prompt for the configured username and password before any route is accessible.
+The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>, <http://127.0.0.1:3001/usage>, <http://127.0.0.1:3001/diagnostics>, <http://127.0.0.1:3001/health>, or the machine-readable <http://127.0.0.1:3001/metrics>. Use `--bind` to select another address. Browser requests are redirected to `/login`; the Account page provides explicit logout.
 
-Authentication is required for every route, including direct transcript URLs. Missing, malformed, or empty credentials prevent startup. Responses use `Cache-Control: no-store`. Credentials and optional project configuration are loaded at startup; restart after changing them. Browsers may retain Basic authentication credentials until closed; there is no application logout button.
+Authentication is required for every data route, including direct transcript URLs, lazy fragments, exports, health, and metrics. The server refuses to start without an enabled account. Browser sessions expire after 30 minutes of inactivity or 12 hours total. Responses use `Cache-Control: no-store`; login and logout are CSRF-protected and login rotates the opaque session identifier.
 
-To use a file outside the checkout, pass `--auth-file /path/to/auth.json` after `serve`, or set `AGENT_LENS_AUTH_FILE`. Protect that file with owner-only permissions and keep it out of source control. Refresh and rebuild commands do not require credentials. The checkpoint schema upgrade is automatic; no manual migration is needed.
+Accounts and sessions default to the owner-only `agent-lens-state.sqlite`, independently of the disposable `agent-lens.sqlite` index. Use the global `--state-database /path/to/state.sqlite` option or `AGENT_LENS_STATE_DB` for another location. Password reset, disable, enable, and account-wide session revocation use `account reset-password`, `account disable`, `account enable`, and `account revoke-sessions`; see the [complete operational contract](docs/application-authentication.md). Refresh and rebuild never need or modify application accounts.
 
-For access beyond localhost, put the app behind an HTTPS reverse proxy and restrict direct access to the backend port. [HTTP Basic authentication requires HTTPS to protect credentials in transit](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Authentication). The built-in server serves HTTP and defaults to loopback.
+For access beyond localhost, put the app behind an HTTPS reverse proxy, restrict direct access to the backend port, and pass `serve --secure-cookies` (or set `AGENT_LENS_SECURE_COOKIES=true`). The built-in server serves HTTP and defaults to loopback; credentials and cookies require HTTPS in transit.
 
 Use a different database path when needed:
 
@@ -118,7 +120,7 @@ Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP
 
 Internal web failures return a generic response. Server diagnostics record only an allowlisted operation, error category, optional database/IO code, HTTP status, and request method; they do not record request URIs, authorization headers, database error text, or transcript content. See [web error handling](docs/web-errors.md).
 
-Multiple application users are a planned requirement. The [framework and authentication decision](docs/multi-user-framework-decision.md) retains Rust/Axum and selects locally provisioned identities with established server-side session and Argon2id components. The current shared username/password remains interim; individual login/logout, access permissions, and persistent account storage are tracked in M1-M3 and are not implemented yet.
+Multiple application identities, login/logout, expiry, recovery, and revocation are implemented following the [framework decision](docs/multi-user-framework-decision.md). M2 access permissions are not implemented yet: every enabled account currently sees the same indexed data, so shared deployment remains gated on choosing and enforcing that policy. M3 will complete the persistent permission-mapping and backup contract before durable per-user features.
 
 ```bash
 cargo fmt --check

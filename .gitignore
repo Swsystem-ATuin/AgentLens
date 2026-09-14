@@ -1,6 +1,7 @@
 /target/
 /agent-observer.sqlite*
 /agent-lens.sqlite*
+/agent-lens-state.sqlite*
 /.agent-lens.sqlite.rebuild-*
 /data/*
 !/data/.gitkeep

@@ -9,7 +9,7 @@ The corresponding server event contains only fields selected by the application:
 - an optional database code or I/O error kind, never the database error message;
 - the HTTP status and request method.
 
-HTTP trace spans intentionally omit the URI and headers. This prevents filter values in query strings and Basic authentication credentials from being copied into logs. Operators should use the operation, category, and safe code to diagnose the affected subsystem, then inspect local database and process health separately. Do not add arbitrary error display strings, request headers, request URIs, transcript values, or SQL parameter values to web logs.
+HTTP trace spans intentionally omit the URI and headers. This prevents filter values in query strings, session cookies, CSRF tokens, and metrics Basic credentials from being copied into logs. Operators should use the operation, category, and safe code to diagnose the affected subsystem, then inspect local database and process health separately. Do not add arbitrary error display strings, request headers, request URIs, transcript values, or SQL parameter values to web logs.
 
 Not-found and malformed-request responses remain distinct client errors. They do not render an internal error source.
 

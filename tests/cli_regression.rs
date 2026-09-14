@@ -7,7 +7,8 @@ fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_agent-lens"))
         .current_dir(root)
         .env_remove("AGENT_LENS_DB")
-        .env_remove("AGENT_LENS_AUTH_FILE")
+        .env_remove("AGENT_LENS_STATE_DB")
+        .env_remove("AGENT_LENS_SECURE_COOKIES")
         .env_remove("AGENT_LENS_PROJECTS_FILE")
         .args(args)
         .output()
@@ -15,56 +16,215 @@ fn run(root: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn serve_help_documents_loopback_port_and_authentication_options() {
+fn serve_help_documents_loopback_port_and_session_options() {
     let dir = tempfile::tempdir().unwrap();
+    let root = run(dir.path(), &["--help"]);
+    assert!(root.status.success());
+    let root_output = String::from_utf8(root.stdout).unwrap();
+    assert!(root_output.contains("--state-database"));
+    assert!(root_output.contains("AGENT_LENS_STATE_DB"));
+    assert!(root_output.contains("account"));
     let result = run(dir.path(), &["serve", "--help"]);
     assert!(result.status.success());
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(output.contains("127.0.0.1:3001"));
-    assert!(output.contains("--auth-file"));
-    assert!(output.contains("AGENT_LENS_AUTH_FILE"));
+    assert!(output.contains("--secure-cookies"));
+    assert!(output.contains("AGENT_LENS_SECURE_COOKIES"));
     assert!(output.contains("--projects-file"));
     assert!(output.contains("AGENT_LENS_PROJECTS_FILE"));
+
+    let account = run(dir.path(), &["account", "--help"]);
+    assert!(account.status.success());
+    let account_output = String::from_utf8(account.stdout).unwrap();
+    for command in [
+        "create",
+        "reset-password",
+        "disable",
+        "enable",
+        "revoke-sessions",
+    ] {
+        assert!(account_output.contains(command));
+    }
 }
 
 #[test]
 fn invalid_project_configuration_fails_before_opening_the_database() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
-        dir.path().join("auth.json"),
-        r#"{"username":"synthetic","password":"password"}"#,
-    )
-    .unwrap();
-    std::fs::write(
         dir.path().join("projects.json"),
         r#"{"timezone":"named/zone"}"#,
     )
     .unwrap();
-    let result = run(
-        dir.path(),
-        &[
-            "serve",
-            "--auth-file",
-            "auth.json",
-            "--projects-file",
-            "projects.json",
-        ],
-    );
+    let result = run(dir.path(), &["serve", "--projects-file", "projects.json"]);
     assert!(!result.status.success());
     assert!(!dir.path().join("agent-lens.sqlite").exists());
 }
 
 #[test]
-fn missing_or_invalid_authentication_fails_before_creating_database() {
+fn serving_without_an_active_account_fails_before_creating_the_index() {
     let dir = tempfile::tempdir().unwrap();
-    for config in [None, Some("{}"), Some(r#"{"username":"","password":""}"#)] {
-        if let Some(config) = config {
-            std::fs::write(dir.path().join("auth.local.json"), config).unwrap();
-        }
-        let result = run(dir.path(), &["serve"]);
-        assert!(!result.status.success());
-        assert!(!dir.path().join("agent-lens.sqlite").exists());
+    let result = run(dir.path(), &["serve"]);
+    assert!(!result.status.success());
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
+    assert!(dir.path().join("agent-lens-state.sqlite").exists());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("account create"));
+}
+
+#[tokio::test]
+async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_touching_index() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let password = dir.path().join("password");
+    std::fs::write(&password, "first synthetic passphrase\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let create = run(
+        dir.path(),
+        &[
+            "account",
+            "create",
+            "--username",
+            "alice",
+            "--password-file",
+            "password",
+        ],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(dir.path().join("agent-lens-state.sqlite"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let source = dir.path().join("sources/host/user/.codex/sessions");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("session.jsonl"),
+        include_bytes!("fixtures/codex/rollout.jsonl"),
+    )
+    .unwrap();
+    let rebuild = run(dir.path(), &["rebuild", "--data", "sources"]);
+    assert!(
+        rebuild.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+
+    let state = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        dir.path().join("agent-lens-state.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let (hash, enabled, generation): (String, bool, i64) = sqlx::query_as(
+        "SELECT password_hash,enabled,session_generation FROM accounts WHERE username='alice'",
+    )
+    .fetch_one(&state)
+    .await
+    .unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains("first synthetic passphrase"));
+    assert!(enabled);
+    assert_eq!(generation, 0);
+    state.close().await;
+
+    #[cfg(unix)]
+    {
+        let exposed = dir.path().join("exposed-password");
+        std::fs::write(&exposed, "private synthetic passphrase").unwrap();
+        std::fs::set_permissions(&exposed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let rejected = run(
+            dir.path(),
+            &[
+                "account",
+                "create",
+                "--username",
+                "bob",
+                "--password-file",
+                "exposed-password",
+            ],
+        );
+        assert!(!rejected.status.success());
+        assert!(
+            !String::from_utf8_lossy(&rejected.stderr).contains("private synthetic passphrase")
+        );
     }
+
+    let duplicate = run(
+        dir.path(),
+        &[
+            "account",
+            "create",
+            "--username",
+            "ALICE",
+            "--password-file",
+            "password",
+        ],
+    );
+    assert!(!duplicate.status.success());
+    assert!(!String::from_utf8_lossy(&duplicate.stderr).contains("first synthetic passphrase"));
+    assert!(
+        run(
+            dir.path(),
+            &["account", "revoke-sessions", "--username", "alice"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(dir.path(), &["account", "disable", "--username", "alice"])
+            .status
+            .success()
+    );
+    assert!(
+        run(dir.path(), &["account", "enable", "--username", "alice"])
+            .status
+            .success()
+    );
+
+    std::fs::write(&password, "second synthetic passphrase").unwrap();
+    let reset = run(
+        dir.path(),
+        &[
+            "account",
+            "reset-password",
+            "--username",
+            "alice",
+            "--password-file",
+            "password",
+        ],
+    );
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let state = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        dir.path().join("agent-lens-state.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let (hash, enabled, generation): (String, bool, i64) = sqlx::query_as(
+        "SELECT password_hash,enabled,session_generation FROM accounts WHERE username='alice'",
+    )
+    .fetch_one(&state)
+    .await
+    .unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains("second synthetic passphrase"));
+    assert!(enabled);
+    assert_eq!(generation, 3);
 }
 
 #[test]

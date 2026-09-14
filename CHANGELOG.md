@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Individual application accounts now replace the interim shared plaintext credential file. Local CLI provisioning and recovery store salted Argon2id hashes in a separate owner-only persistent SQLite state database; browser login/logout use CSRF-protected opaque server-side sessions with identifier rotation, 30-minute inactivity and 12-hour absolute expiry, restart persistence, and immediate password-reset, disablement, and account-wide revocation enforcement. Every data route remains protected, and `/metrics` supports individual-account Basic authentication for Prometheus.
+
 - An authenticated Prometheus text endpoint now exposes fixed-cardinality gauges for indexed ingest/source health, sessions, supported token totals and availability, tool results, and turn outcomes. Labels use bounded agent/status/freshness/outcome/reason/model-family vocabularies and exclude transcript content, identities, paths, raw model values, parser details, and tool data. Restart/rebuild semantics, Basic-auth scraping, response bounds, and a 100,000-session synthetic load measurement are documented and regression-tested.
 
 - Gemini CLI is now a second source adapter, discovering current JSONL and legacy JSON chats in host/user or direct-home layouts. It applies upstream checkpoint/rewind semantics, normalizes conversation, model, embedded-tool, and per-turn token evidence, renders adapter-specific initial/resumed notices, and explicitly leaves unsupported lifecycle, aggregate usage, pressure, and turn completion unavailable. The pinned raw contract, privacy boundary, capability gaps, synthetic mixed-agent identity/project coverage, refresh/rebuild parity, and performance tradeoffs are documented.
@@ -68,8 +70,6 @@ All notable changes to this project will be documented in this file. The format 
 - A shared `scripts/check.sh` regression check command and mandatory per-change regression verification, including rendered transcript coverage.
 - Prioritised project TODO list tracking architecture-review findings and conditional technology decisions.
 
-- Mandatory username/password authentication on all web routes, with a Git-ignored local credentials file, an empty example, fail-closed startup, and no-store responses.
-
 - Initial Rust CLI and Axum web application.
 - Disposable SQLite index with generic agent, host, user, and instance records.
 - Tolerant Codex rollout JSONL ingestion from active and archived session trees.
@@ -81,7 +81,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
-- The pre-account-management framework gate retains Rust/Axum and selects established server-side session authentication with locally provisioned Argon2id-backed application identities. The decision records the Django comparison, separate persistent-state boundary, provisioning/recovery and revocation expectations, OIDC deferral, implementation security contract, and evidence that would trigger reconsideration; runtime authentication is unchanged until M1-M3 are implemented.
+- The pre-account-management framework gate retains Rust/Axum and selects established server-side session authentication with locally provisioned Argon2id-backed application identities. The decision records the Django comparison, separate persistent-state boundary, provisioning/recovery and revocation expectations, OIDC deferral, implementation security contract, and evidence that would trigger reconsideration.
 
 - Web database reads and transcript/view-model construction now live in focused query and presentation modules. Route handlers are limited to request validation, orchestration, error mapping, and template responses without changing existing routes or rendering behavior.
 
