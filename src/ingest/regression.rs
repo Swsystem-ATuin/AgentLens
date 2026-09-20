@@ -1473,6 +1473,8 @@ async fn advisory_titles_override_bounded_conversation_and_native_fallbacks() {
         &[
             meta("named"),
             message("<skills_instructions>synthetic setup</skills_instructions>"),
+            message("<recommended_plugins>synthetic setup</recommended_plugins>"),
+            message("<app-context>synthetic setup</app-context>"),
             message("Conversation fallback"),
         ],
     );

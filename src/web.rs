@@ -2261,10 +2261,16 @@ mod tests {
             ),
             message(
                 3,
+                "developer",
+                "<recommended_plugins>redacted</recommended_plugins>",
+            ),
+            message(4, "user", "<app-context>redacted</app-context>"),
+            message(
+                5,
                 "user",
                 "<environment_context>redacted</environment_context>",
             ),
-            message(4, "user", "actual request"),
+            message(6, "user", "actual request"),
         ];
         let html = SessionTemplate {
             session: SessionRow {
@@ -2282,7 +2288,7 @@ mod tests {
                 archive_state: "unknown".into(),
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
-                message_count: 5,
+                message_count: 7,
                 match_sequence: None,
                 match_snippet: None,
             },
@@ -2299,8 +2305,10 @@ mod tests {
         assert!(html.contains("<strong>Available skills</strong>"));
         assert!(html.contains("<strong>Initial agent configuration</strong>"));
         assert!(html.contains("<strong>Multi-agent mode</strong>"));
+        assert!(html.contains("<strong>Recommended plugins</strong>"));
+        assert!(html.contains("<strong>App context</strong>"));
         assert!(html.contains("<strong>Environment context</strong>"));
-        assert_eq!(html.matches("<details class=\"message").count(), 5);
+        assert_eq!(html.matches("<details class=\"message").count(), 7);
         assert_eq!(html.matches(" open>").count(), 1);
     }
 
@@ -2440,6 +2448,8 @@ mod tests {
             ("developer", "<permissions instructions>", "Permissions"),
             ("user", "<environment_context>", "Environment context"),
             ("developer", "<skills_instructions>", "Available skills"),
+            ("developer", "<recommended_plugins>", "Recommended plugins"),
+            ("user", "<app-context>", "App context"),
             ("developer", "<multi_agent_mode>", "Multi-agent mode"),
             ("developer", "<multi_agent_role>", "Multi-agent role"),
             ("developer", "<collaboration_mode>", "Collaboration mode"),
@@ -2475,6 +2485,12 @@ mod tests {
             message(0, "user", "Explain <environment_context> please"),
             message(1, "user", "<example>ordinary input</example>"),
             message(2, "assistant", "<permissions instructions>example output"),
+            message(3, "user", "Explain <app-context> please"),
+            message(
+                4,
+                "assistant",
+                "<recommended_plugins>example output</recommended_plugins>",
+            ),
         ]);
         assert!(segments.iter().all(|segment| segment.initially_open));
         assert_eq!(segments[2].title, "assistant");

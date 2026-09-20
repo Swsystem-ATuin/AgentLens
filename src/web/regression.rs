@@ -2116,6 +2116,8 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
         ("<permissions instructions>", "Permissions", false),
         ("<environment_context>", "Environment context", false),
         ("<skills_instructions>", "Available skills", false),
+        ("<recommended_plugins>", "Recommended plugins", false),
+        ("<app-context>", "App context", false),
         ("<multi_agent_mode>", "Multi-agent mode", false),
         ("<multi_agent_role>", "Multi-agent role", false),
         ("<collaboration_mode>", "Collaboration mode", false),
