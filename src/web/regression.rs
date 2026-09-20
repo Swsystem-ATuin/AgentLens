@@ -617,6 +617,11 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO tool_calls(session_id,sequence,tool_name,arguments) VALUES(1,2,'exec',?)")
+        .bind("Copy-Item -LiteralPath 'C:/Users/test/.codex/generated_images/synthetic-native/exec-synthetic.png' -Destination 'outputs/example.png'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let auth = dir.path().join("auth.json");
     std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
     let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
@@ -624,9 +629,7 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
     let (status, session) = get(&app, "/sessions/synthetic-stable").await;
     assert_eq!(status, StatusCode::OK);
     assert!(session.contains("/sessions/synthetic-stable/generated-images"));
-    assert!(session.contains(
-        "href=\"/sessions/synthetic-stable/generated-images\">preview</a> ordinary conversation"
-    ));
+    assert!(session.contains("href=\"/sessions/synthetic-stable/generated-images/exec-synthetic.png\">preview</a> ordinary conversation"));
 
     let (status, listing) = get(&app, "/sessions/synthetic-stable/generated-images").await;
     assert_eq!(status, StatusCode::OK);

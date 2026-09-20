@@ -2,6 +2,7 @@ use super::queries::{
     DiagnosticEvidenceRow, DiagnosticTotalsRow, FilterValues, PressureRow, RecentUsageRow,
     SessionFilters, TimelineRow, TurnRow, UsageGroupRow, UsageTotalsRow,
 };
+use std::collections::HashMap;
 
 pub(super) struct TimelineContent {
     pub(super) html: String,
@@ -23,11 +24,28 @@ pub(super) struct TimelineItem {
     pub(super) contents: Vec<TimelineContent>,
 }
 
+#[cfg(test)]
 pub(super) fn present_timeline(
     rows: Vec<TimelineRow>,
     source_kind: &str,
     stable_id: &str,
+    conversation_started: bool,
+) -> Vec<TimelineItem> {
+    present_timeline_with_aliases(
+        rows,
+        source_kind,
+        stable_id,
+        conversation_started,
+        &HashMap::new(),
+    )
+}
+
+pub(super) fn present_timeline_with_aliases(
+    rows: Vec<TimelineRow>,
+    source_kind: &str,
+    stable_id: &str,
     mut conversation_started: bool,
+    generated_image_aliases: &HashMap<String, String>,
 ) -> Vec<TimelineItem> {
     let mut items: Vec<TimelineItem> = Vec::new();
     for row in rows {
@@ -50,7 +68,11 @@ pub(super) fn present_timeline(
             let anchor = format!("event-{}-message", row.sequence);
             let mut content = TimelineContent {
                 html: if source_kind == crate::sources::codex::KIND {
-                    super::markdown::render_with_generated_images(&row.content, stable_id)
+                    super::markdown::render_with_generated_images(
+                        &row.content,
+                        stable_id,
+                        generated_image_aliases,
+                    )
                 } else {
                     super::markdown::render(&row.content)
                 },

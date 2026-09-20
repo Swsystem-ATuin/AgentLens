@@ -6,6 +6,7 @@ use crate::fingerprint::{HashingReader, ensure_unchanged};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs::{File, Metadata},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -17,6 +18,120 @@ pub(crate) const GENERATED_IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
 pub(crate) struct GeneratedImage {
     pub(crate) filename: String,
     pub(crate) size_bytes: u64,
+}
+
+pub(crate) fn generated_image_aliases(
+    home: &Path,
+    session_id: &str,
+    tool_arguments: &[String],
+) -> Result<HashMap<String, String>> {
+    let mut aliases = HashMap::new();
+    for arguments in tool_arguments {
+        let expanded = arguments.replace("\\n", "\n");
+        for line in expanded.lines() {
+            let tokens = command_tokens(line);
+            let Some((source, destination)) = copy_operands(&tokens) else {
+                continue;
+            };
+            let Some(alias) = relative_image_alias(destination) else {
+                continue;
+            };
+            let normalized_source = source.replace('\\', "/");
+            let marker = format!("/generated_images/{session_id}/");
+            let Some(filename) = normalized_source
+                .split_once(&marker)
+                .map(|(_, filename)| filename)
+                .filter(|filename| !filename.contains('/'))
+            else {
+                continue;
+            };
+            if generated_image_path(home, session_id, filename)?.is_some() {
+                aliases.insert(alias, filename.to_owned());
+            }
+        }
+    }
+    Ok(aliases)
+}
+
+fn command_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        match quote {
+            Some(active) if character == active => quote = None,
+            Some(_) => current.push(character),
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None if character == '\\'
+                && characters.peek().is_some_and(|next| next.is_whitespace()) =>
+            {
+                current.push(characters.next().expect("checked next character"));
+            }
+            None => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn copy_operands(tokens: &[String]) -> Option<(&str, &str)> {
+    if let Some(command) = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("Copy-Item"))
+    {
+        let source = flag_value(tokens, command + 1, &["-LiteralPath", "-Path"])?;
+        let destination = flag_value(tokens, command + 1, &["-Destination"])?;
+        return Some((source, destination));
+    }
+    let command = tokens
+        .iter()
+        .position(|token| token.rsplit('/').next() == Some("cp"))?;
+    let operands: Vec<_> = tokens[command + 1..]
+        .iter()
+        .filter(|token| !token.starts_with('-'))
+        .collect();
+    (operands.len() >= 2).then(|| {
+        (
+            operands[operands.len() - 2].as_str(),
+            operands[operands.len() - 1].as_str(),
+        )
+    })
+}
+
+fn flag_value<'a>(tokens: &'a [String], start: usize, names: &[&str]) -> Option<&'a str> {
+    let index = tokens[start..]
+        .iter()
+        .position(|token| names.iter().any(|name| token.eq_ignore_ascii_case(name)))?
+        + start;
+    tokens.get(index + 1).map(String::as_str)
+}
+
+fn relative_image_alias(value: &str) -> Option<String> {
+    let value = value
+        .trim_end_matches(['"', '}', ')', ';'])
+        .replace('\\', "/");
+    let value = value.strip_prefix("./").unwrap_or(&value);
+    if value.starts_with('/') || value.contains(':') {
+        return None;
+    }
+    let components: Vec<_> = value.split('/').collect();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+        || !valid_generated_image_name(components.last().copied().unwrap_or_default())
+    {
+        return None;
+    }
+    Some(components.join("/"))
 }
 
 pub(crate) fn generated_images(home: &Path, session_id: &str) -> Result<Vec<GeneratedImage>> {
@@ -760,6 +875,25 @@ mod tests {
             generated_image_path(&home, "synthetic-session", "not-an-image.txt")
                 .unwrap()
                 .is_none()
+        );
+
+        let aliases = generated_image_aliases(
+            &home,
+            "synthetic-session",
+            &[
+                "text(await tools.exec_command({cmd:\"New-Item outputs\\nCopy-Item -LiteralPath 'C:/Users/test/.codex/generated_images/synthetic-session/exec-safe.png' -Destination 'outputs/windows-preview.png'\"}));".into(),
+                "cp '$HOME/.codex/generated_images/synthetic-session/exec-safe.png' ./outputs/unix-preview.png".into(),
+                "cp '$HOME/.codex/generated_images/other-session/exec-safe.png' outputs/wrong.png".into(),
+                "cp '$HOME/.codex/generated_images/synthetic-session/exec-safe.png' ../escaped.png".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            aliases,
+            HashMap::from([
+                ("outputs/windows-preview.png".into(), "exec-safe.png".into()),
+                ("outputs/unix-preview.png".into(), "exec-safe.png".into()),
+            ])
         );
     }
 }

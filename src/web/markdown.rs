@@ -1,17 +1,27 @@
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
+use std::collections::HashMap;
 
 pub(super) fn render(source: &str) -> String {
-    render_with_image_fallback(source, None)
+    render_with_image_fallback(source, None, None)
 }
 
-pub(super) fn render_with_generated_images(source: &str, stable_id: &str) -> String {
+pub(super) fn render_with_generated_images(
+    source: &str,
+    stable_id: &str,
+    aliases: &HashMap<String, String>,
+) -> String {
     render_with_image_fallback(
         source,
         Some(&format!("/sessions/{stable_id}/generated-images")),
+        Some((stable_id, aliases)),
     )
 }
 
-fn render_with_image_fallback(source: &str, image_fallback: Option<&str>) -> String {
+fn render_with_image_fallback(
+    source: &str,
+    image_fallback: Option<&str>,
+    generated_images: Option<(&str, &HashMap<String, String>)>,
+) -> String {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -37,8 +47,15 @@ fn render_with_image_fallback(source: &str, image_fallback: Option<&str>) -> Str
             link_stack.push(safe);
             safe.then(|| {
                 let dest_url = if relative_image_link(&dest_url) {
-                    image_fallback
-                        .map(|fallback| CowStr::Boxed(fallback.to_owned().into_boxed_str()))
+                    let direct = generated_images.and_then(|(stable_id, aliases)| {
+                        aliases.get(dest_url.as_ref()).map(|filename| {
+                            format!("/sessions/{stable_id}/generated-images/{filename}")
+                        })
+                    });
+                    direct
+                        .as_deref()
+                        .or(image_fallback)
+                        .map(|destination| CowStr::Boxed(destination.to_owned().into_boxed_str()))
                         .unwrap_or(dest_url)
                 } else {
                     dest_url
@@ -193,15 +210,33 @@ mod tests {
 
     #[test]
     fn relative_image_links_can_fall_back_to_the_session_gallery() {
+        let aliases = HashMap::new();
         let rendered = render_with_generated_images(
             "[preview](outputs/example.png) [document](docs/readme.md) [remote](https://example.invalid/image.png)",
             "stable-session",
+            &aliases,
         );
         assert!(
             rendered.contains("href=\"/sessions/stable-session/generated-images\">preview</a>")
         );
         assert!(rendered.contains("href=\"docs/readme.md\">document</a>"));
         assert!(rendered.contains("href=\"https://example.invalid/image.png\">remote</a>"));
+    }
+
+    #[test]
+    fn known_relative_image_aliases_link_directly_to_the_generated_file() {
+        let aliases = HashMap::from([(
+            "outputs/example.png".to_owned(),
+            "exec-synthetic.png".to_owned(),
+        )]);
+        let rendered = render_with_generated_images(
+            "[preview](outputs/example.png)",
+            "stable-session",
+            &aliases,
+        );
+        assert!(rendered.contains(
+            "href=\"/sessions/stable-session/generated-images/exec-synthetic.png\">preview</a>"
+        ));
     }
 
     #[test]

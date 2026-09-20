@@ -18,11 +18,13 @@ pub(crate) mod queries;
 #[cfg(test)]
 mod regression;
 
+#[cfg(test)]
+use presentation::present_timeline;
 use presentation::{
     FilterOptions, Pagination, TimelineItem, filtered_transcript_href, message_href,
-    present_diagnostic_evidence, present_pressure, present_recent_usage, present_timeline,
-    present_turns, present_usage_groups, present_usage_totals, select_options, sessions_href,
-    usage_href,
+    present_diagnostic_evidence, present_pressure, present_recent_usage,
+    present_timeline_with_aliases, present_turns, present_usage_groups, present_usage_totals,
+    select_options, sessions_href, usage_href,
 };
 use queries::{
     MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
@@ -977,11 +979,20 @@ async fn session(
         next_href: (has_next && section < MAX_SESSION_PAGE)
             .then(|| filtered_transcript_href(&stable_id, section + 1, event_filter, None)),
     };
-    let segments = present_timeline(
+    let generated_image_aliases = load_generated_image_aliases(
+        &state.pool,
+        row.id,
+        &stable_id,
+        &row.agent_kind,
+        &user.access,
+    )
+    .await?;
+    let segments = present_timeline_with_aliases(
         events,
         &row.agent_kind,
         &stable_id,
         section > 1 && matches!(event_filter, "all" | "messages"),
+        &generated_image_aliases,
     );
     let event_options = select_options(
         [
@@ -1108,6 +1119,31 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+async fn load_generated_image_aliases(
+    pool: &SqlitePool,
+    session_id: i64,
+    stable_id: &str,
+    agent_kind: &str,
+    access: &crate::auth::AccessScope,
+) -> Result<std::collections::HashMap<String, String>, WebError> {
+    if agent_kind != crate::sources::codex::KIND {
+        return Ok(Default::default());
+    }
+    let source = queries::artifact_source(pool, stable_id, access)
+        .await
+        .map_err(|error| WebError::database("load generated image source", error))?
+        .ok_or_else(WebError::not_found)?;
+    let arguments = queries::generated_image_tool_arguments(pool, session_id)
+        .await
+        .map_err(|error| WebError::database("load generated image aliases", error))?;
+    crate::sources::codex::generated_image_aliases(
+        FilePath::new(&source.source_home),
+        &source.external_id,
+        &arguments,
+    )
+    .map_err(|_| WebError::filesystem("resolve generated image aliases"))
+}
+
 async fn live_reader_script() -> impl IntoResponse {
     (
         [(
@@ -1226,10 +1262,22 @@ async fn message(
         next_href: (offset + MESSAGE_CHUNK_CHARS < message.total_chars && part < MAX_SESSION_PAGE)
             .then(|| message_href(&stable_id, sequence, part + 1)),
     };
+    let generated_image_aliases = load_generated_image_aliases(
+        &state.pool,
+        session.id,
+        &stable_id,
+        &session.agent_kind,
+        &user.access,
+    )
+    .await?;
     Ok(Html(
         MessageTemplate {
             content_html: if session.agent_kind == crate::sources::codex::KIND {
-                markdown::render_with_generated_images(&message.content, &stable_id)
+                markdown::render_with_generated_images(
+                    &message.content,
+                    &stable_id,
+                    &generated_image_aliases,
+                )
             } else {
                 markdown::render(&message.content)
             },

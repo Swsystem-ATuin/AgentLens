@@ -839,6 +839,18 @@ pub(super) async fn artifact_source(
     .await
 }
 
+pub(super) async fn generated_image_tool_arguments(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT substr(arguments,1,65536) FROM tool_calls WHERE session_id=? AND arguments LIKE '%generated_images%' ORDER BY sequence LIMIT 100",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+}
+
 fn push_source_access<'a>(
     query: &mut QueryBuilder<'a, Sqlite>,
     access: &'a crate::auth::AccessScope,
