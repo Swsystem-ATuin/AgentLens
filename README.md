@@ -39,7 +39,7 @@ Sessions whose model starts with `codex-auto-review` (case-insensitive) are hidd
 
 The observed fixture format is documented in [docs/fixture-format.md](docs/fixture-format.md).
 
-Transcript setup blocks are labeled and collapsed even after a session resumes, including repository instructions, permissions, environment, skills, recommended plugins, app context, multi-agent roles, and mode/model changes. Interruption notices and user actions remain expanded with distinct labels. Unknown tags and markers quoted within ordinary prose remain conversation content. No full rebuild is needed; run `cargo run -- refresh --data data` to repair fallback titles previously derived from these new setup blocks, then restart the server with `cargo run -- serve`.
+Transcript setup blocks are labeled and collapsed even after a session resumes, including repository instructions, permissions, environment, skills, app/plugin instructions and recommendations, app context, image-resize notices, multi-agent roles, and mode/model changes. Interruption notices and user actions remain expanded with distinct labels. Unknown tags and markers quoted within ordinary prose remain conversation content. No full rebuild is needed; run `cargo run -- refresh --data data` to repair fallback titles previously derived from newly recognized setup blocks, then restart the server with `cargo run -- serve`.
 
 ## Requirements
 

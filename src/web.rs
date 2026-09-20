@@ -2262,15 +2262,30 @@ mod tests {
             message(
                 3,
                 "developer",
-                "<recommended_plugins>redacted</recommended_plugins>",
+                "<apps_instructions>redacted</apps_instructions>",
             ),
-            message(4, "user", "<app-context>redacted</app-context>"),
+            message(
+                4,
+                "developer",
+                "<plugins_instructions>redacted</plugins_instructions>",
+            ),
             message(
                 5,
+                "developer",
+                "<recommended_plugins>redacted</recommended_plugins>",
+            ),
+            message(6, "user", "<app-context>redacted</app-context>"),
+            message(
+                7,
+                "user",
+                "<image_resize_notice>redacted</image_resize_notice>",
+            ),
+            message(
+                8,
                 "user",
                 "<environment_context>redacted</environment_context>",
             ),
-            message(6, "user", "actual request"),
+            message(9, "user", "actual request"),
         ];
         let html = SessionTemplate {
             session: SessionRow {
@@ -2288,7 +2303,7 @@ mod tests {
                 archive_state: "unknown".into(),
                 hostname: "fixture-host".into(),
                 os_user: "fixture-user".into(),
-                message_count: 7,
+                message_count: 10,
                 match_sequence: None,
                 match_snippet: None,
             },
@@ -2305,10 +2320,13 @@ mod tests {
         assert!(html.contains("<strong>Available skills</strong>"));
         assert!(html.contains("<strong>Initial agent configuration</strong>"));
         assert!(html.contains("<strong>Multi-agent mode</strong>"));
+        assert!(html.contains("<strong>App instructions</strong>"));
+        assert!(html.contains("<strong>Plugin instructions</strong>"));
         assert!(html.contains("<strong>Recommended plugins</strong>"));
         assert!(html.contains("<strong>App context</strong>"));
+        assert!(html.contains("<strong>Image resize notice</strong>"));
         assert!(html.contains("<strong>Environment context</strong>"));
-        assert_eq!(html.matches("<details class=\"message").count(), 7);
+        assert_eq!(html.matches("<details class=\"message").count(), 10);
         assert_eq!(html.matches(" open>").count(), 1);
     }
 
@@ -2448,8 +2466,11 @@ mod tests {
             ("developer", "<permissions instructions>", "Permissions"),
             ("user", "<environment_context>", "Environment context"),
             ("developer", "<skills_instructions>", "Available skills"),
+            ("developer", "<apps_instructions>", "App instructions"),
+            ("developer", "<plugins_instructions>", "Plugin instructions"),
             ("developer", "<recommended_plugins>", "Recommended plugins"),
             ("user", "<app-context>", "App context"),
+            ("user", "<image_resize_notice>", "Image resize notice"),
             ("developer", "<multi_agent_mode>", "Multi-agent mode"),
             ("developer", "<multi_agent_role>", "Multi-agent role"),
             ("developer", "<collaboration_mode>", "Collaboration mode"),
@@ -2490,6 +2511,17 @@ mod tests {
                 4,
                 "assistant",
                 "<recommended_plugins>example output</recommended_plugins>",
+            ),
+            message(5, "user", "Explain <image_resize_notice> please"),
+            message(
+                6,
+                "assistant",
+                "<apps_instructions>example output</apps_instructions>",
+            ),
+            message(
+                7,
+                "assistant",
+                "<plugins_instructions>example output</plugins_instructions>",
             ),
         ]);
         assert!(segments.iter().all(|segment| segment.initially_open));

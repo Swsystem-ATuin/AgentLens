@@ -235,7 +235,7 @@ fn valid_generated_image_name(value: &str) -> bool {
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
-pub(crate) const PARSER_VERSION: i64 = 8;
+pub(crate) const PARSER_VERSION: i64 = 9;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
 const HOST_USER_LAYOUT: &str = "host-user";
@@ -790,10 +790,16 @@ pub(crate) fn classify_message(
             Some("Model switch")
         } else if trimmed.starts_with("<skills_instructions>") {
             Some("Available skills")
+        } else if trimmed.starts_with("<apps_instructions>") {
+            Some("App instructions")
+        } else if trimmed.starts_with("<plugins_instructions>") {
+            Some("Plugin instructions")
         } else if trimmed.starts_with("<recommended_plugins>") {
             Some("Recommended plugins")
         } else if trimmed.starts_with("<app-context>") {
             Some("App context")
+        } else if trimmed.starts_with("<image_resize_notice>") {
+            Some("Image resize notice")
         } else if before_conversation && trimmed.starts_with("You are ") {
             Some("Initial agent configuration")
         } else if trimmed.starts_with("<multi_agent_mode>") {
