@@ -189,6 +189,7 @@ struct HealthTemplate {
 struct SessionTemplate {
     session: SessionRow,
     segments: Vec<TimelineItem>,
+    generated_images: Vec<GeneratedImageView>,
     show_origin: bool,
     event_options: Vec<presentation::FilterOption>,
     pagination: Pagination,
@@ -987,6 +988,18 @@ async fn session(
         &user.access,
     )
     .await?;
+    let generated_images = if !has_next && matches!(event_filter, "all" | "messages") {
+        load_unlinked_generated_images(
+            &state.pool,
+            &stable_id,
+            &row.agent_kind,
+            &user.access,
+            &generated_image_aliases,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
     let segments = present_timeline_with_aliases(
         events,
         &row.agent_kind,
@@ -1012,6 +1025,7 @@ async fn session(
         SessionTemplate {
             session: row,
             segments,
+            generated_images,
             show_origin,
             event_options,
             pagination,
@@ -1117,6 +1131,38 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} bytes")
     }
+}
+
+async fn load_unlinked_generated_images(
+    pool: &SqlitePool,
+    stable_id: &str,
+    agent_kind: &str,
+    access: &crate::auth::AccessScope,
+    aliases: &std::collections::HashMap<String, String>,
+) -> Result<Vec<GeneratedImageView>, WebError> {
+    if agent_kind != crate::sources::codex::KIND {
+        return Ok(Vec::new());
+    }
+    let source = queries::artifact_source(pool, stable_id, access)
+        .await
+        .map_err(|error| WebError::database("load generated image source", error))?
+        .ok_or_else(WebError::not_found)?;
+    let linked: std::collections::HashSet<_> = aliases.values().map(String::as_str).collect();
+    Ok(crate::sources::codex::generated_images(
+        FilePath::new(&source.source_home),
+        &source.external_id,
+    )
+    .map_err(|_| WebError::filesystem("list generated images"))?
+    .into_iter()
+    .filter(|image| !linked.contains(image.filename.as_str()))
+    .enumerate()
+    .map(|(index, image)| GeneratedImageView {
+        ordinal: index + 1,
+        size: format_bytes(image.size_bytes),
+        href: format!("/sessions/{stable_id}/generated-images/{}", image.filename),
+        filename: image.filename,
+    })
+    .collect())
 }
 
 async fn load_generated_image_aliases(
@@ -2241,6 +2287,7 @@ mod tests {
                 match_snippet: None,
             },
             segments: group_transcript(messages),
+            generated_images: vec![],
             event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
@@ -2294,6 +2341,7 @@ mod tests {
                     match_snippet: None,
                 },
                 segments: group_transcript_for_source(messages, "hermes", false),
+                generated_images: vec![],
                 event_options: vec![],
                 show_origin: true,
                 pagination: no_pagination(),
@@ -2350,6 +2398,7 @@ mod tests {
                     match_snippet: None,
                 },
                 segments: group_transcript(messages),
+                generated_images: vec![],
                 event_options: vec![],
                 show_origin: true,
                 pagination: no_pagination(),

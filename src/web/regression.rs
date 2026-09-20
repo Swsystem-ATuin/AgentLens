@@ -591,6 +591,11 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
     std::fs::create_dir_all(&images).unwrap();
     let bytes = b"synthetic png bytes";
     std::fs::write(images.join("exec-synthetic.png"), bytes).unwrap();
+    std::fs::write(
+        images.join("exec-unlinked.png"),
+        b"unlinked generated image",
+    )
+    .unwrap();
     std::fs::write(images.join("private.txt"), b"must not be served").unwrap();
 
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -638,11 +643,25 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
     let thumbnail = session.find("class=\"generated-image-thumbnail\"").unwrap();
     let named_link = session.find(">preview</a></figcaption>").unwrap();
     assert!(output < previews && previews < thumbnail && thumbnail < named_link);
+    assert!(session.contains("Generated images from this session"));
+    assert!(session.contains("exec-unlinked.png"));
+    let unlinked = session
+        .split("Generated images from this session")
+        .nth(1)
+        .unwrap();
+    assert!(!unlinked.contains("exec-synthetic.png"));
+    assert!(session.contains(
+        ".generated-image-grid figure{display:flex;flex-direction:column;align-items:flex-start;width:fit-content;max-width:100%;margin:0}"
+    ));
+    assert!(!session.contains(
+        ".generated-image-grid figure{margin:0;padding:10px;background:var(--panel);border:1px solid var(--line)"
+    ));
 
     let (status, listing) = get(&app, "/sessions/synthetic-stable/generated-images").await;
     assert_eq!(status, StatusCode::OK);
     assert!(listing.contains("Open generated image 1"));
     assert!(listing.contains("exec-synthetic.png"));
+    assert!(listing.contains("exec-unlinked.png"));
     assert!(listing.contains("alt=\"Generated image 1 preview\""));
     assert!(listing.contains("class=\"generated-image-thumbnail\""));
     assert!(!listing.contains("private.txt"));
@@ -2130,6 +2149,7 @@ fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
                 message(2, "user", &format!("  {prefix}\nsynthetic")),
                 message(3, "assistant", "next reply"),
             ]),
+            generated_images: vec![],
             event_options: vec![],
             show_origin: true,
             pagination: no_pagination(),
