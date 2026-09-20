@@ -43,6 +43,13 @@ pub(super) struct LiveStatusRow {
     pub(super) source_status: String,
 }
 
+#[derive(FromRow)]
+pub(super) struct ArtifactSourceRow {
+    pub(super) external_id: String,
+    pub(super) agent_kind: String,
+    pub(super) source_home: String,
+}
+
 #[cfg(test)]
 #[derive(FromRow)]
 pub(super) struct MessageRow {
@@ -801,6 +808,27 @@ pub(super) async fn live_status(
          COALESCE(sf.parse_status,'unknown') source_status \
          FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id LEFT JOIN source_files sf ON sf.id=s.source_file_id LEFT JOIN ingest_runs ir ON ir.id=sf.ingest_run_id AND ir.status='complete' \
          WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) AND (? OR i.source_key IN (SELECT value FROM json_each(?)))",
+    )
+    .bind(stable_id)
+    .bind(model_exclusion.source_kind)
+    .bind(model_exclusion.pattern)
+    .bind(access.unrestricted())
+    .bind(access.source_keys_json())
+    .fetch_optional(pool)
+    .await
+}
+
+pub(super) async fn artifact_source(
+    pool: &SqlitePool,
+    stable_id: &str,
+    access: &crate::auth::AccessScope,
+) -> Result<Option<ArtifactSourceRow>, sqlx::Error> {
+    let model_exclusion = crate::sources::model_exclusion();
+    sqlx::query_as(
+        "SELECT s.external_id,a.kind agent_kind,i.source_home \
+         FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id \
+         WHERE s.stable_id=? AND (a.kind<>? OR s.model IS NULL OR s.model NOT LIKE ?) \
+         AND (? OR i.source_key IN (SELECT value FROM json_each(?)))",
     )
     .bind(stable_id)
     .bind(model_exclusion.source_kind)

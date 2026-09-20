@@ -8,8 +8,115 @@ use serde_json::Value;
 use std::{
     fs::{File, Metadata},
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+pub(crate) const GENERATED_IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GeneratedImage {
+    pub(crate) filename: String,
+    pub(crate) size_bytes: u64,
+}
+
+pub(crate) fn generated_images(home: &Path, session_id: &str) -> Result<Vec<GeneratedImage>> {
+    let Some(directory) = generated_image_directory(home, session_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut images = Vec::new();
+    for entry in std::fs::read_dir(directory).context("read generated image directory")? {
+        let entry = entry.context("read generated image entry")?;
+        let file_type = entry.file_type().context("inspect generated image entry")?;
+        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !file_type.is_file() || !valid_generated_image_name(&filename) {
+            continue;
+        }
+        let size_bytes = entry.metadata().context("inspect generated image")?.len();
+        if size_bytes <= GENERATED_IMAGE_LIMIT {
+            images.push(GeneratedImage {
+                filename,
+                size_bytes,
+            });
+        }
+    }
+    images.sort_by(|left, right| left.filename.cmp(&right.filename));
+    images.truncate(100);
+    Ok(images)
+}
+
+pub(crate) fn generated_image_path(
+    home: &Path,
+    session_id: &str,
+    filename: &str,
+) -> Result<Option<PathBuf>> {
+    if !valid_generated_image_name(filename) {
+        return Ok(None);
+    }
+    let Some(directory) = generated_image_directory(home, session_id)? else {
+        return Ok(None);
+    };
+    let candidate = directory.join(filename);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata)
+            if metadata.file_type().is_file() && metadata.len() <= GENERATED_IMAGE_LIMIT => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect generated image"),
+    }
+    let canonical = candidate
+        .canonicalize()
+        .context("resolve generated image path")?;
+    ensure!(
+        canonical.starts_with(&directory),
+        "generated image escaped its source directory"
+    );
+    Ok(Some(canonical))
+}
+
+fn generated_image_directory(home: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+    if !valid_path_component(session_id) {
+        return Ok(None);
+    }
+    let root = home.join("generated_images");
+    let directory = root.join(session_id);
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect generated image directory"),
+    }
+    let canonical_root = root
+        .canonicalize()
+        .context("resolve generated image root")?;
+    let canonical_directory = directory
+        .canonicalize()
+        .context("resolve generated image directory")?;
+    ensure!(
+        canonical_directory.starts_with(&canonical_root),
+        "generated image directory escaped its source home"
+    );
+    Ok(Some(canonical_directory))
+}
+
+fn valid_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_generated_image_name(value: &str) -> bool {
+    value.len() <= 200
+        && value
+            .strip_suffix(".png")
+            .or_else(|| value.strip_suffix(".jpg"))
+            .or_else(|| value.strip_suffix(".jpeg"))
+            .or_else(|| value.strip_suffix(".webp"))
+            .is_some_and(valid_path_component)
+}
 
 pub(crate) const KIND: &str = "codex";
 pub(crate) const DISPLAY_NAME: &str = "Codex";
@@ -614,5 +721,45 @@ mod tests {
         assert_eq!(homes.homes.len(), 1);
         assert_eq!(homes.homes[0].host, "host");
         assert_eq!(homes.homes[0].user, "user");
+    }
+
+    #[test]
+    fn generated_images_are_session_scoped_and_reject_unsafe_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".codex");
+        let directory = home.join("generated_images/synthetic-session");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("exec-safe.png"), b"synthetic image").unwrap();
+        std::fs::write(directory.join("not-an-image.txt"), b"private").unwrap();
+
+        let images = generated_images(&home, "synthetic-session").unwrap();
+        assert_eq!(
+            images,
+            vec![GeneratedImage {
+                filename: "exec-safe.png".into(),
+                size_bytes: 15,
+            }]
+        );
+        assert_eq!(
+            generated_image_path(&home, "synthetic-session", "exec-safe.png")
+                .unwrap()
+                .unwrap(),
+            directory.canonicalize().unwrap().join("exec-safe.png")
+        );
+        assert!(
+            generated_image_path(&home, "../synthetic-session", "exec-safe.png")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            generated_image_path(&home, "synthetic-session", "../private.png")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            generated_image_path(&home, "synthetic-session", "not-an-image.txt")
+                .unwrap()
+                .is_none()
+        );
     }
 }

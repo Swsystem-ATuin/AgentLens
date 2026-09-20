@@ -1,6 +1,17 @@
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
 pub(super) fn render(source: &str) -> String {
+    render_with_image_fallback(source, None)
+}
+
+pub(super) fn render_with_generated_images(source: &str, stable_id: &str) -> String {
+    render_with_image_fallback(
+        source,
+        Some(&format!("/sessions/{stable_id}/generated-images")),
+    )
+}
+
+fn render_with_image_fallback(source: &str, image_fallback: Option<&str>) -> String {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -16,10 +27,29 @@ pub(super) fn render(source: &str) -> String {
     let mut link_stack = Vec::new();
     let events = events.into_iter().filter_map(|event| match event {
         Event::Html(value) | Event::InlineHtml(value) => Some(Event::Text(value)),
-        Event::Start(Tag::Link { ref dest_url, .. }) => {
-            let safe = safe_link(dest_url);
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let safe = safe_link(&dest_url);
             link_stack.push(safe);
-            safe.then_some(event)
+            safe.then(|| {
+                let dest_url = if relative_image_link(&dest_url) {
+                    image_fallback
+                        .map(|fallback| CowStr::Boxed(fallback.to_owned().into_boxed_str()))
+                        .unwrap_or(dest_url)
+                } else {
+                    dest_url
+                };
+                Event::Start(Tag::Link {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                })
+            })
         }
         Event::End(TagEnd::Link) => link_stack.pop().unwrap_or(false).then_some(event),
         Event::Start(Tag::Image { .. }) => Some(Event::Text(CowStr::Borrowed("Image: "))),
@@ -29,6 +59,19 @@ pub(super) fn render(source: &str) -> String {
     let mut rendered = String::with_capacity(source.len());
     html::push_html(&mut rendered, events);
     format!("<div class=\"rich-text\">{rendered}</div>")
+}
+
+fn relative_image_link(destination: &str) -> bool {
+    if destination.starts_with(['/', '#', '?']) || destination.contains(':') {
+        return false;
+    }
+    let path = destination.split(['?', '#']).next().unwrap_or(destination);
+    matches!(
+        path.rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp")
+    )
 }
 
 pub(super) fn render_plain(source: &str) -> String {
@@ -146,6 +189,19 @@ mod tests {
         ] {
             assert!(!safe_link(destination), "{destination}");
         }
+    }
+
+    #[test]
+    fn relative_image_links_can_fall_back_to_the_session_gallery() {
+        let rendered = render_with_generated_images(
+            "[preview](outputs/example.png) [document](docs/readme.md) [remote](https://example.invalid/image.png)",
+            "stable-session",
+        );
+        assert!(
+            rendered.contains("href=\"/sessions/stable-session/generated-images\">preview</a>")
+        );
+        assert!(rendered.contains("href=\"docs/readme.md\">document</a>"));
+        assert!(rendered.contains("href=\"https://example.invalid/image.png\">remote</a>"));
     }
 
     #[test]

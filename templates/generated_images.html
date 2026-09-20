@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Generated images · Agent Lens{% endblock %}{% block content %}
+<h1>Generated images</h1>
+<p><a href="/sessions/{{ session.stable_id }}">Back to {{ session.title }}</a></p>
+{% if images.is_empty() %}<p class="muted">No synced generated images are available for this session.</p>{% else %}<ul>{% for image in images %}<li><a href="{{ image.href }}">Open generated image {{ image.ordinal }}</a> <span class="muted">{{ image.filename }} · {{ image.size }}</span></li>{% endfor %}</ul>{% endif %}
+{% endblock %}

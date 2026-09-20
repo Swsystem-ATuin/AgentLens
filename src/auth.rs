@@ -138,8 +138,9 @@ impl AccessScope {
         matches!(
             parts.as_slice(),
             ["sessions", _]
-                | ["sessions", _, "live-status" | "turns"]
+                | ["sessions", _, "live-status" | "turns" | "generated-images"]
                 | ["sessions", _, "postmortem", "json" | "md"]
+                | ["sessions", _, "generated-images", _]
                 | ["sessions", _, "messages" | "tools" | "results", _]
         )
     }

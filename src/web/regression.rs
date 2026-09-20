@@ -584,6 +584,80 @@ async fn authenticated_response(app: &Router, uri: &str) -> axum::response::Resp
 }
 
 #[tokio::test]
+async fn generated_images_are_listed_and_served_from_the_authorized_codex_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("copied-home/.codex");
+    let images = home.join("generated_images/synthetic-native");
+    std::fs::create_dir_all(&images).unwrap();
+    let bytes = b"synthetic png bytes";
+    std::fs::write(images.join("exec-synthetic.png"), bytes).unwrap();
+    std::fs::write(images.join("private.txt"), b"must not be served").unwrap();
+
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agents(id,kind,display_name) VALUES(1,'codex','Codex')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO hosts(id,name) VALUES(1,'host'); INSERT INTO users(id,host_id,os_user) VALUES(1,1,'user');")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,?)")
+        .bind(home.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions(id,instance_id,external_id,stable_id,title) VALUES(1,1,'synthetic-native','synthetic-stable','Synthetic images')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages(session_id,sequence,role,content) VALUES(1,1,'assistant','[preview](outputs/example.png) ordinary conversation')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+
+    let (status, session) = get(&app, "/sessions/synthetic-stable").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(session.contains("/sessions/synthetic-stable/generated-images"));
+    assert!(session.contains(
+        "href=\"/sessions/synthetic-stable/generated-images\">preview</a> ordinary conversation"
+    ));
+
+    let (status, listing) = get(&app, "/sessions/synthetic-stable/generated-images").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.contains("Open generated image 1"));
+    assert!(listing.contains("exec-synthetic.png"));
+    assert!(!listing.contains("private.txt"));
+
+    let response = authenticated_response(
+        &app,
+        "/sessions/synthetic-stable/generated-images/exec-synthetic.png",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(response.headers()[header::CONTENT_DISPOSITION], "inline");
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+        bytes
+    );
+    assert_eq!(
+        authenticated_response(
+            &app,
+            "/sessions/synthetic-stable/generated-images/private.txt"
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn filters_query_real_rows_individually_together_and_with_literal_input() {
     let (_dir, app) = seeded_app().await;
     for (query, expected) in [

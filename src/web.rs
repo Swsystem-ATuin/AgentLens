@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::path::Path as FilePath;
 use tower_http::trace::TraceLayer;
 
 mod markdown;
@@ -192,6 +193,20 @@ struct SessionTemplate {
     live: LiveStatus,
 }
 
+#[derive(Template)]
+#[template(path = "generated_images.html")]
+struct GeneratedImagesTemplate {
+    session: SessionRow,
+    images: Vec<GeneratedImageView>,
+}
+
+struct GeneratedImageView {
+    ordinal: usize,
+    filename: String,
+    size: String,
+    href: String,
+}
+
 #[derive(Serialize)]
 struct LiveStatus {
     revision: i64,
@@ -310,6 +325,11 @@ fn app_routes(
         .route("/metrics", get(metrics))
         .route("/sessions/{id}", get(session))
         .route("/sessions/{id}/live-status", get(live_status))
+        .route("/sessions/{id}/generated-images", get(generated_images))
+        .route(
+            "/sessions/{id}/generated-images/{filename}",
+            get(generated_image),
+        )
         .route("/sessions/{id}/turns", get(turn_history))
         .route("/sessions/{id}/postmortem/{format}", get(postmortem))
         .route("/sessions/{id}/messages/{sequence}", get(message))
@@ -1005,6 +1025,89 @@ async fn live_status(
     ))
 }
 
+async fn generated_images(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    Path(stable_id): Path<String>,
+) -> Result<Html<String>, WebError> {
+    let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
+    let source = queries::artifact_source(&state.pool, &stable_id, &user.access)
+        .await
+        .map_err(|error| WebError::database("load generated image source", error))?
+        .ok_or_else(WebError::not_found)?;
+    let images = if source.agent_kind == crate::sources::codex::KIND {
+        crate::sources::codex::generated_images(
+            FilePath::new(&source.source_home),
+            &source.external_id,
+        )
+        .map_err(|_| WebError::filesystem("list generated images"))?
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| GeneratedImageView {
+            ordinal: index + 1,
+            size: format_bytes(image.size_bytes),
+            href: format!("/sessions/{stable_id}/generated-images/{}", image.filename),
+            filename: image.filename,
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Html(
+        GeneratedImagesTemplate { session, images }
+            .render()
+            .map_err(|error| WebError::template("render generated images", error))?,
+    ))
+}
+
+async fn generated_image(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    Path((stable_id, filename)): Path<(String, String)>,
+) -> Result<Response, WebError> {
+    let source = queries::artifact_source(&state.pool, &stable_id, &user.access)
+        .await
+        .map_err(|error| WebError::database("load generated image source", error))?
+        .ok_or_else(WebError::not_found)?;
+    if source.agent_kind != crate::sources::codex::KIND {
+        return Err(WebError::not_found());
+    }
+    let path = crate::sources::codex::generated_image_path(
+        FilePath::new(&source.source_home),
+        &source.external_id,
+        &filename,
+    )
+    .map_err(|_| WebError::filesystem("resolve generated image"))?
+    .ok_or_else(WebError::not_found)?;
+    let body = tokio::fs::read(path)
+        .await
+        .map_err(|_| WebError::filesystem("read generated image"))?;
+    let content_type = match filename.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => return Err(WebError::not_found()),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, "inline"),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024 * 1024) as f64)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 async fn live_reader_script() -> impl IntoResponse {
     (
         [(
@@ -1125,7 +1228,11 @@ async fn message(
     };
     Ok(Html(
         MessageTemplate {
-            content_html: markdown::render(&message.content),
+            content_html: if session.agent_kind == crate::sources::codex::KIND {
+                markdown::render_with_generated_images(&message.content, &stable_id)
+            } else {
+                markdown::render(&message.content)
+            },
             message,
             transcript_href: filtered_transcript_href(
                 &stable_id,
@@ -1354,6 +1461,16 @@ impl WebError {
             public_message: "Internal server error",
             operation: "serialize postmortem",
             error_kind: "serialization",
+            error_code: None,
+        }
+    }
+
+    fn filesystem(operation: &'static str) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "Internal server error",
+            operation,
+            error_kind: "io",
             error_code: None,
         }
     }
@@ -1946,6 +2063,8 @@ mod tests {
             "/sessions/ses_denied",
             "/sessions/ses_denied/live-status",
             "/sessions/ses_denied/turns",
+            "/sessions/ses_denied/generated-images",
+            "/sessions/ses_denied/generated-images/exec-private.png",
             "/sessions/ses_denied/postmortem/json",
             "/sessions/ses_denied/messages/1",
             "/sessions/ses_denied/tools/3",
@@ -1961,6 +2080,7 @@ mod tests {
             "/sessions/ses_allowed",
             "/sessions/ses_allowed/live-status",
             "/sessions/ses_allowed/turns",
+            "/sessions/ses_allowed/generated-images",
             "/sessions/ses_allowed/postmortem/json",
             "/sessions/ses_allowed/messages/1",
             "/sessions/ses_allowed/tools/3",

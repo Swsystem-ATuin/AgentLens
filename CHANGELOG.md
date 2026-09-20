@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Session pages now list and serve authenticated Codex-generated images directly from the copied `.codex/generated_images/<native-session-id>/` tree, with source-grant enforcement, strict path/type/size containment, and no SQLite or raw-source mutation. Historical relative image links fall back to the session gallery because workspace aliases cannot be mapped safely to retained generated filenames.
+
 - A multi-stage Docker build now produces a minimal non-root runtime image with persistent SQLite paths, an all-interface web bind, and documented read-only source mounts.
 
 - Hermes Agent request snapshots are now discovered from `.hermes/sessions/request_dump_*.json`, including OpenAI Responses and Anthropic message/tool shapes, direct-home operation, sanitised failure presentation, and strict exclusion of transport credentials and error payloads. Canonical Hermes `state.db` ingestion remains unsupported and is documented explicitly.

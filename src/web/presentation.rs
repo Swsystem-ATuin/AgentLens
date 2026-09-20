@@ -49,7 +49,11 @@ pub(super) fn present_timeline(
             }
             let anchor = format!("event-{}-message", row.sequence);
             let mut content = TimelineContent {
-                html: super::markdown::render(&row.content),
+                html: if source_kind == crate::sources::codex::KIND {
+                    super::markdown::render_with_generated_images(&row.content, stable_id)
+                } else {
+                    super::markdown::render(&row.content)
+                },
                 anchor: anchor.clone(),
                 is_primary: true,
                 continuation_href: (row.total_chars > super::queries::MESSAGE_PREVIEW_CHARS)
