@@ -37,9 +37,10 @@ fn render_with_image_fallback(
     enum LinkRender {
         Unsafe,
         Normal,
-        Direct(String),
+        Direct,
     }
 
+    let previews = generated_image_previews(&events, generated_images);
     let mut link_stack = Vec::new();
     let events = events.into_iter().filter_map(|event| match event {
         Event::Html(value) | Event::InlineHtml(value) => Some(Event::Text(value)),
@@ -54,22 +55,9 @@ fn render_with_image_fallback(
                 link_stack.push(LinkRender::Unsafe);
                 return None;
             }
-            let direct = relative_image_link(&dest_url)
-                .then(|| {
-                    generated_images.and_then(|(stable_id, aliases)| {
-                        aliases.get(dest_url.as_ref()).map(|filename| {
-                            format!("/sessions/{stable_id}/generated-images/{filename}")
-                        })
-                    })
-                })
-                .flatten();
-            if let Some(direct) = direct {
-                let start = format!(
-                    "<a class=\"generated-image-name\" href=\"{}\">",
-                    escape_html(&direct)
-                );
-                link_stack.push(LinkRender::Direct(direct));
-                return Some(Event::InlineHtml(CowStr::Boxed(start.into_boxed_str())));
+            if direct_generated_image_url(&dest_url, generated_images).is_some() {
+                link_stack.push(LinkRender::Direct);
+                return None;
             }
             let dest_url = if relative_image_link(&dest_url) {
                 image_fallback
@@ -89,13 +77,7 @@ fn render_with_image_fallback(
         Event::End(TagEnd::Link) => match link_stack.pop().unwrap_or(LinkRender::Unsafe) {
             LinkRender::Unsafe => None,
             LinkRender::Normal => Some(Event::End(TagEnd::Link)),
-            LinkRender::Direct(url) => {
-                let url = escape_html(&url);
-                let end = format!(
-                    "</a><a class=\"generated-image-thumbnail-link\" href=\"{url}\" aria-label=\"Open full-size generated image\"><img class=\"generated-image-thumbnail\" src=\"{url}\" alt=\"Generated image preview\" loading=\"lazy\" decoding=\"async\"></a>"
-                );
-                Some(Event::InlineHtml(CowStr::Boxed(end.into_boxed_str())))
-            }
+            LinkRender::Direct => None,
         },
         Event::Start(Tag::Image { .. }) => Some(Event::Text(CowStr::Borrowed("Image: "))),
         Event::End(TagEnd::Image) => None,
@@ -103,7 +85,65 @@ fn render_with_image_fallback(
     });
     let mut rendered = String::with_capacity(source.len());
     html::push_html(&mut rendered, events);
+    if !previews.is_empty() {
+        rendered.push_str("<div class=\"generated-image-previews\">");
+        for (url, label) in previews {
+            let url = escape_html(&url);
+            let label = escape_html(&label);
+            rendered.push_str(&format!(
+                "<figure><a href=\"{url}\" aria-label=\"Open full-size generated image\"><img class=\"generated-image-thumbnail\" src=\"{url}\" alt=\"{label} preview\" loading=\"lazy\" decoding=\"async\"></a><figcaption><a href=\"{url}\">{label}</a></figcaption></figure>"
+            ));
+        }
+        rendered.push_str("</div>");
+    }
     format!("<div class=\"rich-text\">{rendered}</div>")
+}
+
+fn direct_generated_image_url(
+    destination: &str,
+    generated_images: Option<(&str, &HashMap<String, String>)>,
+) -> Option<String> {
+    if !relative_image_link(destination) {
+        return None;
+    }
+    generated_images.and_then(|(stable_id, aliases)| {
+        aliases
+            .get(destination)
+            .map(|filename| format!("/sessions/{stable_id}/generated-images/{filename}"))
+    })
+}
+
+fn generated_image_previews(
+    events: &[Event<'_>],
+    generated_images: Option<(&str, &HashMap<String, String>)>,
+) -> Vec<(String, String)> {
+    let mut previews = Vec::new();
+    let mut active: Option<(String, String)> = None;
+    for event in events {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                active = direct_generated_image_url(dest_url, generated_images)
+                    .map(|url| (url, String::new()));
+            }
+            Event::Text(value) | Event::Code(value) if active.is_some() => {
+                if let Some((_, label)) = active.as_mut() {
+                    label.push_str(value);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some((url, mut label)) = active.take() {
+                    if label.is_empty() {
+                        label.push_str("Open generated image");
+                    }
+                    if !previews.iter().any(|(existing, _)| existing == &url) {
+                        previews.push((url, label));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    previews
 }
 
 fn relative_image_link(destination: &str) -> bool {
@@ -262,15 +302,24 @@ mod tests {
             "stable-session",
             &aliases,
         );
-        assert!(rendered.contains(
-            "href=\"/sessions/stable-session/generated-images/exec-synthetic.png\">preview</a>"
-        ));
+        let output = rendered.find("<p>preview</p>").unwrap();
+        let previews = rendered
+            .find("<div class=\"generated-image-previews\">")
+            .unwrap();
+        assert!(output < previews, "{rendered}");
         assert!(rendered.contains("class=\"generated-image-thumbnail\""));
         assert!(
             rendered
                 .contains("src=\"/sessions/stable-session/generated-images/exec-synthetic.png\"")
         );
         assert!(rendered.contains("loading=\"lazy\""));
+        let image = rendered
+            .find("class=\"generated-image-thumbnail\"")
+            .unwrap();
+        let link = rendered
+            .find(">preview</a></figcaption>")
+            .expect("named link should render below the image");
+        assert!(image < link, "{rendered}");
     }
 
     #[test]
