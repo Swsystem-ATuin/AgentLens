@@ -34,6 +34,12 @@ fn render_with_image_fallback(
         );
     }
 
+    enum LinkRender {
+        Unsafe,
+        Normal,
+        Direct(String),
+    }
+
     let mut link_stack = Vec::new();
     let events = events.into_iter().filter_map(|event| match event {
         Event::Html(value) | Event::InlineHtml(value) => Some(Event::Text(value)),
@@ -44,31 +50,53 @@ fn render_with_image_fallback(
             id,
         }) => {
             let safe = safe_link(&dest_url);
-            link_stack.push(safe);
-            safe.then(|| {
-                let dest_url = if relative_image_link(&dest_url) {
-                    let direct = generated_images.and_then(|(stable_id, aliases)| {
+            if !safe {
+                link_stack.push(LinkRender::Unsafe);
+                return None;
+            }
+            let direct = relative_image_link(&dest_url)
+                .then(|| {
+                    generated_images.and_then(|(stable_id, aliases)| {
                         aliases.get(dest_url.as_ref()).map(|filename| {
                             format!("/sessions/{stable_id}/generated-images/{filename}")
                         })
-                    });
-                    direct
-                        .as_deref()
-                        .or(image_fallback)
-                        .map(|destination| CowStr::Boxed(destination.to_owned().into_boxed_str()))
-                        .unwrap_or(dest_url)
-                } else {
-                    dest_url
-                };
-                Event::Start(Tag::Link {
-                    link_type,
-                    dest_url,
-                    title,
-                    id,
+                    })
                 })
-            })
+                .flatten();
+            if let Some(direct) = direct {
+                let start = format!(
+                    "<a class=\"generated-image-name\" href=\"{}\">",
+                    escape_html(&direct)
+                );
+                link_stack.push(LinkRender::Direct(direct));
+                return Some(Event::InlineHtml(CowStr::Boxed(start.into_boxed_str())));
+            }
+            let dest_url = if relative_image_link(&dest_url) {
+                image_fallback
+                    .map(|destination| CowStr::Boxed(destination.to_owned().into_boxed_str()))
+                    .unwrap_or(dest_url)
+            } else {
+                dest_url
+            };
+            link_stack.push(LinkRender::Normal);
+            Some(Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }))
         }
-        Event::End(TagEnd::Link) => link_stack.pop().unwrap_or(false).then_some(event),
+        Event::End(TagEnd::Link) => match link_stack.pop().unwrap_or(LinkRender::Unsafe) {
+            LinkRender::Unsafe => None,
+            LinkRender::Normal => Some(Event::End(TagEnd::Link)),
+            LinkRender::Direct(url) => {
+                let url = escape_html(&url);
+                let end = format!(
+                    "</a><a class=\"generated-image-thumbnail-link\" href=\"{url}\" aria-label=\"Open full-size generated image\"><img class=\"generated-image-thumbnail\" src=\"{url}\" alt=\"Generated image preview\" loading=\"lazy\" decoding=\"async\"></a>"
+                );
+                Some(Event::InlineHtml(CowStr::Boxed(end.into_boxed_str())))
+            }
+        },
         Event::Start(Tag::Image { .. }) => Some(Event::Text(CowStr::Borrowed("Image: "))),
         Event::End(TagEnd::Image) => None,
         _ => Some(event),
@@ -237,6 +265,12 @@ mod tests {
         assert!(rendered.contains(
             "href=\"/sessions/stable-session/generated-images/exec-synthetic.png\">preview</a>"
         ));
+        assert!(rendered.contains("class=\"generated-image-thumbnail\""));
+        assert!(
+            rendered
+                .contains("src=\"/sessions/stable-session/generated-images/exec-synthetic.png\"")
+        );
+        assert!(rendered.contains("loading=\"lazy\""));
     }
 
     #[test]

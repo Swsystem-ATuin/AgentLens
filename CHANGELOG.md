@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
-- Session pages now list and serve authenticated Codex-generated images directly from the copied `.codex/generated_images/<native-session-id>/` tree, with source-grant enforcement, strict path/type/size containment, and no SQLite or raw-source mutation. Historical relative image links resolve directly when recorded `Copy-Item` or `cp` evidence maps the workspace alias to a retained file, otherwise falling back to the session gallery.
+- Session pages now list and serve authenticated Codex-generated images directly from the copied `.codex/generated_images/<native-session-id>/` tree, with source-grant enforcement, strict path/type/size containment, lazy same-origin thumbnail previews, and no SQLite or raw-source mutation. Historical relative image links resolve directly when recorded `Copy-Item` or `cp` evidence maps the workspace alias to a retained file, otherwise falling back to the session gallery.
 
 - A multi-stage Docker build now produces a minimal non-root runtime image with persistent SQLite paths, an all-interface web bind, and documented read-only source mounts.
 

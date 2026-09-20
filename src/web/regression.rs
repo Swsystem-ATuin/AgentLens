@@ -629,12 +629,17 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
     let (status, session) = get(&app, "/sessions/synthetic-stable").await;
     assert_eq!(status, StatusCode::OK);
     assert!(session.contains("/sessions/synthetic-stable/generated-images"));
-    assert!(session.contains("href=\"/sessions/synthetic-stable/generated-images/exec-synthetic.png\">preview</a> ordinary conversation"));
+    assert!(session.contains("class=\"generated-image-name\" href=\"/sessions/synthetic-stable/generated-images/exec-synthetic.png\">preview</a>"));
+    assert!(session.contains("ordinary conversation"));
+    assert!(session.contains("class=\"generated-image-thumbnail\""));
+    assert!(session.contains("loading=\"lazy\""));
 
     let (status, listing) = get(&app, "/sessions/synthetic-stable/generated-images").await;
     assert_eq!(status, StatusCode::OK);
     assert!(listing.contains("Open generated image 1"));
     assert!(listing.contains("exec-synthetic.png"));
+    assert!(listing.contains("alt=\"Generated image 1 preview\""));
+    assert!(listing.contains("class=\"generated-image-thumbnail\""));
     assert!(!listing.contains("private.txt"));
 
     let response = authenticated_response(

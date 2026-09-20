@@ -17,7 +17,7 @@ Stored transcript content is untrusted. Rendering applies these rules before gen
 Every authenticated and unauthenticated response also receives this Content Security Policy:
 
 ```text
-default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
 ```
 
 This blocks images, media, frames, objects, third-party connections, inline scripts, and other undeclared subresources even if a future rendering regression emits a loading element. The only client script is the fixed authenticated same-origin [opt-in live reader](live-reading.md), and it can connect only to the same origin. Transcript content cannot add executable markup or script attributes. External links require an explicit user navigation and are not loaded while viewing a transcript.

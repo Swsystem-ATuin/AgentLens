@@ -6,6 +6,8 @@ For Codex sessions, the transcript header links to a generated-images page. Agen
 <copied .codex home>/generated_images/<native-session-id>/
 ```
 
+Directly resolved transcript image links include a bounded, lazy-loaded thumbnail that links to the full-size image. The generated-images page provides the same thumbnail treatment for every retained file. Thumbnail display uses the authenticated image endpoint and permits only same-origin images through the Content Security Policy; it does not contact an external image host.
+
 This works with the normal platform defaults (`%USERPROFILE%\.codex` on Windows and `$HOME/.codex` on macOS or Linux) as long as the entire agent home is included in the published snapshot. No refresh or rebuild is required when the image directory is already present; restart the server after upgrading AgentLens.
 
 The list and individual image endpoints require application authentication and apply the same hidden-session and source-grant rules as the transcript. Requests are limited to regular `.png`, `.jpg`, `.jpeg`, or `.webp` files with single-component names, at most 64 MiB each. Symbolic-link files and directories, traversal components, other file types, and images outside the session-specific generated directory are not served. Responses retain the global `Cache-Control: no-store` policy.
