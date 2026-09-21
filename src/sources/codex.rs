@@ -238,6 +238,21 @@ pub(crate) const DISPLAY_NAME: &str = "Codex";
 pub(crate) const PARSER_VERSION: i64 = 9;
 pub(crate) const SOURCE_AREAS: [&str; 2] = ["sessions", "archived_sessions"];
 pub(crate) const HIDDEN_MODEL_PATTERN: &str = "codex-auto-review%";
+pub(crate) const SETUP_MESSAGE_PRESENTATIONS: [(&str, &str); 13] = [
+    ("# AGENTS.md instructions for ", "Repository instructions"),
+    ("<permissions instructions>", "Permissions"),
+    ("<collaboration_mode>", "Collaboration mode"),
+    ("<model_switch>", "Model switch"),
+    ("<skills_instructions>", "Available skills"),
+    ("<apps_instructions>", "App instructions"),
+    ("<plugins_instructions>", "Plugin instructions"),
+    ("<recommended_plugins>", "Recommended plugins"),
+    ("<app-context>", "App context"),
+    ("<image_resize_notice>", "Image resize notice"),
+    ("<multi_agent_mode>", "Multi-agent mode"),
+    ("<multi_agent_role>", "Multi-agent role"),
+    ("<environment_context>", "Environment context"),
+];
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-codex-home";
 const MAX_PARSE_DIAGNOSTICS: usize = 20;
@@ -780,37 +795,13 @@ pub(crate) fn classify_message(
 ) -> Option<MessagePresentation> {
     let trimmed = content.trim_start();
     let title = if matches!(role, "user" | "developer" | "system") {
-        if trimmed.starts_with("# AGENTS.md instructions for ") {
-            Some("Repository instructions")
-        } else if trimmed.starts_with("<permissions instructions>") {
-            Some("Permissions")
-        } else if trimmed.starts_with("<collaboration_mode>") {
-            Some("Collaboration mode")
-        } else if trimmed.starts_with("<model_switch>") {
-            Some("Model switch")
-        } else if trimmed.starts_with("<skills_instructions>") {
-            Some("Available skills")
-        } else if trimmed.starts_with("<apps_instructions>") {
-            Some("App instructions")
-        } else if trimmed.starts_with("<plugins_instructions>") {
-            Some("Plugin instructions")
-        } else if trimmed.starts_with("<recommended_plugins>") {
-            Some("Recommended plugins")
-        } else if trimmed.starts_with("<app-context>") {
-            Some("App context")
-        } else if trimmed.starts_with("<image_resize_notice>") {
-            Some("Image resize notice")
-        } else if before_conversation && trimmed.starts_with("You are ") {
-            Some("Initial agent configuration")
-        } else if trimmed.starts_with("<multi_agent_mode>") {
-            Some("Multi-agent mode")
-        } else if trimmed.starts_with("<multi_agent_role>") {
-            Some("Multi-agent role")
-        } else if trimmed.starts_with("<environment_context>") {
-            Some("Environment context")
-        } else {
-            None
-        }
+        SETUP_MESSAGE_PRESENTATIONS
+            .iter()
+            .find_map(|(prefix, title)| trimmed.starts_with(prefix).then_some(*title))
+            .or_else(|| {
+                (before_conversation && trimmed.starts_with("You are "))
+                    .then_some("Initial agent configuration")
+            })
     } else {
         None
     };
@@ -836,6 +827,56 @@ pub(crate) fn classify_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[derive(serde::Deserialize)]
+    struct SetupEnvelopeFixture {
+        role: String,
+        prefix: String,
+        title: String,
+    }
+
+    #[test]
+    fn every_observed_setup_envelope_is_in_the_presentation_contract() {
+        let fixtures: Vec<SetupEnvelopeFixture> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/codex/setup_envelopes.json"
+        ))
+        .expect("setup envelope fixture must be valid JSON");
+        let fixture_prefixes: BTreeSet<&str> = fixtures
+            .iter()
+            .map(|fixture| fixture.prefix.as_str())
+            .collect();
+        let contract_prefixes: BTreeSet<&str> = SETUP_MESSAGE_PRESENTATIONS
+            .iter()
+            .map(|(prefix, _)| *prefix)
+            .collect();
+        assert_eq!(
+            fixtures.len(),
+            fixture_prefixes.len(),
+            "the observed setup fixture must not contain duplicate prefixes"
+        );
+        assert_eq!(
+            SETUP_MESSAGE_PRESENTATIONS.len(),
+            contract_prefixes.len(),
+            "the presentation contract must not contain duplicate prefixes"
+        );
+        assert_eq!(
+            fixture_prefixes, contract_prefixes,
+            "the observed setup fixture and presentation contract must be updated together"
+        );
+        for fixture in fixtures {
+            for before_conversation in [false, true] {
+                let presentation = classify_message(
+                    &fixture.role,
+                    &format!("  {}synthetic content", fixture.prefix),
+                    before_conversation,
+                )
+                .unwrap_or_else(|| panic!("unclassified setup envelope: {}", fixture.prefix));
+                assert_eq!(presentation.title, fixture.title, "{}", fixture.prefix);
+                assert!(!presentation.initially_open, "{}", fixture.prefix);
+            }
+        }
+    }
 
     #[test]
     fn discovers_contract_homes() {

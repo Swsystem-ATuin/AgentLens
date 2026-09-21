@@ -1,0 +1,15 @@
+[
+  {"role":"user","prefix":"# AGENTS.md instructions for ","title":"Repository instructions"},
+  {"role":"developer","prefix":"<permissions instructions>","title":"Permissions"},
+  {"role":"developer","prefix":"<collaboration_mode>","title":"Collaboration mode"},
+  {"role":"developer","prefix":"<model_switch>","title":"Model switch"},
+  {"role":"developer","prefix":"<skills_instructions>","title":"Available skills"},
+  {"role":"developer","prefix":"<apps_instructions>","title":"App instructions"},
+  {"role":"developer","prefix":"<plugins_instructions>","title":"Plugin instructions"},
+  {"role":"developer","prefix":"<recommended_plugins>","title":"Recommended plugins"},
+  {"role":"user","prefix":"<app-context>","title":"App context"},
+  {"role":"user","prefix":"<image_resize_notice>","title":"Image resize notice"},
+  {"role":"developer","prefix":"<multi_agent_mode>","title":"Multi-agent mode"},
+  {"role":"developer","prefix":"<multi_agent_role>","title":"Multi-agent role"},
+  {"role":"user","prefix":"<environment_context>","title":"Environment context"}
+]

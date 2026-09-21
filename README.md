@@ -180,7 +180,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Run the complete regression checks before each commit with `bash scripts/check.sh` (formatting, all-target/all-feature tests, Clippy, and whitespace checks). Every behavioral change must add or extend regression coverage in the normal `cargo test` suite. For bug fixes, first demonstrate that the new test fails without the fix, then passes with it. Documentation-only changes require verification of the affected instructions and links.
 
-Tests use a small redacted rollout fixture under `tests/fixtures/`; they do not depend on private data under `data/`. Transcript display tests cover rendered HTML, initial and resumed setup, and ordinary conversation remaining visible.
+Tests use small synthetic or redacted fixtures under `tests/fixtures/`; they do not depend on private data under `data/`. The setup-envelope inventory must match the Codex presentation contract exactly, and every entry is tested for initial and resumed rendered HTML, collapsed state, title derivation, and ordinary conversation preservation. Add each newly observed setup envelope to that fixture first so an unimplemented classification fails the normal test suite.
 
 The [historical regression audit](docs/regression-audit.md) maps earlier changes to their tests and records remaining coverage limits. The suite also exercises CLI rebuilds, parser resilience, transaction rollback, foreign keys, authentication, and database-backed filtering.
 

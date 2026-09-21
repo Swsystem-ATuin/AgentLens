@@ -2106,79 +2106,72 @@ async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
 }
 
 #[test]
-fn every_setup_marker_and_notice_has_correct_rendered_state_after_resume() {
-    for (prefix, title, open) in [
-        (
-            "# AGENTS.md instructions for /synthetic",
-            "Repository instructions",
-            false,
-        ),
-        ("<permissions instructions>", "Permissions", false),
-        ("<environment_context>", "Environment context", false),
-        ("<skills_instructions>", "Available skills", false),
-        ("<apps_instructions>", "App instructions", false),
-        ("<plugins_instructions>", "Plugin instructions", false),
-        ("<recommended_plugins>", "Recommended plugins", false),
-        ("<app-context>", "App context", false),
-        ("<image_resize_notice>", "Image resize notice", false),
-        ("<multi_agent_mode>", "Multi-agent mode", false),
-        ("<multi_agent_role>", "Multi-agent role", false),
-        ("<collaboration_mode>", "Collaboration mode", false),
-        ("<model_switch>", "Model switch", false),
-        ("<turn_aborted>", "Turn interrupted", true),
-        ("<user_action>", "User action", true),
-    ] {
-        let html = SessionTemplate {
-            session: SessionRow {
-                id: 1,
-                stable_id: "stable-session".into(),
-                agent_kind: "codex".into(),
-                external_id: "synthetic".into(),
-                title: "Synthetic title".into(),
-                started_at: None,
-                last_activity: None,
-                model: None,
-                status: None,
-                cwd: None,
-                project: None,
-                archive_state: "unknown".into(),
-                hostname: "host".into(),
-                os_user: "user".into(),
-                message_count: 4,
-                match_sequence: None,
-                match_snippet: None,
-            },
-            segments: group_transcript(vec![
-                message(0, "user", "request"),
-                message(1, "assistant", "reply"),
-                message(2, "user", &format!("  {prefix}\nsynthetic")),
-                message(3, "assistant", "next reply"),
-            ]),
-            generated_images: vec![],
-            event_options: vec![],
-            show_origin: true,
-            pagination: no_pagination(),
-            live: test_live_status(),
+fn every_setup_marker_and_notice_has_correct_initial_and_resumed_rendering() {
+    let markers = crate::sources::codex::SETUP_MESSAGE_PRESENTATIONS
+        .iter()
+        .map(|(prefix, title)| (*prefix, *title, false))
+        .chain([
+            ("<turn_aborted>", "Turn interrupted", true),
+            ("<user_action>", "User action", true),
+        ]);
+    for (prefix, title, open) in markers {
+        for resumed in [false, true] {
+            let mut messages = Vec::new();
+            if resumed {
+                messages.push(message(0, "user", "request"));
+                messages.push(message(1, "assistant", "reply"));
+            }
+            messages.push(message(2, "user", &format!("  {prefix}\nsynthetic")));
+            messages.push(message(3, "assistant", "next reply"));
+            let message_count = messages.len() as i64;
+            let html = SessionTemplate {
+                session: SessionRow {
+                    id: 1,
+                    stable_id: "stable-session".into(),
+                    agent_kind: "codex".into(),
+                    external_id: "synthetic".into(),
+                    title: "Synthetic title".into(),
+                    started_at: None,
+                    last_activity: None,
+                    model: None,
+                    status: None,
+                    cwd: None,
+                    project: None,
+                    archive_state: "unknown".into(),
+                    hostname: "host".into(),
+                    os_user: "user".into(),
+                    message_count,
+                    match_sequence: None,
+                    match_snippet: None,
+                },
+                segments: group_transcript(messages),
+                generated_images: vec![],
+                event_options: vec![],
+                show_origin: true,
+                pagination: no_pagination(),
+                live: test_live_status(),
+            }
+            .render()
+            .unwrap();
+            let open_attribute = if open { " open" } else { "" };
+            assert!(
+                html.contains(&format!(
+                    "<details class=\"message user\"{open_attribute}><summary><strong>{title}</strong>"
+                )),
+                "{prefix}, resumed={resumed}"
+            );
+            let expected_count = if resumed { 4 } else { 2 };
+            assert_eq!(
+                html.matches("<details").count(),
+                expected_count,
+                "setup must separate assistant groups: {prefix}, resumed={resumed}"
+            );
+            assert_eq!(
+                html.matches(" open>").count(),
+                expected_count - usize::from(!open),
+                "{prefix}, resumed={resumed}"
+            );
         }
-        .render()
-        .unwrap();
-        let open_attribute = if open { " open" } else { "" };
-        assert!(
-            html.contains(&format!(
-                "<details class=\"message user\"{open_attribute}><summary><strong>{title}</strong>"
-            )),
-            "{prefix}"
-        );
-        assert_eq!(
-            html.matches("<details").count(),
-            4,
-            "setup must separate assistant groups: {prefix}"
-        );
-        assert_eq!(
-            html.matches(" open>").count(),
-            if open { 4 } else { 3 },
-            "{prefix}"
-        );
     }
 }
 

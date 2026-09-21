@@ -31,6 +31,8 @@ Resuming a session can append setup as ordinary message records: a user message 
 
 The Codex parser version advances for newly recognized setup prefixes because setup classification also excludes envelopes from fallback session-title derivation. An incremental refresh reimports existing Codex rollouts once and repairs affected titles; a full rebuild is unnecessary.
 
+The tiny synthetic `tests/fixtures/codex/setup_envelopes.json` inventory contains every observed setup prefix, role, and display title without payload content. Its regression requires exact agreement with the source adapter's presentation contract, rejects duplicates, and drives classification, title-derivation, and initial/resumed rendered-HTML checks. Newly observed setup envelopes must be added to this inventory so missing adapter support fails the normal test suite.
+
 Messages beginning `<turn_aborted>` occur with user or developer roles and indicate interruptions. A user message beginning `<user_action>` can contain review activity with `<context>`, `<action>`, and `<results>` children. These notices remain expanded in the transcript. Display classification does not derive lifecycle status from message text.
 
 These raw-format and presentation rules are implemented only in the [Codex source adapter](source-adapters.md). Generic ingestion receives normalized records and does not inspect these Codex fields or markers.

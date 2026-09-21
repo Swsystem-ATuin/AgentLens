@@ -1466,21 +1466,14 @@ async fn stable_session_links_survive_rebuilds_and_scope_duplicate_native_ids() 
 async fn advisory_titles_override_bounded_conversation_and_native_fallbacks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write_source(
-        root,
-        "sessions",
-        "named.jsonl",
-        &[
-            meta("named"),
-            message("<skills_instructions>synthetic setup</skills_instructions>"),
-            message("<apps_instructions>synthetic setup</apps_instructions>"),
-            message("<plugins_instructions>synthetic setup</plugins_instructions>"),
-            message("<recommended_plugins>synthetic setup</recommended_plugins>"),
-            message("<app-context>synthetic setup</app-context>"),
-            message("<image_resize_notice>synthetic setup</image_resize_notice>"),
-            message("Conversation fallback"),
-        ],
+    let mut named_records = vec![meta("named")];
+    named_records.extend(
+        crate::sources::codex::SETUP_MESSAGE_PRESENTATIONS
+            .iter()
+            .map(|(prefix, _)| message(&format!("{prefix}synthetic setup"))),
     );
+    named_records.push(message("Conversation fallback"));
+    write_source(root, "sessions", "named.jsonl", &named_records);
     let long_fallback = "x".repeat(100);
     write_source(
         root,
