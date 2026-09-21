@@ -56,6 +56,9 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:3001")]
         bind: String,
+        /// Serve without an account on a loopback address only.
+        #[arg(long)]
+        local: bool,
         /// Optional project roots and display timezone JSON file.
         #[arg(long, env = "AGENT_LENS_PROJECTS_FILE")]
         projects_file: Option<PathBuf>,
@@ -255,12 +258,20 @@ async fn main() -> Result<()> {
         }
         Command::Serve {
             bind,
+            local,
             projects_file,
             secure_cookies,
         } => {
             let projects = projects::ProjectConfig::load(projects_file.as_deref())?;
-            let state = auth::StateStore::open(&cli.state_database).await?;
-            state.require_active_account().await?;
+            if local {
+                web::validate_local_bind(&bind)?;
+            }
+            let mut state = auth::StateStore::open(&cli.state_database).await?;
+            if local {
+                state.enable_local_mode();
+            } else {
+                state.require_active_account().await?;
+            }
             let pool = db::open(&cli.database).await?;
             web::serve(pool, &bind, state, projects, secure_cookies).await?;
         }

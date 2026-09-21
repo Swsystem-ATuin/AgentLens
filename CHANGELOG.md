@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- An explicit `serve --local` option lets a developer review indexed activities and reports without creating an account. It permits only numeric loopback bind addresses and leaves the authenticated server mode as the default.
+
 - Session pages now list and serve authenticated Codex-generated images directly from the copied `.codex/generated_images/<native-session-id>/` tree, with source-grant enforcement, strict path/type/size containment, compact lazy same-origin previews after the assistant output, and no SQLite or raw-source mutation. Previews omit a padded outer border and place their named full-size link below the image. Historical relative image links resolve directly when recorded `Copy-Item` or `cp` evidence maps the workspace alias to a retained file; unlinked desktop-generated media appears once in a transcript fallback section instead of remaining hidden.
 
 - Codex `<apps_instructions>`, `<plugins_instructions>`, `<recommended_plugins>`, `<app-context>`, and `<image_resize_notice>` setup messages now render with descriptive labels and remain collapsed at session start and after resume. Incremental refresh reimports Codex rollouts once so these envelopes are also excluded from fallback session titles. A synthetic observed-envelope inventory must match the presentation contract, and drives complete initial/resumed rendering and title-derivation regression coverage.

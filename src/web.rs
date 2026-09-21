@@ -68,6 +68,7 @@ struct AccountTemplate {
     role: &'static str,
     source_count: usize,
     csrf_token: String,
+    local_mode: bool,
 }
 
 #[cfg(test)]
@@ -408,10 +409,25 @@ pub async fn serve(
     Ok(())
 }
 
+pub fn validate_local_bind(bind: &str) -> Result<()> {
+    let address: std::net::SocketAddr = bind
+        .parse()
+        .context("local mode requires a numeric loopback bind address")?;
+    anyhow::ensure!(
+        address.ip().is_loopback(),
+        "local mode requires a loopback bind address"
+    );
+    Ok(())
+}
+
 async fn login(
+    State(state): State<AppState>,
     session: tower_sessions::Session,
     Query(query): Query<LoginQuery>,
-) -> Result<Html<String>, WebError> {
+) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/sessions").into_response());
+    }
     let csrf_token = crate::auth::csrf_token(&session)
         .await
         .map_err(|_| WebError::authentication("prepare login"))?;
@@ -425,7 +441,8 @@ async fn login(
         }
         .render()
         .map_err(|error| WebError::template("render login", error))?,
-    ))
+    )
+    .into_response())
 }
 
 async fn login_submit(
@@ -433,6 +450,9 @@ async fn login_submit(
     session: tower_sessions::Session,
     Form(form): Form<crate::auth::LoginForm>,
 ) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/sessions").into_response());
+    }
     if !crate::auth::verify_csrf(&session, &form.csrf_token)
         .await
         .map_err(|_| WebError::authentication("verify login request"))?
@@ -459,6 +479,7 @@ async fn login_submit(
 }
 
 async fn account(
+    State(state): State<AppState>,
     Extension(user): Extension<crate::auth::CurrentUser>,
     session: tower_sessions::Session,
 ) -> Result<Html<String>, WebError> {
@@ -471,6 +492,7 @@ async fn account(
             role: user.access.role(),
             source_count: user.access.source_count(),
             csrf_token,
+            local_mode: state.auth.is_local_mode(),
         }
         .render()
         .map_err(|error| WebError::template("render account page", error))?,
@@ -478,9 +500,13 @@ async fn account(
 }
 
 async fn logout(
+    State(state): State<AppState>,
     session: tower_sessions::Session,
     Form(form): Form<LogoutForm>,
 ) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/sessions").into_response());
+    }
     if !crate::auth::verify_csrf(&session, &form.csrf_token)
         .await
         .map_err(|_| WebError::authentication("verify logout request"))?
@@ -1607,6 +1633,72 @@ impl IntoResponse for WebError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_mode_accepts_only_numeric_loopback_bind_addresses() {
+        for bind in ["127.0.0.1:3001", "[::1]:3001"] {
+            assert!(validate_local_bind(bind).is_ok(), "{bind}");
+        }
+        for bind in [
+            "0.0.0.0:3001",
+            "[::]:3001",
+            "192.0.2.1:3001",
+            "localhost:3001",
+        ] {
+            assert!(validate_local_bind(bind).is_err(), "{bind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_mode_serves_data_and_reports_without_an_account() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let mut state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        state.enable_local_mode();
+        let app = session_router(pool, state);
+        for path in [
+            "/sessions",
+            "/usage",
+            "/diagnostics",
+            "/health",
+            "/metrics",
+            "/account",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            if path == "/account" {
+                let body = to_bytes(response.into_body(), 32 * 1024).await.unwrap();
+                let html = String::from_utf8(body.to_vec()).unwrap();
+                assert!(html.contains("Local mode is active"));
+                assert!(!html.contains("Sign out"));
+            }
+        }
+        let login = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        assert_eq!(login.headers()[header::LOCATION], "/sessions");
+    }
 
     async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
         use axum::{

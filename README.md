@@ -80,7 +80,15 @@ cargo run -- rebuild --data /path/to/.hermes
 
 Rebuild imports into a separate staging database, validates it, and only then replaces the existing index. A failed rebuild preserves the last usable index. Stop the web server before rebuilding and restart it afterward; publication refuses to replace an index that is still open. See [safe full rebuilds](docs/rebuild.md) for failure behavior, staging-file cleanup, validation, and performance results.
 
-Create the first application account. Put the password in an owner-only temporary file so it does not appear in shell history or process arguments:
+For personal use on the same machine, start without creating an account:
+
+```bash
+cargo run -- serve --local
+```
+
+Open <http://127.0.0.1:3001/sessions> to review activities, usage, diagnostics, and reports. Local mode accepts only a numeric loopback `--bind` address (`127.0.0.1` or `::1`), and anyone who can reach that port can read the indexed content. It creates the owner-only application state database but requires no account or password. No index rebuild is required when switching between modes.
+
+For authenticated access, create the first application account. Put the password in an owner-only temporary file so it does not appear in shell history or process arguments:
 
 ```bash
 (umask 077; touch /tmp/agent-lens-password)
@@ -107,7 +115,7 @@ cargo run -- serve --projects-file projects.local.json
 
 The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>, <http://127.0.0.1:3001/usage>, <http://127.0.0.1:3001/diagnostics>, <http://127.0.0.1:3001/health>, or the machine-readable <http://127.0.0.1:3001/metrics>. Use `--bind` to select another address. Browser requests are redirected to `/login`; the Account page provides explicit logout.
 
-Authentication is required for every data route, including direct transcript URLs, lazy fragments, exports, health, and metrics. The server refuses to start without an enabled account. Browser sessions expire after 30 minutes of inactivity or 12 hours total. Responses use `Cache-Control: no-store`; login and logout are CSRF-protected and login rotates the opaque session identifier.
+Without `--local`, authentication is required for every data route, including direct transcript URLs, lazy fragments, exports, health, and metrics. The server refuses to start without an enabled account. Browser sessions expire after 30 minutes of inactivity or 12 hours total. Responses use `Cache-Control: no-store`; login and logout are CSRF-protected and login rotates the opaque session identifier.
 
 Accounts and sessions default to the owner-only `agent-lens-state.sqlite`, independently of the disposable `agent-lens.sqlite` index. Use the global `--state-database /path/to/state.sqlite` option or `AGENT_LENS_STATE_DB` for another location. Password reset, disable, enable, and account-wide session revocation use `account reset-password`, `account disable`, `account enable`, and `account revoke-sessions`; see the [complete operational contract](docs/application-authentication.md). Refresh and rebuild never need or modify application accounts.
 

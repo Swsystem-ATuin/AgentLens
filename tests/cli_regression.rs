@@ -32,6 +32,7 @@ fn serve_help_documents_loopback_port_and_session_options() {
     assert!(output.contains("AGENT_LENS_SECURE_COOKIES"));
     assert!(output.contains("--projects-file"));
     assert!(output.contains("AGENT_LENS_PROJECTS_FILE"));
+    assert!(output.contains("--local"));
 
     let account = run(dir.path(), &["account", "--help"]);
     assert!(account.status.success());
@@ -72,6 +73,16 @@ fn serving_without_an_active_account_fails_before_creating_the_index() {
     assert!(!dir.path().join("agent-lens.sqlite").exists());
     assert!(dir.path().join("agent-lens-state.sqlite").exists());
     assert!(String::from_utf8_lossy(&result.stderr).contains("account create"));
+}
+
+#[test]
+fn local_mode_rejects_non_loopback_bind_before_creating_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = run(dir.path(), &["serve", "--local", "--bind", "0.0.0.0:3001"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("loopback bind address"));
+    assert!(!dir.path().join("agent-lens-state.sqlite").exists());
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
 }
 
 #[tokio::test]

@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS account_source_grants (
 #[derive(Clone)]
 pub struct AuthState {
     pool: SqlitePool,
+    local_mode: bool,
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
     #[cfg(test)]
@@ -145,7 +146,6 @@ impl AccessScope {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn all() -> Self {
         Self {
             role: AccountRole::Admin,
@@ -181,6 +181,10 @@ pub struct LoginForm {
 }
 
 impl StateStore {
+    pub fn enable_local_mode(&mut self) {
+        self.auth.local_mode = true;
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -249,6 +253,7 @@ impl StateStore {
         Ok(Self {
             auth: AuthState {
                 pool,
+                local_mode: false,
                 dummy_hash,
                 absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
                 #[cfg(test)]
@@ -400,6 +405,10 @@ pub async fn revoke_sessions(state: &StateStore, username: &str) -> Result<()> {
 }
 
 impl AuthState {
+    pub fn is_local_mode(&self) -> bool {
+        self.local_mode
+    }
+
     pub async fn authenticate(
         &self,
         username: &str,
@@ -553,6 +562,14 @@ pub async fn require_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if auth.local_mode {
+        request.extensions_mut().insert(CurrentUser {
+            id: "local".into(),
+            username: "Local developer".into(),
+            access: AccessScope::all(),
+        });
+        return next.run(request).await;
+    }
     if request.uri().path() == "/login" {
         return next.run(request).await;
     }
@@ -863,6 +880,7 @@ pub fn test_state(credentials: Credentials) -> AuthState {
         .connect_lazy_with(SqliteConnectOptions::new().filename(":memory:"));
     AuthState {
         pool,
+        local_mode: false,
         dummy_hash: String::new(),
         absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
         test_digest: Some(credentials.digest),

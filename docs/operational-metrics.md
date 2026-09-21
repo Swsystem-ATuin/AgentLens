@@ -1,6 +1,6 @@
 # Operational metrics
 
-Agent Lens exposes an authenticated Prometheus text-format endpoint at `/metrics`. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
+Agent Lens exposes a Prometheus text-format endpoint at `/metrics`. It requires an administrator in the default server mode; explicit loopback-only `serve --local` mode serves it without an account. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
 
 The endpoint requires an administrator account and accepts either its current browser session or HTTP Basic credentials. Other browser routes use server-side session authentication. Valid viewer credentials receive `403`. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
 

@@ -1,5 +1,7 @@
 # Application authentication
 
+For a single developer reviewing their own local index, `cargo run -- serve --local` serves every view without a username or password. This mode accepts only numeric loopback bind addresses and grants access to anyone who can connect to that local port. It creates the normal owner-only state database but does not require an account. Omit `--local` to restore the authenticated mode; no index rebuild or account migration is needed.
+
 Agent Lens uses locally provisioned application accounts and opaque server-side sessions. Application identities are independent of the operating-system users found in copied agent homes. The persistent state database defaults to `agent-lens-state.sqlite`; the normalized agent index remains disposable in `agent-lens.sqlite`.
 
 Authentication identifies the application account; [source-scoped authorization](access-permissions.md) separately determines which indexed records it can read. Administrators see all sources and operational endpoints. Viewers see only explicitly granted stable source IDs.
