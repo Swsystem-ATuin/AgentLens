@@ -339,6 +339,9 @@ fn app_routes(
         .route("/sessions/{id}/messages/{sequence}", get(message))
         .route("/sessions/{id}/tools/{sequence}", get(tool_call))
         .route("/sessions/{id}/results/{sequence}", get(tool_result))
+        .route("/favicon.ico", get(favicon))
+        .route("/assets/favicon-32.png", get(favicon_png))
+        .route("/assets/agent-lens-logo.png", get(application_logo))
         .route("/assets/live-reader.js", get(live_reader_script))
         // Query strings can contain private filter values. Keep request spans
         // useful without recording the URI or authentication material.
@@ -1226,6 +1229,27 @@ async fn live_reader_script() -> impl IntoResponse {
     )
 }
 
+async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../assets/favicon.ico").as_slice(),
+    )
+}
+
+async fn favicon_png() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/favicon-32.png").as_slice(),
+    )
+}
+
+async fn application_logo() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/agent-lens-logo.png").as_slice(),
+    )
+}
+
 async fn turn_history(
     State(state): State<AppState>,
     Extension(user): Extension<crate::auth::CurrentUser>,
@@ -1807,6 +1831,37 @@ mod tests {
             .await
             .unwrap();
         let app = session_router(pool, state);
+        for (path, content_type, signature) in [
+            (
+                "/favicon.ico",
+                "image/x-icon",
+                b"\x00\x00\x01\x00".as_slice(),
+            ),
+            (
+                "/assets/favicon-32.png",
+                "image/png",
+                b"\x89PNG\r\n\x1a\n".as_slice(),
+            ),
+            (
+                "/assets/agent-lens-logo.png",
+                "image/png",
+                b"\x89PNG\r\n\x1a\n".as_slice(),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+            assert!(
+                body.starts_with(signature),
+                "invalid asset signature: {path}"
+            );
+        }
         for path in [
             "/",
             "/sessions",
@@ -1911,6 +1966,8 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
+        assert!(login_html.contains("href=\"/favicon.ico\""));
+        assert!(login_html.contains("src=\"/assets/agent-lens-logo.png\""));
         let csrf = login_html
             .split("name=\"csrf_token\" value=\"")
             .nth(1)

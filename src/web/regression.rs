@@ -692,6 +692,11 @@ async fn generated_images_are_listed_and_served_from_the_authorized_codex_home()
 #[tokio::test]
 async fn filters_query_real_rows_individually_together_and_with_literal_input() {
     let (_dir, app) = seeded_app().await;
+    let (_, branded_html) = get(&app, "/sessions").await;
+    assert!(branded_html.contains("href=\"/favicon.ico\""));
+    assert!(branded_html.contains("href=\"/assets/favicon-32.png\""));
+    assert!(branded_html.contains("class=\"site-brand\""));
+    assert!(branded_html.contains("src=\"/assets/agent-lens-logo.png\""));
     for (query, expected) in [
         ("", vec![3, 2, 1]),
         ("?host=host-a", vec![3, 1]),
@@ -1567,12 +1572,22 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     assert!(html.contains("<strong>bold</strong>"));
     assert!(html.contains("<table>"));
     assert!(html.contains("<code class=\"language-rust\">fn demo() {}"));
-    assert!(!html.contains("<img"));
+    assert_eq!(
+        html.matches("<img").count(),
+        1,
+        "only the brand image renders"
+    );
+    assert!(!html.contains("example.invalid/pixel.png"));
     assert!(!html.contains("href=\"javascript:"));
     let (_, message_html) = get(&app, "/sessions/1/messages/4").await;
     assert!(message_html.contains("<strong>bold</strong>"));
     assert!(message_html.contains("<table>"));
-    assert!(!message_html.contains("<img"));
+    assert_eq!(
+        message_html.matches("<img").count(),
+        1,
+        "only the brand image renders"
+    );
+    assert!(!message_html.contains("example.invalid/pixel.png"));
     assert!(!message_html.contains("href=\"javascript:"));
     assert_eq!(get(&app, "/sessions/999").await.0, StatusCode::NOT_FOUND);
     assert_eq!(

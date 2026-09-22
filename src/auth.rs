@@ -570,7 +570,10 @@ pub async fn require_auth(
         });
         return next.run(request).await;
     }
-    if request.uri().path() == "/login" {
+    if matches!(
+        request.uri().path(),
+        "/login" | "/favicon.ico" | "/assets/favicon-32.png" | "/assets/agent-lens-logo.png"
+    ) {
         return next.run(request).await;
     }
     match auth.current_user(&session).await {
