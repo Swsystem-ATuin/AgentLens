@@ -1846,6 +1846,19 @@ async fn codex_and_gemini_render_together_with_adapter_specific_messages() {
         ),
         "{transcript}"
     );
+    assert!(
+        transcript.contains(
+            "<details class=\"message user\"><summary><strong>Gemini session context</strong>"
+        ),
+        "{transcript}"
+    );
+    assert_eq!(
+        transcript
+            .matches("<strong>Gemini session context</strong>")
+            .count(),
+        2,
+        "{transcript}"
+    );
     for ordinary in [
         "Synthetic Gemini request",
         "Synthetic Gemini response",

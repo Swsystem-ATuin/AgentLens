@@ -257,7 +257,7 @@ pub(crate) fn classify_message(
 ) -> Option<MessagePresentation> {
     match source_kind {
         codex::KIND => codex::classify_message(role, content, before_conversation),
-        gemini::KIND => gemini::classify_message(role),
+        gemini::KIND => gemini::classify_message(role, content),
         hermes::KIND => hermes::classify_message(role),
         _ => None,
     }

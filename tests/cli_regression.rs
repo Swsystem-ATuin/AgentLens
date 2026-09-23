@@ -579,7 +579,7 @@ async fn cli_rebuild_and_refresh_accept_a_direct_gemini_home() {
     );
     assert!(
         String::from_utf8_lossy(&rebuild.stdout)
-            .contains("indexed 1 sessions, 5 messages, 1 tool calls")
+            .contains("indexed 1 sessions, 7 messages, 1 tool calls")
     );
 
     let refresh = run(

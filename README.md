@@ -11,7 +11,7 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 ## Current functionality
 
 - Discovers Codex, Gemini CLI, and Hermes Agent homes at `data/{hostname}/{os_user}/{.codex,.gemini,.hermes}/`, or accepts one agent home directly.
-- Reads Codex rollout JSONL from `sessions/` and `archived_sessions/`, plus Gemini current JSONL and legacy JSON chats from `tmp/*/chats/`, recursively. See the [Gemini adapter contract](docs/gemini-adapter.md).
+- Reads Codex rollout JSONL from `sessions/` and `archived_sessions/`, plus Gemini current JSONL and legacy JSON chats from `tmp/*/chats/`, recursively. Gemini setup context is collapsed without becoming a turn or title, and current content-part tools remain paired with their results. See the [Gemini adapter contract](docs/gemini-adapter.md).
 - Reads canonical Hermes sessions from `state.db` and named-profile databases through consistent read-only SQLite snapshots, completed scheduled-run artifacts from `cron/output/*/*.md`, and separate `sessions/request_dump_*.json` provider-failure attempts. Sensitive transport, routing, billing, configuration, error, and reasoning fields are excluded. See the [Hermes adapter contract](docs/hermes-adapter.md).
 - Normalizes sessions, ordered turns and model evidence, messages, tool calls and ordered results, token usage, source files, and ingest runs into SQLite.
 - Uses reproducible, source-scoped public session IDs so transcript links survive index rebuilds and identical native IDs from different copied homes or agents remain distinct. Session lists show readable titles from valid source advisory names, bounded conversation text, or the native ID in that order. See [session identity and title semantics](docs/session-identity.md).

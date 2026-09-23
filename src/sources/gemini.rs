@@ -6,7 +6,7 @@ use crate::fingerprint::{ensure_unchanged, hash_file};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{File, Metadata},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ use std::{
 
 pub(crate) const KIND: &str = "gemini";
 pub(crate) const DISPLAY_NAME: &str = "Gemini CLI";
-pub(crate) const PARSER_VERSION: i64 = 1;
+pub(crate) const PARSER_VERSION: i64 = 2;
 pub(crate) const SOURCE_AREAS: [&str; 1] = ["chats"];
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-gemini-home";
@@ -44,9 +44,10 @@ impl SessionRecords {
         let parsed = parse_session(path)?;
         ensure_unchanged(path, metadata)?;
         let mut events = VecDeque::new();
+        let mut legacy_results = HashSet::new();
         let mut sequence = 0i64;
         for message in parsed.messages {
-            for record in normalize_message(&message) {
+            for record in normalize_message(&message, &mut legacy_results) {
                 events.push_back((sequence, record));
                 sequence = sequence
                     .checked_add(1)
@@ -178,7 +179,8 @@ pub(crate) fn scan_session(path: &Path) -> Result<SessionSummary> {
         .and_then(Value::as_array)
         .and_then(|values| values.first())
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| workspace_from_session_context(&parsed.messages));
     let model = parsed
         .messages
         .iter()
@@ -195,8 +197,9 @@ pub(crate) fn scan_session(path: &Path) -> Result<SessionSummary> {
             parsed
                 .messages
                 .iter()
-                .find(|message| message["type"] == "user")
-                .and_then(|message| content_text(&message["content"]))
+                .filter(|message| message["type"] == "user")
+                .filter_map(|message| content_text(&message["content"]))
+                .find(|content| !is_internal_user_content(content))
                 .and_then(|content| sanitized_title(&content, 80))
         });
     let raw_metadata = Value::Object(parsed.metadata.clone()).to_string();
@@ -338,20 +341,52 @@ fn upsert_message(messages: &mut MessageSet, value: Value) {
     }
 }
 
-fn normalize_message(message: &Value) -> Vec<NormalizedRecord> {
+fn normalize_message(
+    message: &Value,
+    legacy_results: &mut HashSet<String>,
+) -> Vec<NormalizedRecord> {
     let mut records = Vec::new();
     let timestamp = message["timestamp"].as_str().map(str::to_owned);
     let raw_json = message.to_string();
     match message["type"].as_str() {
-        Some("user") => records.push(NormalizedRecord::Message {
-            timestamp,
-            role: "user".into(),
-            content: content_text(&message["displayContent"])
+        Some("user") => {
+            let content = content_text(&message["displayContent"])
                 .or_else(|| content_text(&message["content"]))
-                .unwrap_or_default(),
-            opens_turn: true,
-            raw_json,
-        }),
+                .filter(|content| !content.is_empty());
+            if let Some(content) = content {
+                records.push(NormalizedRecord::Message {
+                    timestamp: timestamp.clone(),
+                    role: "user".into(),
+                    opens_turn: !is_internal_user_content(&content),
+                    content,
+                    raw_json: raw_json.clone(),
+                });
+            }
+            for part in content_parts(&message["content"]) {
+                let Some(response) = part.get("functionResponse") else {
+                    continue;
+                };
+                let call_id = response["id"].as_str().map(str::to_owned);
+                if call_id
+                    .as_ref()
+                    .is_some_and(|call_id| legacy_results.contains(call_id))
+                {
+                    continue;
+                }
+                records.push(NormalizedRecord::ToolOutput {
+                    timestamp: timestamp.clone(),
+                    call_id,
+                    output: value_text(
+                        response
+                            .get("response")
+                            .and_then(|response| response.get("output"))
+                            .or_else(|| response.get("response")),
+                    ),
+                    outcome: "observed",
+                    raw_json: part.to_string(),
+                });
+            }
+        }
         Some("info" | "warning" | "error") => records.push(NormalizedRecord::Message {
             timestamp,
             role: message["type"].as_str().unwrap_or("info").to_owned(),
@@ -374,40 +409,23 @@ fn normalize_message(message: &Value) -> Vec<NormalizedRecord> {
                     raw_json: raw_json.clone(),
                 });
             }
-            if let Some(tools) = message["toolCalls"].as_array() {
-                for tool in tools {
-                    let call_id = tool["id"].as_str().map(str::to_owned);
+            let modern_calls: Vec<&Value> = content_parts(&message["content"])
+                .filter_map(|part| part.get("functionCall"))
+                .collect();
+            if modern_calls.is_empty() {
+                normalize_legacy_tools(message, &timestamp, &mut records, legacy_results, true);
+            } else {
+                for call in modern_calls {
                     records.push(NormalizedRecord::ToolCall {
-                        timestamp: tool["timestamp"]
-                            .as_str()
-                            .map(str::to_owned)
-                            .or_else(|| timestamp.clone()),
-                        call_id: call_id.clone(),
-                        tool_name: tool["name"].as_str().map(str::to_owned),
-                        arguments: value_text(tool.get("args")),
+                        timestamp: timestamp.clone(),
+                        call_id: call["id"].as_str().map(str::to_owned),
+                        tool_name: call["name"].as_str().map(str::to_owned),
+                        arguments: value_text(call.get("args")),
                         kind: "tool",
-                        raw_json: tool.to_string(),
+                        raw_json: call.to_string(),
                     });
-                    if let Some(result) = tool.get("result").filter(|result| !result.is_null()) {
-                        records.push(NormalizedRecord::ToolOutput {
-                            timestamp: tool["timestamp"]
-                                .as_str()
-                                .map(str::to_owned)
-                                .or_else(|| timestamp.clone()),
-                            call_id,
-                            output: value_text(Some(result)),
-                            outcome: if matches!(
-                                tool["status"].as_str(),
-                                Some("error" | "failed" | "cancelled" | "canceled")
-                            ) {
-                                "failed"
-                            } else {
-                                "observed"
-                            },
-                            raw_json: tool.to_string(),
-                        });
-                    }
                 }
+                normalize_legacy_tools(message, &timestamp, &mut records, legacy_results, false);
             }
             if message["tokens"].is_object() {
                 let tokens = &message["tokens"];
@@ -431,6 +449,55 @@ fn normalize_message(message: &Value) -> Vec<NormalizedRecord> {
     records
 }
 
+fn normalize_legacy_tools(
+    message: &Value,
+    timestamp: &Option<String>,
+    records: &mut Vec<NormalizedRecord>,
+    legacy_results: &mut HashSet<String>,
+    emit_calls: bool,
+) {
+    if let Some(tools) = message["toolCalls"].as_array() {
+        for tool in tools {
+            let call_id = tool["id"].as_str().map(str::to_owned);
+            if emit_calls {
+                records.push(NormalizedRecord::ToolCall {
+                    timestamp: tool["timestamp"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| timestamp.clone()),
+                    call_id: call_id.clone(),
+                    tool_name: tool["name"].as_str().map(str::to_owned),
+                    arguments: value_text(tool.get("args")),
+                    kind: "tool",
+                    raw_json: tool.to_string(),
+                });
+            }
+            if let Some(result) = tool.get("result").filter(|result| !result.is_null()) {
+                if let Some(call_id) = &call_id {
+                    legacy_results.insert(call_id.clone());
+                }
+                records.push(NormalizedRecord::ToolOutput {
+                    timestamp: tool["timestamp"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| timestamp.clone()),
+                    call_id,
+                    output: value_text(Some(result)),
+                    outcome: if matches!(
+                        tool["status"].as_str(),
+                        Some("error" | "failed" | "cancelled" | "canceled")
+                    ) {
+                        "failed"
+                    } else {
+                        "observed"
+                    },
+                    raw_json: tool.to_string(),
+                });
+            }
+        }
+    }
+}
+
 fn content_text(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
@@ -438,8 +505,11 @@ fn content_text(value: &Value) -> Option<String> {
             let values: Vec<&str> = parts
                 .iter()
                 .filter_map(|part| {
-                    part.as_str()
-                        .or_else(|| part.get("text").and_then(Value::as_str))
+                    part.as_str().or_else(|| {
+                        (part.get("thought").and_then(Value::as_bool) != Some(true))
+                            .then(|| part.get("text").and_then(Value::as_str))
+                            .flatten()
+                    })
                 })
                 .collect();
             (!values.is_empty()).then(|| values.join("\n"))
@@ -450,6 +520,43 @@ fn content_text(value: &Value) -> Option<String> {
             .map(str::to_owned),
         _ => None,
     }
+}
+
+fn content_parts(value: &Value) -> impl Iterator<Item = &Value> {
+    let parts: &[Value] = match value {
+        Value::Array(parts) => parts,
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => &[],
+    };
+    parts.iter()
+}
+
+fn is_internal_user_content(content: &str) -> bool {
+    let content = content.trim_start();
+    content.starts_with("<session_context>") || content.starts_with("<hook_context>")
+}
+
+fn workspace_from_session_context(messages: &[Value]) -> Option<String> {
+    messages
+        .iter()
+        .filter(|message| message["type"] == "user")
+        .filter_map(|message| content_text(&message["content"]))
+        .find_map(|content| {
+            if !content.trim_start().starts_with("<session_context>") {
+                return None;
+            }
+            let mut lines = content.lines();
+            lines.find(|line| line.trim() == "- **Workspace Directories:**")?;
+            lines
+                .map(str::trim)
+                .take_while(|line| !line.starts_with("- **"))
+                .find_map(|line| {
+                    line.strip_prefix("- ")
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                })
+        })
 }
 
 fn value_text(value: Option<&Value>) -> Option<String> {
@@ -473,7 +580,22 @@ fn sanitized_title(value: &str, max_chars: usize) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
-pub(crate) fn classify_message(role: &str) -> Option<MessagePresentation> {
+pub(crate) fn classify_message(role: &str, content: &str) -> Option<MessagePresentation> {
+    if role == "user" {
+        let content = content.trim_start();
+        if content.starts_with("<session_context>") {
+            return Some(MessagePresentation {
+                title: "Gemini session context",
+                initially_open: false,
+            });
+        }
+        if content.starts_with("<hook_context>") {
+            return Some(MessagePresentation {
+                title: "Gemini hook context",
+                initially_open: false,
+            });
+        }
+    }
     match role {
         "info" => Some(MessagePresentation {
             title: "Gemini information",
@@ -576,6 +698,129 @@ mod tests {
             ]))
             .as_deref(),
             Some("synthetic string part\nsynthetic object part")
+        );
+        assert_eq!(
+            content_parts(&serde_json::json!({"functionCall":{"name":"synthetic"}})).count(),
+            1
+        );
+        assert_eq!(
+            classify_message("user", "  <hook_context>synthetic</hook_context>")
+                .unwrap()
+                .title,
+            "Gemini hook context"
+        );
+    }
+
+    #[test]
+    fn current_parts_preserve_tools_without_creating_internal_user_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"sessionId\":\"modern-synthetic\",\"projectHash\":\"project\",\"startTime\":\"2026-01-01T00:00:00Z\"}\n",
+                "{\"$set\":{\"messages\":[",
+                "{\"id\":\"context\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"user\",\"content\":[{\"text\":\"<session_context>\\n- **Workspace Directories:**\\n  - /synthetic/modern\\n</session_context>\"}]},",
+                "{\"id\":\"prompt\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"user\",\"content\":[{\"text\":\"Synthetic modern request\"}]},",
+                "{\"id\":\"call\",\"timestamp\":\"2026-01-01T00:00:02Z\",\"type\":\"gemini\",\"content\":[{\"text\":\"private thought\",\"thought\":true},{\"functionCall\":{\"id\":\"call-modern\",\"name\":\"modern_tool\",\"args\":{\"value\":1}}}]},",
+                "{\"id\":\"response\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"type\":\"user\",\"content\":[{\"functionResponse\":{\"id\":\"call-modern\",\"name\":\"modern_tool\",\"response\":{\"output\":\"Synthetic modern output\"}}}]},",
+                "{\"id\":\"answer\",\"timestamp\":\"2026-01-01T00:00:04Z\",\"type\":\"gemini\",\"model\":\"gemini-modern\",\"content\":[{\"text\":\"Synthetic modern answer\"}]}",
+                "]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let summary = scan_session(&path).unwrap();
+        assert_eq!(summary.cwd.as_deref(), Some("/synthetic/modern"));
+        assert_eq!(summary.model.as_deref(), Some("gemini-modern"));
+        assert_eq!(
+            summary.derived_title.as_deref(),
+            Some("Synthetic modern request")
+        );
+
+        let mut records = SessionRecords::open(&path, &summary.metadata).unwrap();
+        let mut messages = Vec::new();
+        let mut calls = Vec::new();
+        let mut outputs = Vec::new();
+        while let Some((_, record)) = records.next_record() {
+            match record {
+                NormalizedRecord::Message {
+                    content,
+                    opens_turn,
+                    ..
+                } => messages.push((content, opens_turn)),
+                NormalizedRecord::ToolCall {
+                    call_id, tool_name, ..
+                } => calls.push((call_id, tool_name)),
+                NormalizedRecord::ToolOutput {
+                    call_id, output, ..
+                } => outputs.push((call_id, output)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            messages,
+            [
+                (
+                    "<session_context>\n- **Workspace Directories:**\n  - /synthetic/modern\n</session_context>".into(),
+                    false
+                ),
+                ("Synthetic modern request".into(), true),
+                ("Synthetic modern answer".into(), false),
+            ]
+        );
+        assert_eq!(
+            calls,
+            [(Some("call-modern".into()), Some("modern_tool".into()))]
+        );
+        assert_eq!(
+            outputs,
+            [(
+                Some("call-modern".into()),
+                Some("Synthetic modern output".into())
+            )]
+        );
+    }
+
+    #[test]
+    fn legacy_embedded_result_wins_over_repeated_function_response() {
+        let message = serde_json::json!({
+            "id": "legacy",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "gemini",
+            "content": "",
+            "toolCalls": [{
+                "id": "legacy-call",
+                "name": "legacy_tool",
+                "args": {},
+                "result": [{"text": "Synthetic legacy output"}],
+                "status": "success"
+            }]
+        });
+        let response = serde_json::json!({
+            "id": "response",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "type": "user",
+            "content": [{"functionResponse": {
+                "id": "legacy-call",
+                "name": "legacy_tool",
+                "response": {"output": "Synthetic legacy output"}
+            }}]
+        });
+        let mut emitted = HashSet::new();
+        let mut records = normalize_message(&message, &mut emitted);
+        records.extend(normalize_message(&response, &mut emitted));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, NormalizedRecord::ToolOutput { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, NormalizedRecord::Message { .. }))
         );
     }
 }

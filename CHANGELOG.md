@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini CLI session and hook context now render as collapsed internal evidence without opening turns or becoming fallback titles. Current `functionCall` and `functionResponse` content parts import as paired tool activity instead of disappearing or producing empty user messages, thought-marked text remains hidden, main sessions recover best-effort workspace attribution from structured session context when metadata omits directories, and parser version 2 repairs existing disposable indexes on refresh.
+
 ### Added
 
 - Hermes Agent now imports canonical interactive and gateway conversations from the default and named-profile `state.db` stores through consistent read-only SQLite snapshots, including lifecycle, titles, models, compacted history, tool activity, and aggregate usage. Completed scheduler artifacts under `cron/output/` are indexed as separate activities, while request-failure snapshots remain available as distinct attempts.

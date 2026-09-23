@@ -437,7 +437,7 @@ async fn codex_and_gemini_share_views_without_identity_or_projection_collisions(
     let report = ingest_data_root(&pool, dir.path()).await.unwrap();
     assert_eq!(
         (report.sessions, report.messages, report.tool_calls),
-        (2, 7, 1)
+        (2, 9, 1)
     );
     let sessions: Vec<MixedSessionRow> = sqlx::query_as(
             "SELECT a.kind,s.external_id,s.stable_id,s.model,s.cwd,s.title FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id ORDER BY a.kind",
@@ -486,10 +486,18 @@ async fn codex_and_gemini_share_views_without_identity_or_projection_collisions(
     assert_eq!(
         messages,
         [
+            (
+                "user".into(),
+                "<session_context>\nSynthetic Gemini setup.\n- **Workspace Directories:**\n  - /synthetic/project\n</session_context>".into()
+            ),
             ("info".into(), "Synthetic Gemini initialization".into()),
             ("user".into(), "Synthetic Gemini request".into()),
             ("assistant".into(), "Synthetic Gemini response".into()),
             ("warning".into(), "Synthetic Gemini warning".into()),
+            (
+                "user".into(),
+                "<session_context>\nSynthetic resumed Gemini setup.\n- **Workspace Directories:**\n  - /synthetic/project\n</session_context>".into()
+            ),
             ("info".into(), "Synthetic resumed Gemini information".into()),
         ]
     );
@@ -497,6 +505,15 @@ async fn codex_and_gemini_share_views_without_identity_or_projection_collisions(
         messages
             .iter()
             .all(|(_, content)| !content.contains("rewound"))
+    );
+    let turn_count: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE session_id=?")
+        .bind(gemini_session)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        turn_count, 1,
+        "Gemini setup and tool responses are not turns"
     );
     let tool: (String, String, String) = sqlx::query_as(
         "SELECT c.tool_name,r.output,r.outcome FROM tool_calls c JOIN tool_results r ON r.tool_call_id=c.id WHERE c.session_id=?",
