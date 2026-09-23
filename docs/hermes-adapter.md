@@ -1,45 +1,63 @@
-# Hermes Agent request-snapshot adapter
+# Hermes Agent adapter
 
-Hermes Agent support is intentionally limited to provider request snapshots copied beneath:
+Hermes Agent homes are discovered beneath:
 
 ```text
-data/{hostname}/{os_user}/.hermes/sessions/request_dump_*.json
+data/{hostname}/{os_user}/.hermes/
 ```
 
-A single `.hermes/` directory can also be supplied directly. Directory symbolic links are supported under the same immutable-snapshot contract as the other adapters. The adapter ignores `sessions.json` and unrelated files in the directory.
+A single `.hermes/` directory can also be supplied directly. Directory symbolic links are supported under the same read-only source contract as the other adapters. The adapter reads three kinds of evidence:
 
-This contract was observed on 2026-09-15 and compared with the upstream [Hermes session-storage documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md). Current Hermes versions describe `.hermes/state.db` as the canonical transcript store. The `request_dump_*.json` files are failure diagnostics containing the cumulative provider request at one failed attempt, not authoritative session exports. Agent Lens does not currently read `state.db`, profiles, the legacy routing mirror, or exported Hermes JSONL.
+- `state.db`, the canonical Hermes session and message store;
+- `profiles/*/state.db`, the isolated canonical stores for named profiles;
+- `cron/output/*/*.md`, completed scheduler output artifacts; and
+- `sessions/request_dump_*.json`, provider-failure request snapshots.
 
-## Normalization
+This contract was verified against Hermes schema version 23 and the upstream [session-storage](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md) and [cron internals](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/cron-internals.md) documentation on 2026-09-23. The SQLite reader checks required columns and selects optional columns only when present, so additive fields and older schemas remain localized to the adapter.
 
-Each request dump becomes one request-attempt session. The stable external identity combines the recorded Hermes session ID with a digest of the dump filename so multiple retry snapshots do not overwrite each other. Agent Lens retains:
+## Canonical sessions
 
-- the snapshot timestamp as observed activity, without claiming it is session creation or completion time;
-- the requested model;
-- OpenAI Responses-style `instructions` and `input` messages, function calls, and function-call outputs;
-- Anthropic-style `system` and `messages` text, tool-use, and tool-result blocks;
-- a fixed, sanitised provider-failure notice derived from a small allowlist of known reason codes.
+Each `state.db` is opened read-only and held in one deferred SQLite transaction. This produces a consistent snapshot while Hermes continues writing in WAL mode and does not copy, checkpoint, or mutate the source database. Agent Lens creates one source checkpoint for the database and one indexed activity for each Hermes session. Named-profile identities include their profile scope so equal native IDs cannot collide.
 
-The first readable user message supplies the bounded fallback title. Instructions render collapsed, ordinary user/assistant conversation remains open, and the final sanitised failure notice renders open. Unknown fields, reasoning items, provider tool definitions, and unsupported content blocks are ignored. A malformed JSON snapshot is a localized file error and does not abort other files. Lifecycle status, cwd, turn completion, and token usage remain unavailable rather than being inferred from a failed request.
+Agent Lens retains session source, title, model, lifecycle timestamps and reason, working directory, parent identity, profile, archive/pin state, messages, tool calls/results, and aggregate usage. Transport routing, user/chat identifiers, model configuration, system prompts, billing endpoints, handoff errors, encrypted reasoning, and unknown columns are not copied into SQLite.
 
-## Credential boundary
+Active messages and non-destructive compaction archives (`active=1 OR compacted=1`) are retained. Rewound rows (`active=0, compacted=0`) and `display_kind=hidden` rows are omitted. Unknown fields and unsupported message roles are ignored without aborting the database import. User messages open turns; system messages normalize to developer messages; assistant tool calls pair with later tool-role results through their call IDs.
 
-Hermes request dumps can contain plaintext credentials and provider responses. Agent Lens never copies request headers, request URLs, error objects, response text, encrypted reasoning, or arbitrary unknown fields into SQLite. Normalized raw JSON is reconstructed only from the selected message, tool, model, timestamp, and allowlisted failure-reason fields.
+Hermes records cache reads and writes separately from uncached input. Agent Lens reports total input as uncached input plus cache reads plus cache writes, reports cache reads in its cached-input field, and adds total input to output for the overall token total. Cache-write detail has no separate normalized field. Missing or zero aggregate usage remains unavailable.
 
-Message and tool bodies are transcript evidence and can themselves contain private or secret material. Protect the raw copy and both Agent Lens databases accordingly. The synthetic regression fixture places credential sentinels in excluded transport fields and verifies they do not appear in session metadata or normalized raw records. Tests never read the private development source.
+The source checkpoint is a BLAKE3 digest of the selected logical session and message projection, not the mutable `state.db` file bytes. A WAL checkpoint or page-layout rewrite therefore does not cause a false reimport, while any selected transcript or metadata change does. The digest pass and normalized reads share the same SQLite snapshot. Session summaries are retained in memory, but message bodies are streamed during hashing and loaded one session at a time during normalization.
+
+## Cron output activities
+
+Hermes installations can keep scheduler execution lifecycle in `cron/executions.db` rather than creating `source='cron'` rows in `state.db`. Successful textual results are persisted separately under `cron/output/<job-id>/<local-timestamp>.md`. Agent Lens imports each Markdown artifact as one completed Hermes activity, uses its first level-one heading as the bounded title when available, and retains the complete artifact as an assistant message.
+
+The filename timestamp has no UTC offset, so Agent Lens preserves it as a zone-unspecified source timestamp. `cron/executions.db` and `cron/jobs.json` are not currently indexed: failed or running executions without an output artifact therefore remain unavailable, and a renamed job does not rewrite historical titles.
+
+## Request-failure snapshots
+
+Each `request_dump_*.json` remains a separate request-attempt activity. Its stable external identity combines the recorded Hermes session ID with a digest of the dump filename so retries do not overwrite one another. Agent Lens retains the snapshot timestamp, requested model, supported OpenAI Responses or Anthropic message/tool shapes, and a fixed failure notice derived from an allowlist of reason codes.
+
+Request dumps can contain plaintext credentials and provider responses. Agent Lens never copies request headers, URLs, error objects, response text, encrypted reasoning, or arbitrary unknown fields. Normalized raw JSON is reconstructed from selected transcript, tool, model, timestamp, and allowlisted failure-reason fields. Message, tool, canonical-session, and cron-output bodies are transcript evidence and can themselves contain private material; protect the raw home and both Agent Lens databases accordingly.
 
 ## Refresh and rebuild
 
-No schema migration is required. After adding a `.hermes` home to a host/user source tree, run:
+After publishing a complete `.hermes` home, run:
 
 ```bash
 cargo run -- refresh --data data
 ```
 
-For a directly supplied home, use `cargo run -- refresh --data /path/to/.hermes`. Switching an existing direct-home index between agent types requires `rebuild`.
+For a directly supplied home, use `cargo run -- refresh --data /path/to/.hermes`. Hermes parser version 2 causes existing request snapshots to reimport once and adds canonical databases and cron outputs without requiring an Agent Lens schema migration or full rebuild. Switching an existing direct-home index between agent types still requires `rebuild`.
+
+Malformed databases, unsupported required schemas, invalid UTF-8 cron outputs, and malformed request snapshots are localized source errors. A failed replacement retains its previous indexed projection and retries on the next refresh.
 
 ## Performance review
 
-The release build was measured before and after the adapter against the same warm, read-only development source tree, writing separate disposable indexes under `/tmp`. The baseline ignored the then-unknown Hermes home and indexed 182 sessions, 10,107 messages, and 17,728 tool calls in 15.047 seconds with 24,508 KiB peak RSS. The adapter build additionally indexed all 33 Hermes request dumps (3,826,681 bytes), producing 215 sessions, 10,249 messages, and 17,959 tool calls in 28.144 seconds with 24,880 KiB peak RSS. A Hermes-only direct-home rebuild took 13.463 seconds with 16,160 KiB peak RSS.
+Pre-change and post-change release binaries were measured against the same warm, read-only Hermes home and separate disposable indexes on 2026-09-23. Shell timing includes startup, import, integrity validation, and staged publication; no transcript values were printed. Peak resident memory was not available from the host tooling.
 
-The added elapsed time is dominated by reading request dumps through the configured external directory link and transactionally indexing each attempt; peak memory increased by 372 KiB for the combined workload. Each snapshot is parsed independently in two stable-file passes, so allocation is bounded by one decoded request dump and its normalized events rather than total Hermes source size. These single-run local measurements are not general latency guarantees, and process/filesystem cache effects were not isolated. Counts and resource measurements disclose no transcript content, paths, identifiers, or credentials.
+| Adapter | Files | Sessions | Messages | Tool calls | Elapsed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Request snapshots only | 33 | 33 | 142 | 231 | 5.204 s |
+| Canonical state, cron outputs, and snapshots | 305 | 420 | 1,323 | 3,919 | 6.828 s |
+
+The expanded importer processed about 12.7 times as many sessions and 17 times as many tool calls with a 31.2% elapsed-time increase in this single warm-cache run. A following unchanged refresh logically hashed the canonical database, byte-hashed the other 304 artifacts, skipped all 305 sources, and imported no sessions. These local single-run measurements are not cold-storage or general latency guarantees.

@@ -132,7 +132,7 @@ pub(crate) fn home_belongs_to_root(
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct TokenUsage {
     pub(crate) input_tokens: Option<i64>,
     pub(crate) output_tokens: Option<i64>,

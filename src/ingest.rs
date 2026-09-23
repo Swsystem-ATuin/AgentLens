@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use sqlx::{Acquire, SqliteConnection, SqlitePool};
-use std::{fs::Metadata, path::Path};
+use std::{collections::HashSet, fs::Metadata, path::Path};
 use walkdir::WalkDir;
 
 #[cfg(test)]
@@ -33,6 +33,7 @@ pub struct IngestReport {
 }
 
 struct ImportedRollout {
+    sessions: usize,
     messages: usize,
     tool_calls: usize,
     malformed_lines: usize,
@@ -118,8 +119,49 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                     .map(|path| (path, "chats")),
             ),
             Adapter::Hermes => {
+                for path in hermes::state_databases(&home.path)? {
+                    report.files_seen += 1;
+                    let mut file_transaction = transaction.begin().await?;
+                    match ingest_hermes_state(
+                        &mut file_transaction,
+                        run,
+                        instance,
+                        &source_key,
+                        &home.path,
+                        &path,
+                    )
+                    .await
+                    {
+                        Ok(None) => {
+                            file_transaction.commit().await?;
+                            report.skipped += 1;
+                        }
+                        Ok(Some(imported)) => {
+                            file_transaction.commit().await?;
+                            report.sessions += imported.sessions;
+                            report.messages += imported.messages;
+                            report.tool_calls += imported.tool_calls;
+                        }
+                        Err(error) => {
+                            file_transaction.rollback().await?;
+                            report.errors += 1;
+                            record_file_error(
+                                &mut transaction,
+                                run,
+                                instance,
+                                &path,
+                                "state",
+                                &format!("{error:#}"),
+                            )
+                            .await?;
+                        }
+                    }
+                }
                 if let Some(path) = hermes::session_root(&home.path)? {
                     roots.push((path, "sessions"));
+                }
+                if let Some(path) = hermes::cron_output_root(&home.path)? {
+                    roots.push((path, "cron"));
                 }
             }
         }
@@ -145,7 +187,10 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                     && match adapter {
                         Adapter::Codex => entry.path().extension().is_some_and(|x| x == "jsonl"),
                         Adapter::Gemini => gemini::is_session_file(entry.path()),
-                        Adapter::Hermes => hermes::is_session_file(entry.path()),
+                        Adapter::Hermes => {
+                            (area == "sessions" && hermes::is_session_file(entry.path()))
+                                || (area == "cron" && hermes::is_cron_output(entry.path()))
+                        }
                     }
                 {
                     report.files_seen += 1;
@@ -167,7 +212,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                         }
                         Ok(Some(imported)) => {
                             file_transaction.commit().await?;
-                            report.sessions += 1;
+                            report.sessions += imported.sessions;
                             report.messages += imported.messages;
                             report.tool_calls += imported.tool_calls;
                             if imported.malformed_lines != 0 {
@@ -450,9 +495,131 @@ async fn ingest_source(
         .execute(&mut *connection)
         .await?;
     Ok(Some(ImportedRollout {
+        sessions: 1,
         messages,
         tool_calls: tools,
         malformed_lines: summary.malformed_lines,
+    }))
+}
+
+async fn ingest_hermes_state(
+    connection: &mut SqliteConnection,
+    run: i64,
+    instance: i64,
+    source_key: &str,
+    home: &Path,
+    path: &Path,
+) -> Result<Option<ImportedRollout>> {
+    let previous: Option<SourceCheckpoint> = sqlx::query_as(
+        "SELECT content_hash,parser_version,parse_status,EXISTS(SELECT 1 FROM sessions WHERE source_file_id=source_files.id) AS has_session FROM source_files WHERE path=?",
+    )
+    .bind(path.to_string_lossy().as_ref())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let mut reader = hermes::StateReader::open(path, home)
+        .await
+        .context("read Hermes state database")?;
+    let scan = reader.scan().await?;
+    if previous.as_ref().is_some_and(|checkpoint| {
+        checkpoint.parser_version == Some(hermes::PARSER_VERSION)
+            && checkpoint.parse_status == "ok"
+            && checkpoint.content_hash.as_deref() == Some(scan.content_hash.as_str())
+    }) {
+        sqlx::query("UPDATE source_files SET observed_at=CURRENT_TIMESTAMP WHERE path=?")
+            .bind(path.to_string_lossy().as_ref())
+            .execute(&mut *connection)
+            .await
+            .context("record unchanged Hermes state observation")?;
+        return Ok(None);
+    }
+    let source_id: i64 = sqlx::query_scalar(
+        "INSERT INTO source_files(instance_id,ingest_run_id,path,kind,size_bytes,parse_status) VALUES(?,?,?,?,?,'parsing') ON CONFLICT(path) DO UPDATE SET ingest_run_id=excluded.ingest_run_id,kind=excluded.kind,size_bytes=excluded.size_bytes,parse_status='parsing' RETURNING id",
+    )
+    .bind(instance)
+    .bind(run)
+    .bind(path.to_string_lossy().as_ref())
+    .bind("state")
+    .bind(scan.metadata.len() as i64)
+    .fetch_one(&mut *connection)
+    .await?;
+
+    let existing: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id,external_id FROM sessions WHERE source_file_id=?")
+            .bind(source_id)
+            .fetch_all(&mut *connection)
+            .await?;
+    let seen: HashSet<&str> = scan
+        .sessions
+        .iter()
+        .map(|session| session.external_id.as_str())
+        .collect();
+    for (id, external_id) in existing {
+        if !seen.contains(external_id.as_str()) {
+            sqlx::query("DELETE FROM sessions WHERE id=?")
+                .bind(id)
+                .execute(&mut *connection)
+                .await
+                .context("remove deleted Hermes state session")?;
+        }
+    }
+
+    let mut message_count = 0usize;
+    let mut tool_count = 0usize;
+    let session_count = scan.sessions.len();
+    for session in scan.sessions {
+        let stable_id = crate::identity::session_id(source_key, &session.external_id);
+        let title = session.title.as_deref().unwrap_or(&session.external_id);
+        let session_id: i64 = sqlx::query_scalar(
+            "INSERT INTO sessions(instance_id,source_file_id,external_id,stable_id,started_at,ended_at,cwd,model,status,title,derived_title,raw_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_id) DO UPDATE SET source_file_id=excluded.source_file_id,stable_id=excluded.stable_id,started_at=excluded.started_at,ended_at=excluded.ended_at,cwd=excluded.cwd,model=excluded.model,status=excluded.status,title=excluded.title,derived_title=excluded.derived_title,raw_metadata=excluded.raw_metadata RETURNING id",
+        )
+        .bind(instance)
+        .bind(source_id)
+        .bind(&session.external_id)
+        .bind(stable_id)
+        .bind(session.started_at.as_deref())
+        .bind(session.ended_at.as_deref())
+        .bind(session.cwd.as_deref())
+        .bind(session.model.as_deref())
+        .bind(session.status)
+        .bind(title)
+        .bind(session.title.as_deref())
+        .bind(&session.raw_metadata)
+        .fetch_one(&mut *connection)
+        .await?;
+        for table in [
+            "messages",
+            "tool_calls",
+            "usage_events",
+            "session_usage",
+            "turn_events",
+            "turns",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE session_id=?"))
+                .bind(session_id)
+                .execute(&mut *connection)
+                .await?;
+        }
+        let records = reader.records(&session).await?;
+        let mut records = SourceRecords::HermesState(records);
+        let (messages, tools, _) = import_records(connection, session_id, &mut records).await?;
+        message_count = message_count
+            .checked_add(messages)
+            .context("Hermes message count exceeds supported range")?;
+        tool_count = tool_count
+            .checked_add(tools)
+            .context("Hermes tool count exceeds supported range")?;
+    }
+    sqlx::query("UPDATE source_files SET parse_status='ok',parse_error=NULL,content_hash=?,parser_version=?,observed_at=CURRENT_TIMESTAMP WHERE id=?")
+        .bind(&scan.content_hash)
+        .bind(hermes::PARSER_VERSION)
+        .bind(source_id)
+        .execute(&mut *connection)
+        .await?;
+    Ok(Some(ImportedRollout {
+        sessions: session_count,
+        messages: message_count,
+        tool_calls: tool_count,
+        malformed_lines: 0,
     }))
 }
 
@@ -503,6 +670,7 @@ enum SourceRecords<'a> {
     Codex(codex::RolloutRecords<'a>),
     Gemini(gemini::SessionRecords),
     Hermes(hermes::SessionRecords),
+    HermesState(std::collections::VecDeque<(i64, NormalizedRecord)>),
 }
 
 impl SourceRecords<'_> {
@@ -511,6 +679,7 @@ impl SourceRecords<'_> {
             Self::Codex(records) => records.next_record(),
             Self::Gemini(records) => Ok(records.next_record()),
             Self::Hermes(records) => Ok(records.next_record()),
+            Self::HermesState(records) => Ok(records.pop_front()),
         }
     }
 
@@ -518,7 +687,7 @@ impl SourceRecords<'_> {
         match self {
             Self::Codex(records) => records.malformed_lines(),
             Self::Gemini(records) => records.malformed_lines(),
-            Self::Hermes(_) => 0,
+            Self::Hermes(_) | Self::HermesState(_) => 0,
         }
     }
 }
@@ -535,6 +704,14 @@ async fn import_source_records(
         Adapter::Gemini => SourceRecords::Gemini(gemini::SessionRecords::open(path, metadata)?),
         Adapter::Hermes => SourceRecords::Hermes(hermes::SessionRecords::open(path, metadata)?),
     };
+    import_records(connection, session_id, &mut records).await
+}
+
+async fn import_records(
+    connection: &mut SqliteConnection,
+    session_id: i64,
+    records: &mut SourceRecords<'_>,
+) -> Result<(usize, usize, usize)> {
     let mut messages = 0usize;
     let mut tools = 0usize;
     let mut usage_accounting = crate::usage::UsageAccounting::default();

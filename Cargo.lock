@@ -13,6 +13,7 @@ dependencies = [
  "base64",
  "blake3",
  "clap",
+ "futures-util",
  "password-hash",
  "pulldown-cmark",
  "serde",

@@ -39,4 +39,4 @@ These raw-format and presentation rules are implemented only in the [Codex sourc
 
 Gemini CLI uses a separate, upstream-pinned [raw format and capability contract](gemini-adapter.md) with its own tiny synthetic fixture.
 
-Hermes Agent request snapshots use a separate [sanitised adapter contract](hermes-adapter.md) and tiny synthetic fixture. The checked-in fixture contains credential sentinels only in fields that must be excluded from SQLite; it contains no observed private values.
+Hermes Agent uses a separate [sanitised adapter contract](hermes-adapter.md). Tests construct tiny temporary canonical databases and cron outputs and use one checked-in request-snapshot fixture. The snapshot contains credential sentinels only in fields that must be excluded from SQLite; none of these fixtures contains observed private values.

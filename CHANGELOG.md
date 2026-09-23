@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Hermes Agent now imports canonical interactive and gateway conversations from the default and named-profile `state.db` stores through consistent read-only SQLite snapshots, including lifecycle, titles, models, compacted history, tool activity, and aggregate usage. Completed scheduler artifacts under `cron/output/` are indexed as separate activities, while request-failure snapshots remain available as distinct attempts.
+
 - A new Agent Lens logo now appears in the application header and sign-in screen, with embedded PNG and multi-size ICO favicons served to browsers without requiring authentication.
 
 - An explicit `serve --local` option lets a developer review indexed activities and reports without creating an account. It permits only numeric loopback bind addresses and leaves the authenticated server mode as the default.
@@ -16,7 +18,7 @@ All notable changes to this project will be documented in this file. The format 
 
 - A multi-stage Docker build now produces a minimal non-root runtime image with persistent SQLite paths, an all-interface web bind, and documented read-only source mounts.
 
-- Hermes Agent request snapshots are now discovered from `.hermes/sessions/request_dump_*.json`, including OpenAI Responses and Anthropic message/tool shapes, direct-home operation, sanitised failure presentation, and strict exclusion of transport credentials and error payloads. Canonical Hermes `state.db` ingestion remains unsupported and is documented explicitly.
+- Hermes Agent request snapshots are discovered from `.hermes/sessions/request_dump_*.json`, including OpenAI Responses and Anthropic message/tool shapes, direct-home operation, sanitised failure presentation, and strict exclusion of transport credentials and error payloads.
 
 ## [0.1.0] - 2026-09-14
 

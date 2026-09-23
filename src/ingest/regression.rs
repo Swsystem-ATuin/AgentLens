@@ -90,6 +90,219 @@ fn write_hermes_fixture(root: &Path) -> PathBuf {
     path
 }
 
+async fn write_hermes_state_fixture(root: &Path) -> PathBuf {
+    let directory = root.join("synthetic-host/synthetic-user/.hermes");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("state.db");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE sessions(
+          id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL,
+          ended_at REAL, end_reason TEXT, model TEXT, title TEXT, cwd TEXT,
+          parent_session_id TEXT, archived INTEGER DEFAULT 0, pinned INTEGER DEFAULT 0,
+          input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+          cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+          reasoning_tokens INTEGER DEFAULT 0, unknown_session_field TEXT
+        );
+        CREATE TABLE messages(
+          id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+          content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,
+          timestamp REAL, observed INTEGER DEFAULT 0, effect_disposition TEXT,
+          active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0,
+          display_kind TEXT, unknown_message_field TEXT
+        );
+        INSERT INTO sessions VALUES
+          ('state-interactive','cli',1767261600,1767261720,'cli_close','synthetic-state-model','Synthetic interactive state session','/synthetic/project',NULL,0,1,100,20,40,5,3,'ignored'),
+          ('state-cron','cron',1767348000,1767348060,'cron_complete','synthetic-cron-model','Synthetic daily job',NULL,NULL,0,0,10,4,2,0,1,'ignored');
+        INSERT INTO messages VALUES
+          (1,'state-interactive','user','Synthetic state request',NULL,NULL,NULL,1767261601,0,NULL,1,0,NULL,'ignored'),
+          (2,'state-interactive','assistant','Synthetic state response',NULL,'[{"id":"state-call","type":"function","function":{"name":"synthetic_state_tool","arguments":"{\"value\":1}"}}]',NULL,1767261602,0,NULL,1,0,NULL,'ignored'),
+          (3,'state-interactive','tool','Synthetic state tool result','state-call',NULL,'synthetic_state_tool',1767261603,1,NULL,1,0,NULL,'ignored'),
+          (4,'state-interactive','user','Synthetic compacted history',NULL,NULL,NULL,1767261500,0,NULL,0,1,NULL,'ignored'),
+          (5,'state-interactive','user','SYNTHETIC_REWOUND_MUST_NOT_IMPORT',NULL,NULL,NULL,1767261604,0,NULL,0,0,NULL,'ignored'),
+          (6,'state-interactive','assistant','SYNTHETIC_HIDDEN_MUST_NOT_IMPORT',NULL,NULL,NULL,1767261605,0,NULL,1,0,'hidden','ignored'),
+          (7,'state-cron','user','Synthetic scheduled prompt',NULL,NULL,NULL,1767348001,0,NULL,1,0,NULL,'ignored'),
+          (8,'state-cron','assistant','Synthetic scheduled result',NULL,NULL,NULL,1767348002,0,NULL,1,0,NULL,'ignored');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    path
+}
+
+#[tokio::test]
+async fn hermes_state_imports_interactive_and_cron_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hermes_fixture(dir.path());
+    let state = write_hermes_state_fixture(dir.path()).await;
+    let cron_output = dir.path().join(
+        "synthetic-host/synthetic-user/.hermes/cron/output/synthetic-job/2026-01-03_10-00-00.md",
+    );
+    std::fs::create_dir_all(cron_output.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cron_output,
+        "# Synthetic daily output\n\nSynthetic scheduled artifact",
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (
+            report.sessions,
+            report.messages,
+            report.tool_calls,
+            report.files_seen,
+            report.errors,
+        ),
+        (4, 11, 2, 3, 0)
+    );
+    let sessions: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT external_id,title,status,json_extract(raw_metadata,'$.source'),cwd FROM sessions WHERE external_id IN ('state-interactive','state-cron') ORDER BY external_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sessions,
+        [
+            (
+                "state-cron".into(),
+                "Synthetic daily job".into(),
+                "complete".into(),
+                "cron".into(),
+                None,
+            ),
+            (
+                "state-interactive".into(),
+                "Synthetic interactive state session".into(),
+                "complete".into(),
+                "cli".into(),
+                Some("/synthetic/project".into()),
+            ),
+        ]
+    );
+    let content: Vec<String> = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE session_id=(SELECT id FROM sessions WHERE external_id='state-interactive') ORDER BY sequence",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        content,
+        [
+            "Synthetic compacted history",
+            "Synthetic state request",
+            "Synthetic state response",
+        ]
+    );
+    let tool: (String, String, String) = sqlx::query_as(
+        "SELECT c.tool_name,r.output,r.outcome FROM tool_calls c JOIN tool_results r ON r.tool_call_id=c.id WHERE c.tool_name='synthetic_state_tool'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tool,
+        (
+            "synthetic_state_tool".into(),
+            "Synthetic state tool result".into(),
+            "observed".into(),
+        )
+    );
+    let usage: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens,total_tokens FROM session_usage WHERE session_id=(SELECT id FROM sessions WHERE external_id='state-interactive')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(usage, (145, 20, 40, 3, 165));
+    let cron_output_session: (String, String, String) = sqlx::query_as(
+        "SELECT title,status,(SELECT content FROM messages WHERE session_id=sessions.id) FROM sessions WHERE json_extract(raw_metadata,'$.type')='hermes_cron_output'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        cron_output_session,
+        (
+            "Synthetic daily output".into(),
+            "complete".into(),
+            "# Synthetic daily output\n\nSynthetic scheduled artifact".into(),
+        )
+    );
+    assert_eq!(
+        ingest_data_root(&pool, dir.path()).await.unwrap().skipped,
+        3
+    );
+
+    let source = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&state)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages(id,session_id,role,content,timestamp) VALUES(9,'state-cron','assistant','Synthetic later scheduled result',1767348061)")
+        .execute(&source)
+        .await
+        .unwrap();
+    source.close().await;
+    let changed = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (changed.sessions, changed.skipped, changed.errors),
+        (2, 2, 0)
+    );
+    let cron_messages: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE session_id=(SELECT id FROM sessions WHERE external_id='state-cron')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cron_messages, 3);
+}
+
+#[tokio::test]
+async fn malformed_hermes_state_is_localized_beside_request_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hermes_fixture(dir.path());
+    let state = dir
+        .path()
+        .join("synthetic-host/synthetic-user/.hermes/state.db");
+    std::fs::write(&state, "SYNTHETIC_PRIVATE_INVALID_DATABASE").unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+
+    let report = ingest_data_root(&pool, dir.path()).await.unwrap();
+    assert_eq!(
+        (report.sessions, report.files_seen, report.errors),
+        (1, 2, 1)
+    );
+    let error: String = sqlx::query_scalar(
+        "SELECT parse_error FROM source_files WHERE kind='state' AND parse_status='error'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(error.contains("Hermes state"));
+    assert!(!error.contains("SYNTHETIC_PRIVATE_INVALID_DATABASE"));
+}
+
 #[tokio::test]
 async fn hermes_request_snapshots_are_indexed_without_transport_secrets() {
     let dir = tempfile::tempdir().unwrap();
