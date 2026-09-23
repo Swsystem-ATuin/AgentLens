@@ -114,6 +114,7 @@ struct Filters {
     agent: Option<String>,
     project: Option<String>,
     archive: Option<String>,
+    cron: Option<String>,
     from: Option<String>,
     to: Option<String>,
     page: Option<u32>,
@@ -130,6 +131,7 @@ struct SessionsTemplate {
     from: Option<String>,
     to: Option<String>,
     timezone: String,
+    cron_all: bool,
     empty_message: &'static str,
 }
 
@@ -831,6 +833,7 @@ async fn sessions(
             from: filters.from.clone(),
             to: filters.to.clone(),
             timezone: state.projects.timezone().to_owned(),
+            cron_all: filters.cron.as_deref() == Some("all"),
             empty_message: if page > 1 {
                 "No sessions on this page."
             } else if filters.has_active() {
@@ -858,6 +861,7 @@ impl Filters {
             &mut self.agent,
             &mut self.project,
             &mut self.archive,
+            &mut self.cron,
             &mut self.from,
             &mut self.to,
         ] {
@@ -868,6 +872,9 @@ impl Filters {
     }
 
     fn validate(&self) -> Result<(), WebError> {
+        if self.cron.as_deref().is_some_and(|value| value != "all") {
+            return Err(WebError::invalid_filters());
+        }
         if self
             .q
             .as_deref()
@@ -903,6 +910,7 @@ impl Filters {
             || self.agent.is_some()
             || self.project.is_some()
             || self.archive.is_some()
+            || self.cron.is_some()
             || self.from.is_some()
             || self.to.is_some()
     }
@@ -925,6 +933,7 @@ impl Filters {
             agent: self.agent.as_deref(),
             project: self.project.as_deref(),
             archive: self.archive.as_deref(),
+            cron: self.cron.as_deref(),
             from: self.from.as_deref(),
             to: self.to.as_deref(),
         }
@@ -2833,6 +2842,7 @@ mod tests {
             from: None,
             to: None,
             timezone: "+00:00".into(),
+            cron_all: false,
             empty_message: "No sessions have been indexed.",
         }
         .render()
@@ -2874,6 +2884,7 @@ mod tests {
             agent: Some("codex".into()),
             project: Some("project one".into()),
             archive: Some("active".into()),
+            cron: Some("all".into()),
             from: Some("2026-01-01".into()),
             to: Some("2026-01-31".into()),
             page: Some(2),
@@ -2881,7 +2892,7 @@ mod tests {
 
         assert_eq!(
             filters.href(3),
-            "/sessions?q=needle%20text&host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&from=2026-01-01&to=2026-01-31&page=3"
+            "/sessions?q=needle%20text&host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&cron=all&from=2026-01-01&to=2026-01-31&page=3"
         );
     }
 

@@ -154,6 +154,14 @@ async fn hermes_state_imports_interactive_and_cron_sessions() {
         "# Synthetic daily output\n\nSynthetic scheduled artifact",
     )
     .unwrap();
+    std::fs::write(
+        cron_output
+            .parent()
+            .unwrap()
+            .join("2026-01-03_10-01-00.md"),
+        "# Cron Job: synthetic\n\n**Job ID:** synthetic-job\n**Run Time:** 2026-01-03 10:01:00\n**Mode:** no_agent (script)\n**Status:** silent (empty output)\n",
+    )
+    .unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
         .await
         .unwrap();
@@ -167,7 +175,7 @@ async fn hermes_state_imports_interactive_and_cron_sessions() {
             report.files_seen,
             report.errors,
         ),
-        (4, 11, 2, 3, 0)
+        (5, 12, 2, 4, 0)
     );
     let sessions: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT external_id,title,status,json_extract(raw_metadata,'$.source'),cwd FROM sessions WHERE external_id IN ('state-interactive','state-cron') ORDER BY external_id",
@@ -229,23 +237,22 @@ async fn hermes_state_imports_interactive_and_cron_sessions() {
     .await
     .unwrap();
     assert_eq!(usage, (145, 20, 40, 3, 165));
-    let cron_output_session: (String, String, String) = sqlx::query_as(
-        "SELECT title,status,(SELECT content FROM messages WHERE session_id=sessions.id) FROM sessions WHERE json_extract(raw_metadata,'$.type')='hermes_cron_output'",
+    let cron_output_sessions: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT title,json_extract(raw_metadata,'$.has_output') FROM sessions WHERE json_extract(raw_metadata,'$.type')='hermes_cron_output' ORDER BY started_at",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
     assert_eq!(
-        cron_output_session,
-        (
-            "Synthetic daily output".into(),
-            "complete".into(),
-            "# Synthetic daily output\n\nSynthetic scheduled artifact".into(),
-        )
+        cron_output_sessions,
+        [
+            ("Synthetic daily output".into(), true),
+            ("Cron Job: synthetic".into(), false)
+        ]
     );
     assert_eq!(
         ingest_data_root(&pool, dir.path()).await.unwrap().skipped,
-        3
+        4
     );
 
     let source = sqlx::sqlite::SqlitePoolOptions::new()
@@ -265,7 +272,7 @@ async fn hermes_state_imports_interactive_and_cron_sessions() {
     let changed = ingest_data_root(&pool, dir.path()).await.unwrap();
     assert_eq!(
         (changed.sessions, changed.skipped, changed.errors),
-        (2, 2, 0)
+        (2, 3, 0)
     );
     let cron_messages: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM messages WHERE session_id=(SELECT id FROM sessions WHERE external_id='state-cron')",

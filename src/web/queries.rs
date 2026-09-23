@@ -104,6 +104,7 @@ pub(super) struct SessionFilters<'a> {
     pub(super) agent: Option<&'a str>,
     pub(super) project: Option<&'a str>,
     pub(super) archive: Option<&'a str>,
+    pub(super) cron: Option<&'a str>,
     pub(super) from: Option<&'a str>,
     pub(super) to: Option<&'a str>,
     pub(super) search: Option<&'a str>,
@@ -325,6 +326,12 @@ pub(super) async fn sessions(
     push_optional_equality(&mut query, "s.model", filters.model);
     push_optional_equality(&mut query, "s.status", filters.status);
     push_optional_equality(&mut query, "a.kind", filters.agent);
+    if filters.cron != Some("all") {
+        query
+            .push(" AND NOT (a.kind=")
+            .push_bind(crate::sources::hermes::KIND)
+            .push(" AND ((json_extract(s.raw_metadata,'$.type')='hermes_cron_output' AND json_extract(s.raw_metadata,'$.has_output')=0) OR (json_extract(s.raw_metadata,'$.type')='hermes_state_session' AND json_extract(s.raw_metadata,'$.source')='cron' AND NOT EXISTS(SELECT 1 FROM messages cron_message WHERE cron_message.session_id=s.id AND cron_message.role='assistant' AND length(trim(cron_message.content))>0) AND NOT EXISTS(SELECT 1 FROM tool_results cron_result WHERE cron_result.session_id=s.id AND length(trim(COALESCE(cron_result.output,'')))>0))))");
+    }
     query
         .push(" AND (")
         .push_bind(filters.project)

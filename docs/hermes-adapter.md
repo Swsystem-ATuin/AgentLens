@@ -10,7 +10,7 @@ A single `.hermes/` directory can also be supplied directly. Directory symbolic 
 
 - `state.db`, the canonical Hermes session and message store;
 - `profiles/*/state.db`, the isolated canonical stores for named profiles;
-- `cron/output/*/*.md`, completed scheduler output artifacts; and
+- `cron/output/*/*.md`, completed scheduler run artifacts, including metadata-only audit records; and
 - `sessions/request_dump_*.json`, provider-failure request snapshots.
 
 This contract was verified against Hermes schema version 23 and the upstream [session-storage](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/session-storage.md) and [cron internals](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/cron-internals.md) documentation on 2026-09-23. The SQLite reader checks required columns and selects optional columns only when present, so additive fields and older schemas remain localized to the adapter.
@@ -29,7 +29,9 @@ The source checkpoint is a BLAKE3 digest of the selected logical session and mes
 
 ## Cron output activities
 
-Hermes installations can keep scheduler execution lifecycle in `cron/executions.db` rather than creating `source='cron'` rows in `state.db`. Successful textual results are persisted separately under `cron/output/<job-id>/<local-timestamp>.md`. Agent Lens imports each Markdown artifact as one completed Hermes activity, uses its first level-one heading as the bounded title when available, and retains the complete artifact as an assistant message.
+Hermes installations can keep scheduler execution lifecycle in `cron/executions.db` rather than creating `source='cron'` rows in `state.db`. Run documents are persisted separately under `cron/output/<job-id>/<local-timestamp>.md`. Agent Lens imports each Markdown artifact as one completed Hermes activity, uses its first level-one heading as the bounded title when available, and retains the complete artifact as an assistant message. It distinguishes body output from documents containing only the leading heading and scheduler metadata block; unknown metadata labels are tolerated.
+
+The sessions browser hides metadata-only cron artifacts and canonical `source='cron'` sessions without non-empty assistant or tool output by default. This includes silent script ticks and monitor `no_change` records. They remain indexed as audit evidence, retain direct transcript URLs, and appear when “All cron runs” is selected. Ordinary Hermes sessions and cron runs with body output are unaffected.
 
 The filename timestamp has no UTC offset, so Agent Lens preserves it as a zone-unspecified source timestamp. `cron/executions.db` and `cron/jobs.json` are not currently indexed: failed or running executions without an output artifact therefore remain unavailable, and a renamed job does not rewrite historical titles.
 
@@ -47,7 +49,7 @@ After publishing a complete `.hermes` home, run:
 cargo run -- refresh --data data
 ```
 
-For a directly supplied home, use `cargo run -- refresh --data /path/to/.hermes`. Hermes parser version 2 causes existing request snapshots to reimport once and adds canonical databases and cron outputs without requiring an Agent Lens schema migration or full rebuild. Switching an existing direct-home index between agent types still requires `rebuild`.
+For a directly supplied home, use `cargo run -- refresh --data /path/to/.hermes`. Hermes parser version 3 causes existing sources to reimport once, including cron output classification, without requiring an Agent Lens schema migration or full rebuild. Switching an existing direct-home index between agent types still requires `rebuild`.
 
 Malformed databases, unsupported required schemas, invalid UTF-8 cron outputs, and malformed request snapshots are localized source errors. A failed replacement retains its previous indexed projection and retries on the next refresh.
 
@@ -61,3 +63,5 @@ Pre-change and post-change release binaries were measured against the same warm,
 | Canonical state, cron outputs, and snapshots | 305 | 420 | 1,323 | 3,919 | 6.828 s |
 
 The expanded importer processed about 12.7 times as many sessions and 17 times as many tool calls with a 31.2% elapsed-time increase in this single warm-cache run. A following unchanged refresh logically hashed the canonical database, byte-hashed the other 304 artifacts, skipped all 305 sources, and imported no sessions. These local single-run measurements are not cold-storage or general latency guarantees.
+
+Parser version 3 was measured separately with 4,000 generated cron artifacts across 2,000 jobs: half contained only scheduler metadata and half contained synthetic body output. The 538,000-byte source tree was rebuilt three alternating times with release binaries immediately before and after classification. The baseline median was 2.929 seconds (2.341–2.953); version 3 was 2.816 seconds (2.173–2.855). The ranges overlap, so the measurement establishes no material throughput regression. Adding one boolean to raw metadata increased the disposable index from 5,910,528 to 6,017,024 bytes (1.8%). Source reads, normalized row counts, and transaction boundaries are unchanged; classification makes one allocation-free pass over content already loaded for title and message import. The default list query retains the existing activity-order index and stops after 51 visible rows. No private source was read.

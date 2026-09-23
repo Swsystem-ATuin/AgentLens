@@ -15,7 +15,7 @@ use std::{
 
 pub(crate) const KIND: &str = "hermes";
 pub(crate) const DISPLAY_NAME: &str = "Hermes Agent";
-pub(crate) const PARSER_VERSION: i64 = 2;
+pub(crate) const PARSER_VERSION: i64 = 3;
 pub(crate) const SOURCE_AREAS: [&str; 3] = ["state", "cron", "sessions"];
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-hermes-home";
@@ -716,6 +716,7 @@ fn scan_cron_output(path: &Path) -> Result<SessionSummary> {
         .and_then(|value| value.to_str())
         .context("Hermes cron output missing timestamp filename")?;
     let timestamp = cron_output_timestamp(path);
+    let has_output = cron_output_has_output(&content);
     let derived_title = content
         .lines()
         .find_map(|line| line.strip_prefix("# "))
@@ -734,12 +735,46 @@ fn scan_cron_output(path: &Path) -> Result<SessionSummary> {
             "type":"hermes_cron_output",
             "job_id":job_id,
             "timestamp":cron_output_timestamp(path),
+            "has_output":has_output,
         })
         .to_string(),
         derived_title,
         malformed_lines: 0,
         parse_error: None,
     })
+}
+
+fn cron_output_has_output(content: &str) -> bool {
+    let mut lines = content.lines();
+    let Some(title) = lines.next() else {
+        return false;
+    };
+    if !title.trim_start().starts_with("# ") {
+        return !content.trim().is_empty();
+    }
+    let mut saw_metadata = false;
+    let mut body_started = false;
+    for line in lines {
+        let line = line.trim();
+        if body_started {
+            if !line.is_empty() {
+                return true;
+            }
+            continue;
+        }
+        if line.is_empty() {
+            if saw_metadata {
+                body_started = true;
+            }
+            continue;
+        }
+        if line.starts_with("**") && line.contains(":**") {
+            saw_metadata = true;
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn cron_output_timestamp(path: &Path) -> Option<String> {
@@ -1082,6 +1117,23 @@ mod tests {
             &sessions.join("request_dump_synthetic.json")
         ));
         assert!(!is_session_file(&sessions.join("sessions.json")));
+    }
+
+    #[test]
+    fn cron_output_distinguishes_body_content_from_metadata_only_audits() {
+        assert!(!cron_output_has_output(""));
+        assert!(!cron_output_has_output(
+            "# Cron Job: synthetic\n\n**Job ID:** synthetic-id\n**Run Time:** 2026-01-01 00:00:00\n**Mode:** no_agent (script)\n**Status:** silent (empty output)\n"
+        ));
+        assert!(!cron_output_has_output(
+            "# Cron Job: synthetic\n\n**Job ID:** synthetic-id\n**Run Time:** 2026-01-01 00:00:00\n**Mode:** monitor\n**Status:** no_change (agent run suppressed)\n"
+        ));
+        assert!(cron_output_has_output(
+            "# Cron Job: synthetic\n\n**Job ID:** synthetic-id\n**Run Time:** 2026-01-01 00:00:00\n**Mode:** no_agent (script)\n\nSynthetic script output"
+        ));
+        assert!(cron_output_has_output(
+            "# Synthetic legacy output\n\nSynthetic agent output"
+        ));
     }
 
     #[test]

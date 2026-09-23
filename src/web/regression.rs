@@ -233,6 +233,42 @@ async fn navigation_app() -> (tempfile::TempDir, Router) {
     (dir, app)
 }
 
+async fn cron_filter_app() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO agents VALUES(1,'hermes','Hermes Agent');
+        INSERT INTO hosts VALUES(1,'synthetic-host');
+        INSERT INTO users VALUES(1,1,'synthetic-user');
+        INSERT INTO agent_instances(id,agent_id,user_id,source_home,source_key)
+          VALUES(1,1,1,'synthetic-home','synthetic-source');
+        INSERT INTO sessions(id,instance_id,external_id,stable_id,title,started_at,status,raw_metadata) VALUES
+          (1,1,'ordinary','ordinary-session','Ordinary Hermes session','2026-01-01T00:00:00Z','complete',json_object('type','hermes_state_session','source','cli')),
+          (2,1,'cron-output','cron-with-output','Cron artifact with output','2026-01-02T00:00:00Z','complete',json_object('type','hermes_cron_output','has_output',1)),
+          (3,1,'cron-empty','cron-without-output','Cron artifact without output','2026-01-03T00:00:00Z','complete',json_object('type','hermes_cron_output','has_output',0)),
+          (4,1,'state-cron-empty','state-cron-without-output','State cron without output','2026-01-04T00:00:00Z','complete',json_object('type','hermes_state_session','source','cron')),
+          (5,1,'state-cron-output','state-cron-with-output','State cron with output','2026-01-05T00:00:00Z','complete',json_object('type','hermes_state_session','source','cron'));
+        INSERT INTO messages(session_id,sequence,role,content) VALUES
+          (1,0,'user','Synthetic ordinary request'),
+          (2,0,'assistant','Synthetic cron artifact output'),
+          (3,0,'assistant','Synthetic scheduler metadata only'),
+          (4,0,'user','Synthetic scheduled prompt'),
+          (5,0,'user','Synthetic scheduled prompt'),
+          (5,1,'assistant','Synthetic scheduled output');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool, crate::auth::Credentials::load(&auth).unwrap());
+    (dir, app)
+}
+
 async fn usage_dashboard_app() -> (tempfile::TempDir, SqlitePool, Router) {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
@@ -736,6 +772,51 @@ async fn filters_query_real_rows_individually_together_and_with_literal_input() 
         "options remain available outside current filter"
     );
     assert!(html.contains("<td>host-b</td><td>user-b</td>"));
+}
+
+#[tokio::test]
+async fn cron_runs_without_output_are_hidden_by_default_and_can_be_requested() {
+    let (_dir, app) = cron_filter_app().await;
+    let (status, default) = get(&app, "/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    for visible in [
+        "ordinary-session",
+        "cron-with-output",
+        "state-cron-with-output",
+    ] {
+        assert!(
+            default.contains(&format!("/sessions/{visible}")),
+            "{default}"
+        );
+    }
+    for hidden in ["cron-without-output", "state-cron-without-output"] {
+        assert!(
+            !default.contains(&format!("/sessions/{hidden}")),
+            "{default}"
+        );
+    }
+    assert!(default.contains("<option value=\"\">Cron runs with output</option>"));
+
+    let (status, all) = get(&app, "/sessions?cron=all").await;
+    assert_eq!(status, StatusCode::OK);
+    for visible in [
+        "ordinary-session",
+        "cron-with-output",
+        "cron-without-output",
+        "state-cron-with-output",
+        "state-cron-without-output",
+    ] {
+        assert!(all.contains(&format!("/sessions/{visible}")), "{all}");
+    }
+    assert!(all.contains("<option value=\"all\" selected>All cron runs</option>"));
+    assert_eq!(
+        get(&app, "/sessions?cron=invalid").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get(&app, "/sessions/cron-without-output").await.0,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

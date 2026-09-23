@@ -819,6 +819,7 @@ pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
         ("agent", filters.agent),
         ("project", filters.project),
         ("archive", filters.archive),
+        ("cron", filters.cron),
         ("from", filters.from),
         ("to", filters.to),
     ] {
