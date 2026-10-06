@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Production service examples now support an unprivileged Agent Lens web process
+  under systemd or SysV init, with a frequent non-overlapping incremental refresh
+  through a systemd timer or cron. A shared environment file configures database,
+  source, bind, local/authenticated, cookie, logging, and project settings, and
+  packaging validation is part of the normal regression check.
+
 - Hermes Agent now imports canonical interactive and gateway conversations from the default and named-profile `state.db` stores through consistent read-only SQLite snapshots, including lifecycle, titles, models, compacted history, tool activity, and aggregate usage. Completed scheduler artifacts under `cron/output/` are indexed as separate activities, while request-failure snapshots remain available as distinct attempts.
 
 - A new Agent Lens logo now appears in the application header and sign-in screen, with embedded PNG and multi-size ICO favicons served to browsers without requiring authentication.

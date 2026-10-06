@@ -1,0 +1,23 @@
+[Unit]
+Description=Agent Lens web application
+Documentation=https://git.s4w.uk/infrastructure/agent-lens
+After=network.target
+
+[Service]
+Type=simple
+User=agent-lens
+Group=agent-lens
+EnvironmentFile=/etc/agent-lens/agent-lens.env
+WorkingDirectory=/var/lib/agent-lens
+ExecStart=/usr/local/bin/agent-lens serve
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/agent-lens
+
+[Install]
+WantedBy=multi-user.target

@@ -60,6 +60,9 @@ cargo run -- refresh --data /path/to/.gemini
 cargo run -- refresh --data /path/to/.hermes
 ```
 
+`AGENT_LENS_DATA` supplies the source path for `refresh` and `rebuild` when
+`--data` is omitted, which is useful for service installations.
+
 Refresh checksums every source file, including files with unchanged sizes or timestamps. It imports new, changed, unverified, or outdated-parser files and skips successfully indexed matching versions. The CLI reports imported sessions, skipped files, hard file errors, partial files, malformed lines, files seen, and removed sessions/source files. After successful discovery, refresh removes missing source files and their indexed sessions, messages, tools, and usage; discovery errors abort and roll back projection changes while retaining only a fixed sanitised failure code and timing for health diagnostics. A direct-agent refresh is accepted for a new index or one whose previous successful rebuild/refresh used the same direct-home adapter. Changing adapters or switching between direct-home and host/user layouts requires `rebuild`, preventing unlabeled and labeled origins from being mixed. A browser reload only reads SQLite; run this command to index updated copied sources.
 
 Refresh deterministically prefers active session files and then the lexically earliest logical path when duplicate source files claim one identity. It can replace an older noncanonical winner so repeated refresh and a fresh rebuild converge. For coherent periodic copies, publish a completed immutable versioned directory by atomically retargeting a stable directory symlink; the exact [snapshot, append-validation, retry, and duplicate rules](docs/refresh.md#snapshot-publication-contract) are documented with performance results.
@@ -130,6 +133,23 @@ cargo run -- --database /tmp/agent-lens.sqlite rebuild --data data
 ```
 
 The `AGENT_LENS_DB` environment variable provides the same override.
+
+## Run as a service
+
+Production examples are included for both major Linux init styles:
+
+- systemd uses `agent-lens.service` for the web process and a one-shot
+  `agent-lens-refresh.service` triggered every minute by
+  `agent-lens-refresh.timer`;
+- SysV init uses an `/etc/init.d/agent-lens` service, while cron invokes a
+  lock-protected refresh wrapper every minute so refreshes never overlap.
+
+Both use one `/etc/agent-lens/agent-lens.env` file for database, copied-source,
+bind, authentication-mode, cookie, and optional project settings. The shipped
+configuration binds to loopback and keeps mutable state beneath
+`/var/lib/agent-lens`. See [service management and scheduled refresh](docs/service-management.md)
+for complete installation, account provisioning, permissions, logging, interval,
+and rebuild instructions.
 
 ## Run with Docker
 

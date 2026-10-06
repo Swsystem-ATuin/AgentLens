@@ -37,12 +37,12 @@ struct Cli {
 enum Command {
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
-        #[arg(long, default_value = "data")]
+        #[arg(long, env = "AGENT_LENS_DATA", default_value = "data")]
         data: PathBuf,
     },
     /// Import new or changed sources, preserving the existing index.
     Refresh {
-        #[arg(long, default_value = "data")]
+        #[arg(long, env = "AGENT_LENS_DATA", default_value = "data")]
         data: PathBuf,
     },
     /// Print a sanitised diagnostic summary of the disposable index.
@@ -54,10 +54,10 @@ enum Command {
     },
     /// Serve the local web UI.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:3001")]
+        #[arg(long, env = "AGENT_LENS_BIND", default_value = "127.0.0.1:3001")]
         bind: String,
         /// Serve without an account on a loopback address only.
-        #[arg(long)]
+        #[arg(long, env = "AGENT_LENS_LOCAL")]
         local: bool,
         /// Optional project roots and display timezone JSON file.
         #[arg(long, env = "AGENT_LENS_PROJECTS_FILE")]

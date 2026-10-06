@@ -1,0 +1,17 @@
+#!/bin/sh
+# Cron entry point: load the shared configuration and skip overlapping runs.
+set -eu
+
+CONFIG=/etc/agent-lens/agent-lens.env
+[ -r "$CONFIG" ] || {
+    printf '%s\n' "agent-lens-refresh: cannot read $CONFIG" >&2
+    exit 1
+}
+set -a
+# The administrator-owned file contains only simple KEY=value settings.
+# shellcheck disable=SC1090
+. "$CONFIG"
+set +a
+
+exec /usr/bin/flock --nonblock /var/lib/agent-lens/.refresh.lock \
+    /usr/local/bin/agent-lens refresh

@@ -1,0 +1,2 @@
+# Refresh every minute. Install as /etc/cron.d/agent-lens-refresh (mode 0644).
+* * * * * agent-lens /usr/local/sbin/agent-lens-refresh

@@ -10,6 +10,9 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env_remove("AGENT_LENS_STATE_DB")
         .env_remove("AGENT_LENS_SECURE_COOKIES")
         .env_remove("AGENT_LENS_PROJECTS_FILE")
+        .env_remove("AGENT_LENS_DATA")
+        .env_remove("AGENT_LENS_BIND")
+        .env_remove("AGENT_LENS_LOCAL")
         .args(args)
         .output()
         .unwrap()
@@ -28,11 +31,18 @@ fn serve_help_documents_loopback_port_and_session_options() {
     assert!(result.status.success());
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(output.contains("127.0.0.1:3001"));
+    assert!(output.contains("AGENT_LENS_BIND"));
     assert!(output.contains("--secure-cookies"));
     assert!(output.contains("AGENT_LENS_SECURE_COOKIES"));
     assert!(output.contains("--projects-file"));
     assert!(output.contains("AGENT_LENS_PROJECTS_FILE"));
     assert!(output.contains("--local"));
+    assert!(output.contains("AGENT_LENS_LOCAL"));
+
+    let refresh = run(dir.path(), &["refresh", "--help"]);
+    assert!(refresh.status.success());
+    let refresh_output = String::from_utf8(refresh.stdout).unwrap();
+    assert!(refresh_output.contains("AGENT_LENS_DATA"));
 
     let account = run(dir.path(), &["account", "--help"]);
     assert!(account.status.success());
@@ -83,6 +93,24 @@ fn local_mode_rejects_non_loopback_bind_before_creating_state() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("loopback bind address"));
     assert!(!dir.path().join("agent-lens-state.sqlite").exists());
     assert!(!dir.path().join("agent-lens.sqlite").exists());
+}
+
+#[test]
+fn service_environment_selects_local_mode_and_bind_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_agent-lens"))
+        .current_dir(dir.path())
+        .env_remove("AGENT_LENS_DB")
+        .env_remove("AGENT_LENS_STATE_DB")
+        .env("AGENT_LENS_LOCAL", "true")
+        .env("AGENT_LENS_BIND", "0.0.0.0:3001")
+        .arg("serve")
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("loopback bind address"));
+    assert!(!dir.path().join("agent-lens-state.sqlite").exists());
 }
 
 #[tokio::test]

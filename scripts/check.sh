@@ -5,4 +5,5 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 cargo fmt --check
 cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
+bash scripts/verify-packaging.sh
 git diff --check

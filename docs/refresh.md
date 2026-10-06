@@ -8,7 +8,7 @@ cargo run -- refresh --data /path/to/.gemini
 cargo run -- refresh --data /path/to/.hermes
 ```
 
-`AGENT_LENS_DB` also selects the index. Refresh creates an index when missing and requires no authentication file. The data path may use a multi-origin `root/host/user/` layout containing `.codex`, `.gemini`, and/or `.hermes` homes, or name one agent home directly. Direct-home indexes omit host/user filters, columns, and transcript metadata. Refresh preserves the layout and direct adapter recorded by the previous successful rebuild or refresh; use `rebuild` to change them. Use the same working directory and source-path spelling across runs: source homes and file paths are currently stored as supplied, not canonicalized identities.
+`AGENT_LENS_DB` selects the index and `AGENT_LENS_DATA` selects the source root when the corresponding CLI option is omitted. Refresh creates an index when missing and requires no authentication file. The data path may use a multi-origin `root/host/user/` layout containing `.codex`, `.gemini`, and/or `.hermes` homes, or name one agent home directly. Direct-home indexes omit host/user filters, columns, and transcript metadata. Refresh preserves the layout and direct adapter recorded by the previous successful rebuild or refresh; use `rebuild` to change them. Use the same working directory and source-path spelling across runs: source homes and file paths are currently stored as supplied, not canonicalized identities.
 
 Every discovered rollout, chat, Hermes canonical database, cron output, or request snapshot is checked against a source checkpoint in SQLite. Ordinary-file checkpoints contain a `blake3:`-prefixed digest of the exact bytes. Hermes `state.db` checkpoints instead digest the selected logical rows from one consistent SQLite read transaction, so WAL checkpoints and page-layout changes do not create false transcript changes. Checkpoints also record an adapter-specific parser version and parse status. A matching current, successful checksum skips parsing. Session lifecycle status is not used: a completed task may resume later.
 
@@ -41,6 +41,12 @@ For periodic copies, write each complete snapshot to a new versioned directory t
 For a directly copied live `.codex` home, append-only writers are tolerated only when a complete read remains stable. AgentLens hashes the entire file, scans it again for normalized writes, and verifies metadata before, between, and after those passes. A partial JSON or UTF-8 tail is recorded on a new source and retried, while a partial replacement rolls back to the prior projection. A later append, truncation, or historical rewrite is detected by a full checksum read; no prefix checkpoint or size/mtime probe is trusted. Because per-file validation cannot make a multi-file tree atomic, use the immutable-directory protocol whenever additions, removals, and archive moves must appear as one coherent snapshot.
 
 Refresh can run while the server reads the same SQLite database: readers see committed data, and subsequent requests see the completed refresh. Run one importer at a time. Existing long-lived read transactions can continue seeing their earlier snapshot. Restart the server to load updated application code. Browser reloads do not run ingestion.
+
+For continuous operation, the repository includes a systemd one-shot service and
+minute timer, plus a SysV init service with a lock-protected cron refresh. Both
+load the same path settings and prevent overlapping scheduled imports. See
+[service management and scheduled refresh](service-management.md) for installation
+and interval configuration.
 
 Each committed candidate check records `source_files.observed_at`, including an unchanged checksum and a localized source error. The [opt-in live reader](live-reading.md) uses that observation separately from the newest completed ingest-run timestamp and the session lifecycle status. Existing indexes add the nullable column automatically; one refresh populates it.
 
