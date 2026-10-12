@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Signed-in users can now change their own password from the Account page after confirming their current password. New passwords share a minimum 7-character complexity policy across browser and administrator workflows, successful changes rotate the current session, and all other sessions for the account are revoked immediately.
+
 - Repository-wide Trunk code-quality configuration now pins checks for Rust, shell,
   Docker, TOML, Markdown, whitespace, and accidentally committed secrets, with managed
   pre-commit and pre-push hooks and documented local usage.

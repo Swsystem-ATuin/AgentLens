@@ -99,7 +99,7 @@ ${EDITOR:-vi} /tmp/agent-lens-password
 cargo run -- account create --username alice --password-file /tmp/agent-lens-password
 ```
 
-Remove the temporary file through your operating system's secure local workflow after provisioning. Password files must be UTF-8, owner-only on Unix, at least 15 characters and at most 1,024 bytes after one trailing newline is removed, and contain no control characters. The password is stored only as a salted Argon2id PHC hash.
+Remove the temporary file through your operating system's secure local workflow after provisioning. Password files must be UTF-8, owner-only on Unix, at least 7 characters and at most 1,024 bytes after one trailing newline is removed, contain no control characters, and include at least one uppercase letter, lowercase letter, number, and symbol. The password is stored only as a salted Argon2id PHC hash.
 
 Start the web server:
 
@@ -116,7 +116,7 @@ cargo run -- serve --projects-file projects.local.json
 
 `AGENT_LENS_PROJECTS_FILE` provides the same override. Project configuration is loaded only by the web server, never written into copied agent homes, and does not require a refresh or rebuild. Restart the server after editing it.
 
-The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>, <http://127.0.0.1:3001/usage>, <http://127.0.0.1:3001/diagnostics>, <http://127.0.0.1:3001/health>, or the machine-readable <http://127.0.0.1:3001/metrics>. Use `--bind` to select another address. Browser requests are redirected to `/login`; the Account page provides explicit logout.
+The development server defaults to `127.0.0.1:3001`. Open <http://127.0.0.1:3001/sessions>, <http://127.0.0.1:3001/usage>, <http://127.0.0.1:3001/diagnostics>, <http://127.0.0.1:3001/health>, or the machine-readable <http://127.0.0.1:3001/metrics>. Use `--bind` to select another address. Browser requests are redirected to `/login`; signed-in users can change their own password or explicitly sign out from the Account page.
 
 Without `--local`, authentication is required for every data route, including direct transcript URLs, lazy fragments, exports, health, and metrics. The server refuses to start without an enabled account. Browser sessions expire after 30 minutes of inactivity or 12 hours total. Responses use `Cache-Control: no-store`; login and logout are CSRF-protected and login rotates the opaque session identifier.
 

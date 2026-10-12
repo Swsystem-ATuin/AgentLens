@@ -8,7 +8,7 @@ Authentication identifies the application account; [source-scoped authorization]
 
 ## Provisioning and recovery
 
-Password input is accepted only through `--password-file`, never a command-line value. On Unix, regular password files are rejected unless group and other permission bits are clear. One final LF or CRLF is removed; other control characters are rejected. Because this password-only flow has no MFA, passwords require at least 15 characters; the maximum is 1,024 bytes and no password is silently truncated. These limits follow [OWASP authentication guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html). Use a unique passphrase. For example:
+Administrative password input is accepted only through `--password-file`, never a command-line value. On Unix, regular password files are rejected unless group and other permission bits are clear. One final LF or CRLF is removed; other control characters are rejected. New passwords require at least 7 characters with at least one uppercase letter, lowercase letter, number, and non-whitespace symbol; the maximum is 1,024 bytes and no password is silently truncated. Use a unique password. For example:
 
 ```bash
 (umask 077; touch /tmp/agent-lens-password)
@@ -16,7 +16,7 @@ ${EDITOR:-vi} /tmp/agent-lens-password
 cargo run -- account create --username alice --password-file /tmp/agent-lens-password
 ```
 
-Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, security-question recovery, or browser password reset. The first account defaults to `admin`, later accounts to `viewer`, and `account create --role` can override that default. Local administrators use:
+Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, or security-question recovery. The first account defaults to `admin`, later accounts to `viewer`, and `account create --role` can override that default. Local administrators use:
 
 ```bash
 cargo run -- account reset-password --username alice --password-file /tmp/agent-lens-password
@@ -25,7 +25,7 @@ cargo run -- account disable --username alice
 cargo run -- account enable --username alice
 ```
 
-Resetting a password and disabling an account immediately invalidate all existing sessions. Explicit revocation does the same without changing the password or enabled state. Enabling an account does not restore invalidated sessions. Logout deletes the current server-side session.
+Any signed-in account can change its own password from the Account page after supplying its current password and matching confirmation. The same password policy is enforced in the browser and administrative commands. A successful self-service change retains a newly rotated current session and immediately invalidates the account's other sessions. An administrative password reset and disabling an account invalidate all existing sessions. Explicit revocation does the same without changing the password or enabled state. Enabling an account does not restore invalidated sessions. Logout deletes the current server-side session. Existing passwords remain usable until they are changed or reset.
 
 Passwords are stored as salted Argon2id PHC strings using version 19, 19 MiB memory, two iterations, and one lane, following [OWASP's current minimum Argon2id profile](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). The login path also performs a dummy Argon2id verification for unknown usernames and returns the same generic failure message for an unknown account, wrong password, or disabled account. Passwords, hashes, cookies, CSRF tokens, and authorization headers are excluded from application logs and browser errors.
 
@@ -35,7 +35,7 @@ On the development host, the optimized synthetic account regression completed ei
 
 Unauthenticated HTML navigation redirects to `/login` with a percent-encoded same-origin return path. Non-browser requests receive `401`; absolute URLs, scheme-relative targets, and newline-bearing return targets are rejected. Successful login rotates the session identifier before associating the application identity.
 
-Sessions use the maintained [`tower-sessions` server-side abstraction](https://docs.rs/tower-sessions/latest/tower_sessions/) with its SQLx SQLite store. They live in the persistent state database and use an `HttpOnly`, `SameSite=Lax` cookie named `agent_lens_session`. They expire after 30 minutes without a valid request and after 12 hours regardless of activity. Account enabled state and revocation generation are rechecked from persistent state on every request, so restart, password reset, disablement, and administrator revocation fail closed immediately. Login and logout forms use session-bound random CSRF tokens; logout accepts POST only.
+Sessions use the maintained [`tower-sessions` server-side abstraction](https://docs.rs/tower-sessions/latest/tower_sessions/) with its SQLx SQLite store. They live in the persistent state database and use an `HttpOnly`, `SameSite=Lax` cookie named `agent_lens_session`. They expire after 30 minutes without a valid request and after 12 hours regardless of activity. Account enabled state and revocation generation are rechecked from persistent state on every request, so restart, password change or reset, disablement, and administrator revocation fail closed immediately. Login, password-change, and logout forms use session-bound random CSRF tokens; password change and logout accept POST only.
 
 The `Secure` cookie attribute is off for the default loopback HTTP development server. For any HTTPS reverse-proxy deployment, prevent direct backend access and enable it explicitly:
 
@@ -67,4 +67,4 @@ Deleting or rebuilding `agent-lens.sqlite` does not touch application state. Del
 
 ## Verification
 
-Synthetic regressions cover Argon2id storage without plaintext, case-insensitive account identity, password reset, disable/enable, account-wide revocation, fail-closed startup, session identifier rotation, invalid and successful login, generic failures, CSRF rejection, explicit logout, inactivity and absolute expiry, restart persistence, protected routes, same-origin return targets, and Prometheus Basic authentication. Tests use only synthetic credentials and temporary databases.
+Synthetic regressions cover the shared complexity policy, Argon2id storage without plaintext, case-insensitive account identity, administrative reset, self-service password change, other-session revocation, disable/enable, account-wide revocation, fail-closed startup, session identifier rotation, invalid and successful login, generic failures, CSRF rejection, explicit logout, inactivity and absolute expiry, restart persistence, protected routes, same-origin return targets, and Prometheus Basic authentication. Tests use only synthetic credentials and temporary databases.

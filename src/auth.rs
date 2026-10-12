@@ -26,7 +26,7 @@ use tower_sessions_sqlx_store::SqliteStore;
 
 pub const INACTIVITY_MINUTES: i64 = 30;
 pub const ABSOLUTE_HOURS: i64 = 12;
-const MIN_PASSWORD_CHARS: usize = 15;
+pub const MIN_PASSWORD_CHARS: usize = 7;
 const MAX_PASSWORD_BYTES: usize = 1_024;
 const ACCOUNT_ID: &str = "auth.account_id";
 const SESSION_GENERATION: &str = "auth.generation";
@@ -127,6 +127,7 @@ impl AccessScope {
         if matches!(
             path,
             "/" | "/account"
+                | "/account/password"
                 | "/logout"
                 | "/sessions"
                 | "/usage"
@@ -179,6 +180,40 @@ pub struct LoginForm {
     #[serde(default)]
     pub return_to: String,
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ChangePasswordResult {
+    Changed { generation: i64 },
+    InvalidCurrentPassword,
+    InvalidNewPassword(PasswordPolicyError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasswordPolicyError {
+    TooShort,
+    TooLong,
+    ControlCharacter,
+    MissingUppercase,
+    MissingLowercase,
+    MissingNumber,
+    MissingSymbol,
+}
+
+impl std::fmt::Display for PasswordPolicyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::TooShort => "password must contain at least 7 characters",
+            Self::TooLong => "password is too long",
+            Self::ControlCharacter => "password must not contain control characters",
+            Self::MissingUppercase => "password must contain an uppercase character",
+            Self::MissingLowercase => "password must contain a lowercase character",
+            Self::MissingNumber => "password must contain a numeric character",
+            Self::MissingSymbol => "password must contain a symbol character",
+        })
+    }
+}
+
+impl std::error::Error for PasswordPolicyError {}
 
 impl StateStore {
     pub fn enable_local_mode(&mut self) {
@@ -383,6 +418,58 @@ pub async fn reset_password(
         .bind(hash).bind(username).execute(&state.auth.pool).await.context("reset application account password")?;
     ensure!(result.rows_affected() == 1, "application account not found");
     Ok(())
+}
+
+pub async fn change_password(
+    state: &AuthState,
+    account_id: &str,
+    current_password: &str,
+    new_password: &str,
+) -> Result<ChangePasswordResult> {
+    if current_password.len() > MAX_PASSWORD_BYTES {
+        return Ok(ChangePasswordResult::InvalidCurrentPassword);
+    }
+    let Some(current_hash) = sqlx::query_scalar::<_, String>(
+        "SELECT password_hash FROM accounts WHERE id=? AND enabled=1",
+    )
+    .bind(account_id)
+    .fetch_optional(&state.pool)
+    .await
+    .context("load account for password change")?
+    else {
+        return Ok(ChangePasswordResult::InvalidCurrentPassword);
+    };
+    let verification_hash = current_hash.clone();
+    let supplied_password = current_password.to_owned();
+    let current_matches = tokio::task::spawn_blocking(move || {
+        verify_password(&verification_hash, &supplied_password)
+    })
+    .await
+    .context("join current password verification")?;
+    if !current_matches {
+        return Ok(ChangePasswordResult::InvalidCurrentPassword);
+    }
+    if let Err(error) = validate_password(new_password) {
+        return Ok(ChangePasswordResult::InvalidNewPassword(error));
+    }
+    let new_password = new_password.to_owned();
+    let new_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
+        .await
+        .context("join password hashing")??;
+    let generation = sqlx::query_scalar::<_, i64>(
+        "UPDATE accounts SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,session_generation=session_generation+1 WHERE id=? AND password_hash=? AND enabled=1 RETURNING session_generation",
+    )
+    .bind(new_hash)
+    .bind(account_id)
+    .bind(current_hash)
+    .fetch_optional(&state.pool)
+    .await
+    .context("change application account password")?;
+    Ok(
+        generation.map_or(ChangePasswordResult::InvalidCurrentPassword, |generation| {
+            ChangePasswordResult::Changed { generation }
+        }),
+    )
 }
 
 pub async fn set_enabled(state: &StateStore, username: &str, enabled: bool) -> Result<()> {
@@ -780,16 +867,31 @@ fn read_password(path: &Path) -> Result<String> {
     Ok(password)
 }
 
-fn validate_password(password: &str) -> Result<()> {
-    ensure!(
-        password.chars().count() >= MIN_PASSWORD_CHARS,
-        "password must contain at least {MIN_PASSWORD_CHARS} characters"
-    );
-    ensure!(password.len() <= MAX_PASSWORD_BYTES, "password is too long");
-    ensure!(
-        !password.chars().any(char::is_control),
-        "password must not contain control characters"
-    );
+fn validate_password(password: &str) -> std::result::Result<(), PasswordPolicyError> {
+    if password.chars().count() < MIN_PASSWORD_CHARS {
+        return Err(PasswordPolicyError::TooShort);
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(PasswordPolicyError::TooLong);
+    }
+    if password.chars().any(char::is_control) {
+        return Err(PasswordPolicyError::ControlCharacter);
+    }
+    if !password.chars().any(char::is_uppercase) {
+        return Err(PasswordPolicyError::MissingUppercase);
+    }
+    if !password.chars().any(char::is_lowercase) {
+        return Err(PasswordPolicyError::MissingLowercase);
+    }
+    if !password.chars().any(char::is_numeric) {
+        return Err(PasswordPolicyError::MissingNumber);
+    }
+    if !password
+        .chars()
+        .any(|character| !character.is_alphanumeric() && !character.is_whitespace())
+    {
+        return Err(PasswordPolicyError::MissingSymbol);
+    }
     Ok(())
 }
 
@@ -926,7 +1028,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(journal_mode, "wal");
-        let first = password_file(dir.path(), "first synthetic passphrase\n");
+        let first = password_file(dir.path(), "First1! synthetic passphrase\n");
         create_account(&state, "Synthetic.User", &first, None)
             .await
             .unwrap();
@@ -955,11 +1057,11 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
-        assert!(!stored.contains("first synthetic passphrase"));
+        assert!(!stored.contains("First1! synthetic passphrase"));
         assert!(
             state
                 .auth
-                .authenticate("synthetic.user", "first synthetic passphrase")
+                .authenticate("synthetic.user", "First1! synthetic passphrase")
                 .await
                 .unwrap()
                 .is_some()
@@ -970,14 +1072,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(generation, 1);
-        let second = password_file(dir.path(), "second synthetic passphrase");
+        let second = password_file(dir.path(), "Second2! synthetic passphrase");
         reset_password(&state, "Synthetic.User", &second)
             .await
             .unwrap();
         assert!(
             state
                 .auth
-                .authenticate("Synthetic.User", "first synthetic passphrase")
+                .authenticate("Synthetic.User", "First1! synthetic passphrase")
                 .await
                 .unwrap()
                 .is_none()
@@ -985,7 +1087,7 @@ mod tests {
         assert!(
             state
                 .auth
-                .authenticate("Synthetic.User", "second synthetic passphrase")
+                .authenticate("Synthetic.User", "Second2! synthetic passphrase")
                 .await
                 .unwrap()
                 .is_some()
@@ -994,7 +1096,7 @@ mod tests {
         assert!(
             state
                 .auth
-                .authenticate("Synthetic.User", "second synthetic passphrase")
+                .authenticate("Synthetic.User", "Second2! synthetic passphrase")
                 .await
                 .unwrap()
                 .is_none()
@@ -1003,7 +1105,7 @@ mod tests {
         assert!(
             state
                 .auth
-                .authenticate("Synthetic.User", "second synthetic passphrase")
+                .authenticate("Synthetic.User", "Second2! synthetic passphrase")
                 .await
                 .unwrap()
                 .is_some()
@@ -1029,6 +1131,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = read_password(dir.path()).unwrap_err().to_string();
         assert!(error.contains("regular file"), "{error}");
+    }
+
+    #[test]
+    fn password_policy_requires_seven_complex_characters() {
+        assert_eq!(validate_password("Aa1!xyz"), Ok(()));
+        for (password, expected) in [
+            ("Aa1!xy", PasswordPolicyError::TooShort),
+            ("aa1!xyz", PasswordPolicyError::MissingUppercase),
+            ("AA1!XYZ", PasswordPolicyError::MissingLowercase),
+            ("Aa!!xyz", PasswordPolicyError::MissingNumber),
+            ("Aa12xyz", PasswordPolicyError::MissingSymbol),
+            ("Aa1 xyz", PasswordPolicyError::MissingSymbol),
+            ("Aa1!xy\n", PasswordPolicyError::ControlCharacter),
+        ] {
+            assert_eq!(validate_password(password), Err(expected), "{password:?}");
+        }
     }
 
     #[tokio::test]

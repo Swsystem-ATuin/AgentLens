@@ -53,6 +53,19 @@ struct LogoutForm {
     csrf_token: String,
 }
 
+#[derive(Deserialize, Default)]
+struct AccountQuery {
+    password_changed: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordForm {
+    csrf_token: String,
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTemplate {
@@ -69,6 +82,9 @@ struct AccountTemplate {
     source_count: usize,
     csrf_token: String,
     local_mode: bool,
+    password_changed: bool,
+    password_failed: bool,
+    password_error: String,
 }
 
 #[cfg(test)]
@@ -323,6 +339,7 @@ fn app_routes(
             get(|| async { axum::response::Redirect::temporary("/sessions") }),
         )
         .route("/account", get(account))
+        .route("/account/password", post(change_password))
         .route("/logout", post(logout))
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
@@ -487,21 +504,97 @@ async fn account(
     State(state): State<AppState>,
     Extension(user): Extension<crate::auth::CurrentUser>,
     session: tower_sessions::Session,
+    Query(query): Query<AccountQuery>,
 ) -> Result<Html<String>, WebError> {
-    let csrf_token = crate::auth::csrf_token(&session)
+    render_account(
+        &state,
+        &user,
+        &session,
+        query.password_changed.as_deref() == Some("1"),
+        None,
+    )
+    .await
+}
+
+async fn render_account(
+    state: &AppState,
+    user: &crate::auth::CurrentUser,
+    session: &tower_sessions::Session,
+    password_changed: bool,
+    password_error: Option<&str>,
+) -> Result<Html<String>, WebError> {
+    let csrf_token = crate::auth::csrf_token(session)
         .await
         .map_err(|_| WebError::authentication("prepare account page"))?;
     Ok(Html(
         AccountTemplate {
-            username: user.username,
+            username: user.username.clone(),
             role: user.access.role(),
             source_count: user.access.source_count(),
             csrf_token,
             local_mode: state.auth.is_local_mode(),
+            password_changed,
+            password_failed: password_error.is_some(),
+            password_error: password_error.unwrap_or_default().to_owned(),
         }
         .render()
         .map_err(|error| WebError::template("render account page", error))?,
     ))
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Form(form): Form<ChangePasswordForm>,
+) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/account").into_response());
+    }
+    if !crate::auth::verify_csrf(&session, &form.csrf_token)
+        .await
+        .map_err(|_| WebError::authentication("verify password change request"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    let error = if form.new_password != form.confirm_password {
+        Some("New password and confirmation do not match.")
+    } else {
+        match crate::auth::change_password(
+            &state.auth,
+            &user.id,
+            &form.current_password,
+            &form.new_password,
+        )
+        .await
+        .map_err(|_| WebError::authentication("change account password"))?
+        {
+            crate::auth::ChangePasswordResult::Changed { generation } => {
+                crate::auth::establish_session(&session, &user, generation)
+                    .await
+                    .map_err(|_| WebError::authentication("refresh changed-password session"))?;
+                return Ok(
+                    axum::response::Redirect::to("/account?password_changed=1").into_response()
+                );
+            }
+            crate::auth::ChangePasswordResult::InvalidCurrentPassword => {
+                Some("Current password is incorrect.")
+            }
+            crate::auth::ChangePasswordResult::InvalidNewPassword(error) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    render_account(&state, &user, &session, false, Some(&error.to_string()))
+                        .await?,
+                )
+                    .into_response());
+            }
+        }
+    };
+    Ok((
+        StatusCode::BAD_REQUEST,
+        render_account(&state, &user, &session, false, error).await?,
+    )
+        .into_response())
 }
 
 async fn logout(
@@ -1824,7 +1917,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let password = dir.path().join("password");
-        std::fs::write(&password, "synthetic:password").unwrap();
+        std::fs::write(&password, "Synthetic1:password").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1879,6 +1972,7 @@ mod tests {
             "/health",
             "/metrics",
             "/account",
+            "/account/password",
             "/logout",
             "/sessions/1",
             "/sessions/1/live-status",
@@ -1936,7 +2030,7 @@ mod tests {
         assert_eq!(invalid_csrf.status(), StatusCode::BAD_REQUEST);
 
         use base64::{Engine, engine::general_purpose::STANDARD};
-        let metrics_basic = format!("Basic {}", STANDARD.encode("test:synthetic:password"));
+        let metrics_basic = format!("Basic {}", STANDARD.encode("test:Synthetic1:password"));
         let metrics = app
             .clone()
             .oneshot(
@@ -2006,7 +2100,7 @@ mod tests {
         assert!(!location.contains("test"));
         assert!(!location.contains("wrong-password"));
         let body = format!(
-            "username=test&password=synthetic%3Apassword&csrf_token={csrf}&return_to=%2Fsessions%3Fmodel%3Dx"
+            "username=test&password=Synthetic1%3Apassword&csrf_token={csrf}&return_to=%2Fsessions%3Fmodel%3Dx"
         );
         let logged_in = app
             .clone()
@@ -2076,7 +2170,7 @@ mod tests {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
         let password_file = dir.path().join("password");
-        std::fs::write(&password_file, "synthetic-password").unwrap();
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2094,7 +2188,7 @@ mod tests {
             .unwrap();
         let app = session_router(pool.clone(), state.clone());
 
-        let cookie = login_cookie(&app, "alice", "synthetic-password").await;
+        let cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
         let restarted = session_router(pool.clone(), state.clone());
         let account = account_response(&restarted, &cookie).await;
         assert_eq!(account.status(), StatusCode::OK);
@@ -2113,7 +2207,7 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
-        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        let cookie = login_cookie(&restarted, "alice", "Synthetic1-password").await;
         crate::auth::set_enabled(&state, "alice", false)
             .await
             .unwrap();
@@ -2125,7 +2219,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        let cookie = login_cookie(&restarted, "alice", "Synthetic1-password").await;
         sqlx::query("UPDATE tower_sessions SET expiry_date=0")
             .execute(crate::auth::state_pool(&state))
             .await
@@ -2135,7 +2229,7 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
-        let cookie = login_cookie(&restarted, "alice", "synthetic-password").await;
+        let cookie = login_cookie(&restarted, "alice", "Synthetic1-password").await;
         let account = account_response(&restarted, &cookie).await;
         let html = String::from_utf8(
             to_bytes(account.into_body(), 32 * 1024)
@@ -2192,10 +2286,167 @@ mod tests {
         let mut short_state = state.clone();
         crate::auth::expire_immediately(&mut short_state);
         let expiring = session_router(pool, short_state);
-        let cookie = login_cookie(&expiring, "alice", "synthetic-password").await;
+        let cookie = login_cookie(&expiring, "alice", "Synthetic1-password").await;
         assert_eq!(
             account_response(&expiring, &cookie).await.status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_in_users_can_change_their_password() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "alice", &password_file, None)
+            .await
+            .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = session_router(pool, state.clone());
+        let other_cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
+        let changing_cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
+
+        let account = account_response(&app, &changing_cookie).await;
+        let html = String::from_utf8(
+            to_bytes(account.into_body(), 32 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("action=\"/account/password\""));
+        assert!(html.contains("at least 7 characters"));
+        let csrf = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+
+        for (body, expected_message) in [
+            (
+                format!(
+                    "csrf_token={csrf}&current_password=wrong&new_password=Newpass2!&confirm_password=Newpass2!"
+                ),
+                "Current password is incorrect.",
+            ),
+            (
+                format!(
+                    "csrf_token={csrf}&current_password=Synthetic1-password&new_password=Newpass2!&confirm_password=Different3!"
+                ),
+                "New password and confirmation do not match.",
+            ),
+            (
+                format!(
+                    "csrf_token={csrf}&current_password=Synthetic1-password&new_password=weakpass&confirm_password=weakpass"
+                ),
+                "password must contain an uppercase character",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/account/password")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(header::COOKIE, &changing_cookie)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = String::from_utf8(
+                to_bytes(response.into_body(), 32 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(body.contains(expected_message), "{body}");
+            assert!(!body.contains("value=\"Synthetic1-password\""));
+        }
+
+        let invalid_csrf = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/password")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &changing_cookie)
+                    .body(Body::from("csrf_token=wrong&current_password=Synthetic1-password&new_password=Newpass2!&confirm_password=Newpass2!"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_csrf.status(), StatusCode::BAD_REQUEST);
+
+        let changed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/password")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &changing_cookie)
+                    .body(Body::from(format!("csrf_token={csrf}&current_password=Synthetic1-password&new_password=Newpass2!&confirm_password=Newpass2!")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            changed.headers()[header::LOCATION],
+            "/account?password_changed=1"
+        );
+        let changed_cookie = changed.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            account_response(&app, &other_cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let account = account_response(&app, &changed_cookie).await;
+        assert_eq!(account.status(), StatusCode::OK);
+        assert!(
+            state
+                .auth
+                .authenticate("alice", "Synthetic1-password")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .auth
+                .authenticate("alice", "Newpass2!")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
@@ -2232,7 +2483,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let password_file = dir.path().join("password");
-        std::fs::write(&password_file, "synthetic-password").unwrap();
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2272,8 +2523,8 @@ mod tests {
             .await
             .unwrap();
         let app = session_router(pool, state.clone());
-        let admin_cookie = login_cookie(&app, "admin", "synthetic-password").await;
-        let viewer_cookie = login_cookie(&app, "viewer", "synthetic-password").await;
+        let admin_cookie = login_cookie(&app, "admin", "Synthetic1-password").await;
+        let viewer_cookie = login_cookie(&app, "viewer", "Synthetic1-password").await;
 
         let (status, empty_viewer) = get(&app, &viewer_cookie, "/sessions").await;
         assert_eq!(status, StatusCode::OK);
@@ -2357,7 +2608,7 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         use base64::{Engine, engine::general_purpose::STANDARD};
-        let viewer_basic = format!("Basic {}", STANDARD.encode("viewer:synthetic-password"));
+        let viewer_basic = format!("Basic {}", STANDARD.encode("viewer:Synthetic1-password"));
         let basic_metrics = app
             .clone()
             .oneshot(

@@ -119,7 +119,7 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let password = dir.path().join("password");
-    std::fs::write(&password, "first synthetic passphrase\n").unwrap();
+    std::fs::write(&password, "First1! synthetic passphrase\n").unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
     let create = run(
@@ -176,7 +176,7 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
     .await
     .unwrap();
     assert!(hash.starts_with("$argon2id$"));
-    assert!(!hash.contains("first synthetic passphrase"));
+    assert!(!hash.contains("First1! synthetic passphrase"));
     assert!(enabled);
     assert_eq!(generation, 0);
     assert_eq!(role, "admin");
@@ -299,7 +299,7 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
         ],
     );
     assert!(!duplicate.status.success());
-    assert!(!String::from_utf8_lossy(&duplicate.stderr).contains("first synthetic passphrase"));
+    assert!(!String::from_utf8_lossy(&duplicate.stderr).contains("First1! synthetic passphrase"));
     assert!(
         run(
             dir.path(),
@@ -319,7 +319,7 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
             .success()
     );
 
-    std::fs::write(&password, "second synthetic passphrase").unwrap();
+    std::fs::write(&password, "Second2! synthetic passphrase").unwrap();
     let reset = run(
         dir.path(),
         &[
@@ -349,7 +349,7 @@ async fn account_cli_provisions_hashes_recovers_disables_and_revokes_without_tou
     .await
     .unwrap();
     assert!(hash.starts_with("$argon2id$"));
-    assert!(!hash.contains("second synthetic passphrase"));
+    assert!(!hash.contains("Second2! synthetic passphrase"));
     assert!(enabled);
     assert_eq!(generation, 3);
 }
