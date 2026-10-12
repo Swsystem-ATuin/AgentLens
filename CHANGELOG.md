@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- A dependency-ordered post-MVP account-management roadmap now defines completion gates for per-account preferences, self-service session and security history, scoped personal access tokens, capability-based roles and teams, audited browser administration, TOTP/passkey/OIDC decision points, redacted-content access, and conditional outbound notifications.
+
 - Signed-in users can now change their own password from the Account page after confirming their current password. New passwords share a minimum 7-character complexity policy across browser and administrator workflows, successful changes rotate the current session, and all other sessions for the account are revoked immediately.
 
 - Repository-wide Trunk code-quality configuration now pins checks for Rust, shell,

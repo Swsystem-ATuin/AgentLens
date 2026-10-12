@@ -194,7 +194,7 @@ Open <http://127.0.0.1:3001/sessions>. Run future `refresh --data /data` command
 
 ## Development
 
-Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). Update the roadmap as work is completed or requirements change. The former TODO checklist has been consolidated into the roadmap.
+Planned features and architecture follow-ups are tracked in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). The roadmap includes a dependency-ordered M5 account-management plan covering preferences, session/security history, scoped tokens, capability-based authorization, browser administration, stronger identity options, and conditional notifications. Update the roadmap as work is completed or requirements change. The former TODO checklist has been consolidated into the roadmap.
 
 Internal web failures return a generic response. Server diagnostics record only an allowlisted operation, error category, optional database/IO code, HTTP status, and request method; they do not record request URIs, authorization headers, database error text, or transcript content. See [web error handling](docs/web-errors.md).
 
