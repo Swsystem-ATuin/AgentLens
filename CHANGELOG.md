@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Repository-wide Trunk code-quality configuration now pins checks for Rust, shell,
+  Docker, TOML, Markdown, whitespace, and accidentally committed secrets, with managed
+  pre-commit and pre-push hooks and documented local usage.
+
 - Production service examples now support an unprivileged Agent Lens web process
   under systemd or SysV init, with a frequent non-overlapping incremental refresh
   through a systemd timer or cron. A shared environment file configures database,

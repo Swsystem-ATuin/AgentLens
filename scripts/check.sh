@@ -6,4 +6,5 @@ cargo fmt --check
 cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 bash scripts/verify-packaging.sh
+trunk check --all --no-fix --ci
 git diff --check

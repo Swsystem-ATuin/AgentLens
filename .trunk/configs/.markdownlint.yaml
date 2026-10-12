@@ -1,0 +1,6 @@
+# Prettier friendly markdownlint config (all formatting rules disabled)
+extends: markdownlint/style/prettier
+MD024:
+  siblings_only: true
+# A documented source prefix intentionally ends with a space inside a code span.
+MD038: false

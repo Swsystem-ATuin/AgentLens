@@ -16,54 +16,54 @@ USER=agent-lens
 GROUP=agent-lens
 WORKDIR=/var/lib/agent-lens
 RUNDIR=/run/agent-lens
-PIDFILE=$RUNDIR/agent-lens.pid
+PIDFILE=${RUNDIR}/agent-lens.pid
 LOGDIR=/var/log/agent-lens
-LOGFILE=$LOGDIR/agent-lens.log
+LOGFILE=${LOGDIR}/agent-lens.log
 CONFIG=/etc/agent-lens/agent-lens.env
 
-[ -r "$CONFIG" ] || {
-    printf '%s\n' "$NAME: cannot read $CONFIG" >&2
-    exit 6
+[ -r "${CONFIG}" ] || {
+	printf '%s\n' "${NAME}: cannot read ${CONFIG}" >&2
+	exit 6
 }
 set -a
 # The administrator-owned file contains only simple KEY=value settings.
 # shellcheck disable=SC1090
-. "$CONFIG"
+. "${CONFIG}"
 set +a
 
 case "${1:-}" in
-    start)
-        [ -x "$DAEMON" ] || exit 5
-        install -d -o root -g root -m 0755 "$RUNDIR"
-        install -d -o "$USER" -g "$GROUP" -m 0750 "$LOGDIR"
-        touch "$LOGFILE"
-        chown "$USER:$GROUP" "$LOGFILE"
-        chmod 0640 "$LOGFILE"
-        printf '%s\n' "Starting $NAME"
-        start-stop-daemon --start --quiet --background --make-pidfile \
-            --pidfile "$PIDFILE" --chuid "$USER:$GROUP" --chdir "$WORKDIR" \
-            --output "$LOGFILE" --exec "$DAEMON" -- serve
-        ;;
-    stop)
-        printf '%s\n' "Stopping $NAME"
-        start-stop-daemon --stop --quiet --retry TERM/30/KILL/5 \
-            --pidfile "$PIDFILE" --exec "$DAEMON" --remove-pidfile --oknodo
-        ;;
-    restart|force-reload)
-        "$0" stop
-        "$0" start
-        ;;
-    status)
-        if start-stop-daemon --status --quiet --pidfile "$PIDFILE" \
-            --exec "$DAEMON"; then
-            printf '%s\n' "$NAME is running"
-        else
-            printf '%s\n' "$NAME is not running"
-            exit 3
-        fi
-        ;;
-    *)
-        printf '%s\n' "Usage: $0 {start|stop|restart|force-reload|status}" >&2
-        exit 2
-        ;;
+start)
+	[ -x "${DAEMON}" ] || exit 5
+	install -d -o root -g root -m 0755 "${RUNDIR}"
+	install -d -o "${USER}" -g "${GROUP}" -m 0750 "${LOGDIR}"
+	touch "${LOGFILE}"
+	chown "${USER}:${GROUP}" "${LOGFILE}"
+	chmod 0640 "${LOGFILE}"
+	printf '%s\n' "Starting ${NAME}"
+	start-stop-daemon --start --quiet --background --make-pidfile \
+		--pidfile "${PIDFILE}" --chuid "${USER}:${GROUP}" --chdir "${WORKDIR}" \
+		--output "${LOGFILE}" --exec "${DAEMON}" -- serve
+	;;
+stop)
+	printf '%s\n' "Stopping ${NAME}"
+	start-stop-daemon --stop --quiet --retry TERM/30/KILL/5 \
+		--pidfile "${PIDFILE}" --exec "${DAEMON}" --remove-pidfile --oknodo
+	;;
+restart | force-reload)
+	"$0" stop
+	"$0" start
+	;;
+status)
+	if start-stop-daemon --status --quiet --pidfile "${PIDFILE}" \
+		--exec "${DAEMON}"; then
+		printf '%s\n' "${NAME} is running"
+	else
+		printf '%s\n' "${NAME} is not running"
+		exit 3
+	fi
+	;;
+*)
+	printf '%s\n' "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+	exit 2
+	;;
 esac
