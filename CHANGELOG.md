@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Changed
+
+- Remove the compatibility-only `TODO.md`; `ROADMAP.md` is now the sole backlog for planned work.
+
 ### Fixed
 
 - Hermes cron run documents containing only scheduler metadata are now hidden from the sessions browser by default, while cron artifacts and canonical cron sessions with assistant or tool output remain visible. An “All cron runs” filter restores the complete audit history without deleting indexed evidence or blocking direct transcript URLs; parser version 3 classifies existing artifacts on the next refresh.
