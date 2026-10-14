@@ -1,4 +1,5 @@
 mod auth;
+mod authorization;
 mod db;
 mod fingerprint;
 mod health;

@@ -122,6 +122,7 @@ pub struct CurrentUser {
 #[derive(Clone, Debug)]
 pub struct AccessScope {
     role: AccountRole,
+    capabilities: crate::authorization::Capabilities,
     source_keys_json: String,
     source_count: usize,
 }
@@ -142,8 +143,8 @@ impl AccountRole {
 }
 
 impl AccessScope {
-    pub fn is_admin(&self) -> bool {
-        self.role == AccountRole::Admin
+    pub(crate) fn permits(&self, capability: crate::authorization::Capability) -> bool {
+        self.capabilities.permits(capability)
     }
 
     pub fn role(&self) -> &'static str {
@@ -155,50 +156,31 @@ impl AccessScope {
     }
 
     pub(crate) fn unrestricted(&self) -> bool {
-        self.is_admin()
+        self.can_read_sources() && self.permits(crate::authorization::Capability::AllSourcesRead)
     }
 
     pub(crate) fn source_keys_json(&self) -> &str {
-        &self.source_keys_json
+        if self.can_read_sources() {
+            &self.source_keys_json
+        } else {
+            "[]"
+        }
     }
 
-    fn permits_route(&self, path: &str) -> bool {
-        if self.is_admin() {
-            return true;
-        }
-        if matches!(
-            path,
-            "/" | "/account"
-                | "/account/password"
-                | "/account/preferences"
-                | "/account/profile"
-                | "/account/sessions"
-                | "/account/sessions/revoke-others"
-                | "/logout"
-                | "/sessions"
-                | "/usage"
-                | "/diagnostics"
-                | "/assets/live-reader.js"
-                | "/assets/preferences.js"
-                | "/assets/preferences.css"
-        ) {
-            return true;
-        }
-        let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
-        matches!(
-            parts.as_slice(),
-            ["account", "sessions", _]
-                | ["sessions", _]
-                | ["sessions", _, "live-status" | "turns" | "generated-images"]
-                | ["sessions", _, "postmortem", "json" | "md"]
-                | ["sessions", _, "generated-images", _]
-                | ["sessions", _, "messages" | "tools" | "results", _]
-        )
+    fn can_read_sources(&self) -> bool {
+        self.permits(crate::authorization::Capability::ContentRead)
+            || self.permits(crate::authorization::Capability::ReportsRead)
+    }
+
+    fn permits_route(&self, method: &axum::http::Method, path: &str) -> bool {
+        crate::authorization::required_capability(method, path)
+            .is_some_and(|capability| self.permits(capability))
     }
 
     pub(crate) fn all() -> Self {
         Self {
             role: AccountRole::Admin,
+            capabilities: crate::authorization::Capabilities::for_role(true),
             source_keys_json: "[]".to_owned(),
             source_count: 0,
         }
@@ -1134,6 +1116,9 @@ impl AuthState {
             preferences,
             access: AccessScope {
                 role,
+                capabilities: crate::authorization::Capabilities::for_role(
+                    role == AccountRole::Admin,
+                ),
                 source_keys_json,
                 source_count,
             },
@@ -1322,8 +1307,11 @@ pub async fn require_auth(
     }
     match auth.current_user(&session).await {
         Ok(Some(user)) => {
-            if !user.access.permits_route(request.uri().path()) {
-                return (StatusCode::FORBIDDEN, "Administrator access required").into_response();
+            if !user
+                .access
+                .permits_route(request.method(), request.uri().path())
+            {
+                return (StatusCode::FORBIDDEN, "Access denied").into_response();
             }
             request.extensions_mut().insert(user);
             next.run(request).await
@@ -1347,9 +1335,11 @@ pub async fn require_auth(
             {
                 match auth.authenticate(&username, &password).await {
                     Ok(Some((user, _))) => {
-                        if !user.access.permits_route(request.uri().path()) {
-                            return (StatusCode::FORBIDDEN, "Administrator access required")
-                                .into_response();
+                        if !user
+                            .access
+                            .permits_route(request.method(), request.uri().path())
+                        {
+                            return (StatusCode::FORBIDDEN, "Access denied").into_response();
                         }
                         request.headers_mut().remove(header::AUTHORIZATION);
                         request.extensions_mut().insert(user);

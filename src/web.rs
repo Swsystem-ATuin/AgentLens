@@ -1186,7 +1186,10 @@ async fn health(
     Extension(user): Extension<crate::auth::CurrentUser>,
     Query(query): Query<HealthQuery>,
 ) -> Result<Html<String>, WebError> {
-    if !user.access.is_admin() {
+    if !user
+        .access
+        .permits(crate::authorization::Capability::OperationsRead)
+    {
         return Err(WebError::forbidden());
     }
     let page = bounded_page(query.page, "validate health page")?;
@@ -1231,7 +1234,10 @@ async fn metrics(
     State(state): State<AppState>,
     Extension(user): Extension<crate::auth::CurrentUser>,
 ) -> Result<Response, WebError> {
-    if !user.access.is_admin() {
+    if !user
+        .access
+        .permits(crate::authorization::Capability::OperationsRead)
+    {
         return Err(WebError::forbidden());
     }
     let body = crate::metrics::render(&state.pool)
@@ -2192,8 +2198,8 @@ impl WebError {
     fn forbidden() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            public_message: "administrator access required",
-            operation: "authorize administrator route",
+            public_message: "access denied",
+            operation: "authorize capability",
             error_kind: "forbidden",
             error_code: None,
         }
@@ -2733,7 +2739,7 @@ mod tests {
             ("/assets/live-reader.js", StatusCode::OK),
             ("/assets/preferences.js", StatusCode::OK),
             ("/assets/preferences.css", StatusCode::OK),
-            ("/missing", StatusCode::NOT_FOUND),
+            ("/missing", StatusCode::FORBIDDEN),
         ] {
             let response = app
                 .clone()
@@ -3614,6 +3620,46 @@ mod tests {
         let app = session_router(pool, state.clone());
         let admin_cookie = login_cookie(&app, "admin", "Synthetic1-password").await;
         let viewer_cookie = login_cookie(&app, "viewer", "Synthetic1-password").await;
+
+        for cookie in [&admin_cookie, &viewer_cookie] {
+            for path in [
+                "/future-data",
+                "/admin/accounts",
+                "/admin/audit",
+                "/account/tokens",
+                "/refresh",
+                "/annotations",
+            ] {
+                assert_eq!(
+                    get(&app, cookie, path).await.0,
+                    StatusCode::FORBIDDEN,
+                    "{path}"
+                );
+            }
+            for (method, path) in [
+                (axum::http::Method::POST, "/sessions"),
+                (axum::http::Method::DELETE, "/account"),
+                (axum::http::Method::GET, "/account/sessions/revoke-others"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(header::COOKIE, cookie)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            }
+            assert_eq!(
+                get(&app, cookie, "/account/sessions").await.0,
+                StatusCode::OK
+            );
+        }
 
         let (status, empty_viewer) = get(&app, &viewer_cookie, "/sessions").await;
         assert_eq!(status, StatusCode::OK);

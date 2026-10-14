@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- A shared typed capability policy now governs browser and metrics authentication, source-wide access, and self-service account/security routes. Unknown routes and unsupported methods fail closed for every role; tested credential ceilings prepare least-privilege token scopes without enabling future administrative features.
+
 - Signed-in accounts now have a bounded session inventory and append-only security history, with individual or all-other-session revocation, current/active/expired/revoked states, allowlisted client summaries, optional display names, password age, schema-v4 migration, and explicit 30-day session/180-day event retention. Network addresses remain uncollected without a trusted-proxy design.
 
 - Authenticated accounts now have typed persistent display and browsing preferences for UTC, browser-local, or IANA timezones; date formats; system/light/dark/high-contrast appearance; font scale; bounded page size; live-reader and transcript defaults; code wrapping; and the default sessions view. State schema version 3 migrates automatically, unknown future values fall back safely, historical IANA boundaries remain DST-correct, and raw indexed timestamps are unchanged.
