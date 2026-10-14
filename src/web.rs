@@ -56,6 +56,7 @@ struct LogoutForm {
 struct AccountQuery {
     password_changed: Option<String>,
     preferences_saved: Option<String>,
+    profile_saved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +65,34 @@ struct ChangePasswordForm {
     current_password: String,
     new_password: String,
     confirm_password: String,
+}
+
+#[derive(Deserialize)]
+struct ProfileForm {
+    csrf_token: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct SessionActionForm {
+    csrf_token: String,
+}
+
+#[derive(Deserialize, Default)]
+struct AccountSessionsQuery {
+    page: Option<u32>,
+    events_page: Option<u32>,
+}
+
+#[derive(Default)]
+struct AccountNotices<'a> {
+    password_changed: bool,
+    password_error: Option<&'a str>,
+    preferences_saved: bool,
+    preferences_error: Option<&'a str>,
+    profile_saved: bool,
+    profile_error: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +123,11 @@ struct LoginTemplate {
 #[template(path = "account.html")]
 struct AccountTemplate {
     username: String,
+    display_name: String,
+    password_age: String,
+    profile_saved: bool,
+    profile_failed: bool,
+    profile_error: String,
     role: &'static str,
     source_count: usize,
     csrf_token: String,
@@ -105,6 +139,16 @@ struct AccountTemplate {
     preferences_saved: bool,
     preferences_failed: bool,
     preferences_error: String,
+}
+
+#[derive(Template)]
+#[template(path = "account_sessions.html")]
+struct AccountSessionsTemplate {
+    sessions: Vec<crate::auth::AccountSession>,
+    events: Vec<crate::auth::SecurityEventRow>,
+    csrf_token: String,
+    sessions_pagination: Pagination,
+    events_pagination: Pagination,
 }
 
 #[cfg(test)]
@@ -363,6 +407,16 @@ fn app_routes(
         .route("/account", get(account))
         .route("/account/password", post(change_password))
         .route("/account/preferences", post(change_preferences))
+        .route("/account/profile", post(change_profile))
+        .route("/account/sessions", get(account_sessions))
+        .route(
+            "/account/sessions/revoke-others",
+            post(revoke_other_sessions),
+        )
+        .route(
+            "/account/sessions/{id}",
+            post(revoke_account_session),
+        )
         .route("/logout", post(logout))
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
@@ -495,6 +549,7 @@ async fn login(
 async fn login_submit(
     State(state): State<AppState>,
     session: tower_sessions::Session,
+    headers: axum::http::HeaderMap,
     Form(form): Form<crate::auth::LoginForm>,
 ) -> Result<Response, WebError> {
     if state.auth.is_local_mode() {
@@ -513,11 +568,22 @@ async fn login_submit(
         .await
         .map_err(|_| WebError::authentication("authenticate account"))?
     {
-        crate::auth::establish_session(&session, &user, generation)
-            .await
-            .map_err(|_| WebError::authentication("establish session"))?;
+        crate::auth::establish_session(
+            &state.auth,
+            &session,
+            &user,
+            generation,
+            headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await
+        .map_err(|_| WebError::authentication("establish session"))?;
         return Ok(axum::response::Redirect::to(&return_to).into_response());
     }
+    crate::auth::record_failed_login(&state.auth, &form.username)
+        .await
+        .map_err(|_| WebError::authentication("record failed login"))?;
     let location = format!(
         "/login?error=1&return_to={}",
         percent_encode_component(&return_to)
@@ -535,10 +601,12 @@ async fn account(
         &state,
         &user,
         &session,
-        query.password_changed.as_deref() == Some("1"),
-        None,
-        query.preferences_saved.as_deref() == Some("1"),
-        None,
+        AccountNotices {
+            password_changed: query.password_changed.as_deref() == Some("1"),
+            preferences_saved: query.preferences_saved.as_deref() == Some("1"),
+            profile_saved: query.profile_saved.as_deref() == Some("1"),
+            ..AccountNotices::default()
+        },
     )
     .await
 }
@@ -547,10 +615,7 @@ async fn render_account(
     state: &AppState,
     user: &crate::auth::CurrentUser,
     session: &tower_sessions::Session,
-    password_changed: bool,
-    password_error: Option<&str>,
-    preferences_saved: bool,
-    preferences_error: Option<&str>,
+    notices: AccountNotices<'_>,
 ) -> Result<Html<String>, WebError> {
     let csrf_token = crate::auth::csrf_token(session)
         .await
@@ -558,17 +623,22 @@ async fn render_account(
     Ok(Html(
         AccountTemplate {
             username: user.username.clone(),
+            display_name: user.display_name.clone().unwrap_or_default(),
+            password_age: password_age(&user.password_changed_at),
+            profile_saved: notices.profile_saved,
+            profile_failed: notices.profile_error.is_some(),
+            profile_error: notices.profile_error.unwrap_or_default().to_owned(),
             role: user.access.role(),
             source_count: user.access.source_count(),
             csrf_token,
             local_mode: state.auth.is_local_mode(),
-            password_changed,
-            password_failed: password_error.is_some(),
-            password_error: password_error.unwrap_or_default().to_owned(),
+            password_changed: notices.password_changed,
+            password_failed: notices.password_error.is_some(),
+            password_error: notices.password_error.unwrap_or_default().to_owned(),
             preferences: user.preferences.clone(),
-            preferences_saved,
-            preferences_failed: preferences_error.is_some(),
-            preferences_error: preferences_error.unwrap_or_default().to_owned(),
+            preferences_saved: notices.preferences_saved,
+            preferences_failed: notices.preferences_error.is_some(),
+            preferences_error: notices.preferences_error.unwrap_or_default().to_owned(),
         }
         .render()
         .map_err(|error| WebError::template("render account page", error))?,
@@ -603,7 +673,7 @@ async fn change_password(
         .map_err(|_| WebError::authentication("change account password"))?
         {
             crate::auth::ChangePasswordResult::Changed { generation } => {
-                crate::auth::establish_session(&session, &user, generation)
+                crate::auth::establish_session(&state.auth, &session, &user, generation, None)
                     .await
                     .map_err(|_| WebError::authentication("refresh changed-password session"))?;
                 return Ok(
@@ -620,10 +690,10 @@ async fn change_password(
                         &state,
                         &user,
                         &session,
-                        false,
-                        Some(&error.to_string()),
-                        false,
-                        None,
+                        AccountNotices {
+                            password_error: Some(&error.to_string()),
+                            ..AccountNotices::default()
+                        },
                     )
                     .await?,
                 )
@@ -633,7 +703,16 @@ async fn change_password(
     };
     Ok((
         StatusCode::BAD_REQUEST,
-        render_account(&state, &user, &session, false, error, false, None).await?,
+        render_account(
+            &state,
+            &user,
+            &session,
+            AccountNotices {
+                password_error: error,
+                ..AccountNotices::default()
+            },
+        )
+        .await?,
     )
         .into_response())
 }
@@ -669,7 +748,16 @@ async fn change_preferences(
     if let Err(error) = preferences.validate() {
         return Ok((
             StatusCode::BAD_REQUEST,
-            render_account(&state, &user, &session, false, None, false, Some(error)).await?,
+            render_account(
+                &state,
+                &user,
+                &session,
+                AccountNotices {
+                    preferences_error: Some(error),
+                    ..AccountNotices::default()
+                },
+            )
+            .await?,
         )
             .into_response());
     }
@@ -677,6 +765,191 @@ async fn change_preferences(
         .await
         .map_err(|_| WebError::authentication("save account preferences"))?;
     Ok(axum::response::Redirect::to("/account?preferences_saved=1").into_response())
+}
+
+async fn change_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Form(form): Form<ProfileForm>,
+) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/account").into_response());
+    }
+    if !crate::auth::verify_csrf(&session, &form.csrf_token)
+        .await
+        .map_err(|_| WebError::authentication("verify profile request"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    let display_name = form.display_name.trim();
+    if display_name.chars().count() > 80 || display_name.chars().any(char::is_control) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            render_account(
+                &state,
+                &user,
+                &session,
+                AccountNotices {
+                    profile_error: Some(
+                        "Display name must be at most 80 characters without control characters.",
+                    ),
+                    ..AccountNotices::default()
+                },
+            )
+            .await?,
+        )
+            .into_response());
+    }
+    crate::auth::update_profile(&state.auth, &user.id, display_name)
+        .await
+        .map_err(|_| WebError::authentication("update account profile"))?;
+    Ok(axum::response::Redirect::to("/account?profile_saved=1").into_response())
+}
+
+async fn account_sessions(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Query(query): Query<AccountSessionsQuery>,
+) -> Result<Html<String>, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(Html("Local mode does not retain account sessions.".into()));
+    }
+    let page = bounded_page(query.page, "validate account session page")?;
+    let events_page = bounded_page(query.events_page, "validate security event page")?;
+    let page_size = user.preferences.page_size;
+    let current_id = crate::auth::current_inventory_id(&session)
+        .await
+        .map_err(|_| WebError::authentication("load current session inventory"))?
+        .ok_or_else(WebError::invalid_auth_request)?;
+    let mut sessions = crate::auth::account_sessions(
+        &state.auth,
+        &user.id,
+        Some(&current_id),
+        i64::from(page - 1) * page_size as i64,
+        page_size + 1,
+    )
+    .await
+    .map_err(|_| WebError::authentication("load account sessions"))?;
+    let has_next = sessions.len() > page_size;
+    sessions.truncate(page_size);
+    for item in &mut sessions {
+        item.logged_in_at = user.preferences.format_timestamp(&item.logged_in_at);
+        item.last_seen_at = user.preferences.format_timestamp(&item.last_seen_at);
+    }
+    let mut events = crate::auth::security_events(
+        &state.auth,
+        &user.id,
+        i64::from(events_page - 1) * page_size as i64,
+        page_size + 1,
+    )
+    .await
+    .map_err(|_| WebError::authentication("load account security events"))?;
+    let events_has_next = events.len() > page_size;
+    events.truncate(page_size);
+    for event in &mut events {
+        event.occurred_at = user.preferences.format_timestamp(&event.occurred_at);
+    }
+    let csrf_token = crate::auth::csrf_token(&session)
+        .await
+        .map_err(|_| WebError::authentication("prepare session inventory"))?;
+    Ok(Html(
+        AccountSessionsTemplate {
+            sessions,
+            events,
+            csrf_token,
+            sessions_pagination: Pagination {
+                page,
+                previous_href: (page > 1).then(|| account_sessions_href(page - 1, events_page)),
+                next_href: has_next.then(|| account_sessions_href(page + 1, events_page)),
+            },
+            events_pagination: Pagination {
+                page: events_page,
+                previous_href: (events_page > 1)
+                    .then(|| account_sessions_href(page, events_page - 1)),
+                next_href: events_has_next.then(|| account_sessions_href(page, events_page + 1)),
+            },
+        }
+        .render()
+        .map_err(|error| WebError::template("render account sessions", error))?,
+    ))
+}
+
+async fn revoke_account_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Path(target_id): Path<String>,
+    Form(form): Form<SessionActionForm>,
+) -> Result<Response, WebError> {
+    verify_session_action(&session, &form.csrf_token).await?;
+    let current_id = crate::auth::current_inventory_id(&session)
+        .await
+        .map_err(|_| WebError::authentication("load current session inventory"))?
+        .ok_or_else(WebError::invalid_auth_request)?;
+    let revoked =
+        crate::auth::revoke_account_session(&state.auth, &user.id, &current_id, &target_id)
+            .await
+            .map_err(|_| WebError::authentication("revoke account session"))?;
+    if !revoked {
+        return Err(WebError::not_found());
+    }
+    Ok(axum::response::Redirect::to("/account/sessions").into_response())
+}
+
+async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Form(form): Form<SessionActionForm>,
+) -> Result<Response, WebError> {
+    verify_session_action(&session, &form.csrf_token).await?;
+    let current_id = crate::auth::current_inventory_id(&session)
+        .await
+        .map_err(|_| WebError::authentication("load current session inventory"))?
+        .ok_or_else(WebError::invalid_auth_request)?;
+    crate::auth::revoke_other_account_sessions(&state.auth, &user.id, &current_id)
+        .await
+        .map_err(|_| WebError::authentication("revoke other account sessions"))?;
+    Ok(axum::response::Redirect::to("/account/sessions").into_response())
+}
+
+async fn verify_session_action(
+    session: &tower_sessions::Session,
+    supplied: &str,
+) -> Result<(), WebError> {
+    if !crate::auth::verify_csrf(session, supplied)
+        .await
+        .map_err(|_| WebError::authentication("verify session action"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    Ok(())
+}
+
+fn account_sessions_href(page: u32, events_page: u32) -> String {
+    format!("/account/sessions?page={page}&events_page={events_page}")
+}
+
+fn password_age(value: &str) -> String {
+    let timestamp = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|value| value.and_utc())
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(value).map(|value| value.to_utc()));
+    timestamp.map_or_else(
+        |_| "Unavailable".into(),
+        |timestamp| {
+            let days = chrono::Utc::now()
+                .signed_duration_since(timestamp)
+                .num_days()
+                .max(0);
+            match days {
+                0 => "Changed today".into(),
+                1 => "Changed 1 day ago".into(),
+                days => format!("Changed {days} days ago"),
+            }
+        },
+    )
 }
 
 async fn logout(
@@ -693,8 +966,7 @@ async fn logout(
     {
         return Err(WebError::invalid_auth_request());
     }
-    session
-        .flush()
+    crate::auth::end_session(&state.auth, &session)
         .await
         .map_err(|_| WebError::authentication("end session"))?;
     Ok(axum::response::Redirect::to("/login").into_response())
@@ -2128,6 +2400,15 @@ mod tests {
     }
 
     async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
+        login_cookie_with_agent(app, username, password, None).await
+    }
+
+    async fn login_cookie_with_agent(
+        app: &Router,
+        username: &str,
+        password: &str,
+        user_agent: Option<&str>,
+    ) -> String {
         use axum::{
             body::{Body, to_bytes},
             http::{Request, header},
@@ -2167,17 +2448,17 @@ mod tests {
         let body = format!(
             "username={username}&password={password}&csrf_token={csrf}&return_to=%2Fsessions"
         );
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie);
+        if let Some(user_agent) = user_agent {
+            request = request.header(header::USER_AGENT, user_agent);
+        }
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(header::COOKIE, cookie)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from(body)).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -2273,7 +2554,12 @@ mod tests {
             "/health",
             "/metrics",
             "/account",
+            "/account/sessions",
+            "/account/profile",
             "/account/password",
+            "/account/preferences",
+            "/account/sessions/revoke-others",
+            "/account/sessions/synthetic",
             "/logout",
             "/sessions/1",
             "/sessions/1/live-status",
@@ -2438,6 +2724,7 @@ mod tests {
             ("/health", StatusCode::OK),
             ("/metrics", StatusCode::OK),
             ("/account", StatusCode::OK),
+            ("/account/sessions", StatusCode::OK),
             ("/sessions/1", StatusCode::NOT_FOUND),
             ("/sessions/1/live-status", StatusCode::NOT_FOUND),
             ("/sessions/1/turns", StatusCode::NOT_FOUND),
@@ -2970,6 +3257,286 @@ mod tests {
         assert_eq!(page.matches("href=\"/sessions/preference-").count(), 25);
         assert!(page.contains("page=2"));
         assert!(page.len() < 256 * 1024, "preference page was too large");
+    }
+
+    #[tokio::test]
+    async fn account_session_inventory_isolated_sanitised_and_revocable() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "alice", &password_file, None)
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "bob", &password_file, None)
+            .await
+            .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = session_router(pool, state.clone());
+        let old_cookie = login_cookie_with_agent(
+            &app,
+            "alice",
+            "Synthetic1-password",
+            Some("<script>private header</script>"),
+        )
+        .await;
+        let current_cookie = login_cookie_with_agent(
+            &app,
+            "alice",
+            "Synthetic1-password",
+            Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"),
+        )
+        .await;
+        let bob_cookie = login_cookie_with_agent(
+            &app,
+            "bob",
+            "Synthetic1-password",
+            Some("Mozilla/5.0 (Windows NT 10.0) Chrome/140.0"),
+        )
+        .await;
+
+        let alice_id: String = sqlx::query_scalar("SELECT id FROM accounts WHERE username='alice'")
+            .fetch_one(&state.auth.pool)
+            .await
+            .unwrap();
+        let old_id: String = sqlx::query_scalar(
+            "SELECT id FROM account_sessions WHERE account_id=? AND user_agent_summary='Other client'",
+        )
+        .bind(&alice_id)
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE account_sessions SET last_seen_at=unixepoch()-1900 WHERE id=?")
+            .bind(&old_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+
+        let inventory = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account/sessions")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(inventory.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(inventory.into_body(), 128 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("Firefox on Linux"));
+        assert!(html.contains("Other client"));
+        assert!(html.contains("expired"));
+        assert!(!html.contains("private header"));
+        assert!(!html.contains("Chrome on Windows"));
+        assert!(html.contains("Signed in"));
+        assert!(html.contains("Network addresses are not collected"));
+        let csrf = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+
+        let third_cookie =
+            login_cookie_with_agent(&app, "alice", "Synthetic1-password", Some("curl/8.12.1"))
+                .await;
+        let target_id: String = sqlx::query_scalar(
+            "SELECT id FROM account_sessions WHERE account_id=? AND user_agent_summary='curl'",
+        )
+        .bind(&alice_id)
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/account/sessions/{target_id}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::from("csrf_token=wrong"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/account/sessions/{target_id}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::from(format!("csrf_token={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::SEE_OTHER);
+        let already_revoked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/account/sessions/{target_id}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::from(format!("csrf_token={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(already_revoked.status(), StatusCode::NOT_FOUND);
+        let revoked_request = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account")
+                    .header(header::COOKIE, &third_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked_request.status(), StatusCode::UNAUTHORIZED);
+        let current_request = account_response(&app, &current_cookie).await;
+        assert_eq!(current_request.status(), StatusCode::OK);
+        let bob_request = account_response(&app, &bob_cookie).await;
+        assert_eq!(bob_request.status(), StatusCode::OK);
+
+        let other_cookie = login_cookie_with_agent(
+            &app,
+            "alice",
+            "Synthetic1-password",
+            Some("Mozilla/5.0 (Macintosh) Safari/605.1"),
+        )
+        .await;
+        let revoke_others = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/sessions/revoke-others")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::from(format!("csrf_token={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoke_others.status(), StatusCode::SEE_OTHER);
+        let other_request = account_response(&app, &other_cookie).await;
+        assert_eq!(other_request.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            account_response(&app, &current_cookie).await.status(),
+            StatusCode::OK
+        );
+
+        let profile = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/profile")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::from(format!(
+                        "csrf_token={csrf}&display_name=%3Cb%3EAlice%3C%2Fb%3E"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(profile.status(), StatusCode::SEE_OTHER);
+        let profile_page = account_response(&app, &current_cookie).await;
+        let profile_html = String::from_utf8(
+            to_bytes(profile_page.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(profile_html.contains("value=\"&#60;b&#62;Alice&#60;/b&#62;\""));
+        assert!(!profile_html.contains("value=\"<b>Alice</b>\""));
+        assert!(profile_html.contains("Changed today"));
+
+        let preferences = crate::preferences::UserPreferences {
+            page_size: 25,
+            ..crate::preferences::UserPreferences::default()
+        };
+        crate::auth::update_preferences(&state.auth, &alice_id, &preferences)
+            .await
+            .unwrap();
+        for index in 0..30 {
+            sqlx::query("INSERT INTO account_sessions(id,account_id,tower_session_id,session_generation,logged_in_at,last_seen_at,absolute_expires_at,user_agent_summary,revoked_at) VALUES(?,?,?,?,unixepoch()+?,unixepoch()+?,unixepoch()+3600,'Synthetic client',unixepoch())")
+                .bind(format!("synthetic-{index:02}"))
+                .bind(&alice_id)
+                .bind(format!("synthetic-tower-{index:02}"))
+                .bind(0_i64)
+                .bind(index + 100)
+                .bind(index + 100)
+                .execute(&state.auth.pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO security_events(account_id,event_type) VALUES(?,'login_failed')",
+            )
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        }
+        let bounded = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account/sessions")
+                    .header(header::COOKIE, &current_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bounded_html = String::from_utf8(
+            to_bytes(bounded.into_body(), 256 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(bounded_html.matches("Synthetic client").count(), 25);
+        assert_eq!(bounded_html.matches("Failed sign-in").count(), 25);
+        assert!(bounded_html.contains("events_page=2"));
+        assert!(bounded_html.contains("page=2&#38;events_page=1"));
+
+        let _ = old_cookie;
     }
 
     #[tokio::test]

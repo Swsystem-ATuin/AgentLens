@@ -33,6 +33,6 @@ Appearance is served as an authenticated same-origin stylesheet, so theme, contr
 
 ## Migration and operation
 
-Opening the persistent state database automatically migrates schema versions 1 or 2 to version 3 and creates `account_preferences`. Existing accounts receive defaults lazily; no bulk row creation is required. Back up the stopped state database before deploying as described in [application authentication](application-authentication.md). Restart the web service to run the migration and load the new assets. No source refresh or agent-index rebuild is required.
+Schema version 3 introduced `account_preferences`; the current binary migrates older state databases through that change and the later [session-security schema](session-security.md) automatically. Existing accounts receive preference defaults lazily; no bulk row creation is required. Back up the stopped state database before deploying as described in [application authentication](application-authentication.md). Restart the web service to run migrations and load the assets. No source refresh or agent-index rebuild is required.
 
 Synthetic regressions cover schema migration, two-account isolation, unknown-value fallback, invalid IANA names and allowlist values, CSRF rejection, persistence, rendered form selection, authenticated CSS/JavaScript, daylight-saving boundaries, the no-script UTC explanation, default session filtering, and 25-row bounded output.

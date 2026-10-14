@@ -5,6 +5,16 @@
 {% else %}
 <p>Signed in as <strong>{{ username }}</strong>.</p>
 <dl><dt>Role</dt><dd>{{ role }}</dd><dt>Granted sources</dt><dd>{% if role == "admin" %}All sources{% else %}{{ source_count }}{% endif %}</dd></dl>
+<p><a href="/account/sessions">Review sessions and security history</a></p>
+<h2>Profile</h2>
+{% if profile_saved %}<p class="success">Profile saved.</p>{% endif %}
+{% if profile_failed %}<p class="error">{{ profile_error }}</p>{% endif %}
+<form class="account-options" method="post" action="/account/profile">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Display name <input name="display_name" value="{{ display_name }}" maxlength="80" autocomplete="name"></label>
+<p class="muted">Optional. Your username remains the account identifier.</p>
+<button type="submit">Save profile</button>
+</form>
 <h2>Preferences</h2>
 {% if preferences_saved %}<p class="success">Preferences saved.</p>{% endif %}
 {% if preferences_failed %}<p class="error">{{ preferences_error }}</p>{% endif %}
@@ -25,6 +35,7 @@
 <button type="submit">Save preferences</button>
 </form>
 <h2>Change password</h2>
+<p class="muted">{{ password_age }}</p>
 {% if password_changed %}<p class="success">Password changed. Other sessions for this account have been signed out.</p>{% endif %}
 {% if password_failed %}<p class="error">{{ password_error }}</p>{% endif %}
 <form class="account-options" method="post" action="/account/password"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Current password<input type="password" name="current_password" autocomplete="current-password" required maxlength="1024"></label><label>New password<input type="password" name="new_password" autocomplete="new-password" required minlength="7" maxlength="1024" aria-describedby="password-policy"></label><label>Confirm new password<input type="password" name="confirm_password" autocomplete="new-password" required minlength="7" maxlength="1024"></label><p id="password-policy" class="muted">Use at least 7 characters, including an uppercase letter, lowercase letter, number, and symbol.</p><button type="submit">Change password</button></form>

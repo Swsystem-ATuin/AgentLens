@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% block title %}Sessions and security · Agent Lens{% endblock %}{% block content %}
+<h1>Sessions and security</h1>
+<p><a href="/account">← Account</a></p>
+<p class="muted">Network addresses are not collected. Client names are allowlisted summaries rather than raw request headers.</p>
+<form method="post" action="/account/sessions/revoke-others"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Revoke all other sessions</button></form>
+<h2>Session inventory</h2>
+{% if sessions.is_empty() %}<p>No sessions on this page.</p>{% else %}
+<table><thead><tr><th>Client</th><th>Signed in</th><th>Last activity</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for item in sessions %}<tr><td>{{ item.user_agent_summary }}</td><td><time data-user-time>{{ item.logged_in_at }}</time></td><td><time data-user-time>{{ item.last_seen_at }}</time></td><td>{{ item.status }}</td><td>{% if item.current %}<span class="muted">Current session</span>{% else if item.status == "active" %}<form method="post" action="/account/sessions/{{ item.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Revoke</button></form>{% else %}<span class="muted">—</span>{% endif %}</td></tr>{% endfor %}
+</tbody></table>{% endif %}
+<nav class="pagination" aria-label="Session inventory pages">{% if let Some(href) = sessions_pagination.previous_href %}<a href="{{ href }}">← Previous</a>{% endif %}<span>Page {{ sessions_pagination.page }}</span>{% if let Some(href) = sessions_pagination.next_href %}<a href="{{ href }}">Next →</a>{% endif %}</nav>
+<h2>Security history</h2>
+{% if events.is_empty() %}<p>No security events on this page.</p>{% else %}
+<table><thead><tr><th>Time</th><th>Event</th></tr></thead><tbody>{% for event in events %}<tr><td><time data-user-time>{{ event.occurred_at }}</time></td><td>{{ event.label }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+<nav class="pagination" aria-label="Security history pages">{% if let Some(href) = events_pagination.previous_href %}<a href="{{ href }}">← Previous</a>{% endif %}<span>Page {{ events_pagination.page }}</span>{% if let Some(href) = events_pagination.next_href %}<a href="{{ href }}">Next →</a>{% endif %}</nav>
+{% endblock %}

@@ -32,10 +32,13 @@ const ACCOUNT_ID: &str = "auth.account_id";
 const SESSION_GENERATION: &str = "auth.generation";
 const ISSUED_AT: &str = "auth.issued_at";
 const CSRF_TOKEN: &str = "auth.csrf";
+const INVENTORY_ID: &str = "auth.inventory_id";
+pub const SECURITY_RETENTION_DAYS: i64 = 180;
+pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','3');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','4');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -43,6 +46,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
     role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('admin','viewer')),
     session_generation INTEGER NOT NULL DEFAULT 0,
+    display_name TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     password_changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -67,11 +71,31 @@ CREATE TABLE IF NOT EXISTS account_preferences (
     default_sessions_view TEXT NOT NULL DEFAULT 'all',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS account_sessions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tower_session_id TEXT NOT NULL UNIQUE,
+    session_generation INTEGER NOT NULL,
+    logged_in_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    absolute_expires_at INTEGER NOT NULL,
+    user_agent_summary TEXT NOT NULL,
+    revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_account_sessions_account_activity ON account_sessions(account_id,last_seen_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS security_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT REFERENCES accounts(id),
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed')),
+    occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
+CREATE TRIGGER IF NOT EXISTS security_events_no_update BEFORE UPDATE ON security_events BEGIN SELECT RAISE(ABORT,'security events are append-only'); END;
 "#;
 
 #[derive(Clone)]
 pub struct AuthState {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
     local_mode: bool,
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
@@ -89,6 +113,8 @@ pub struct StateStore {
 pub struct CurrentUser {
     pub id: String,
     pub username: String,
+    pub display_name: Option<String>,
+    pub password_changed_at: String,
     pub access: AccessScope,
     pub(crate) preferences: crate::preferences::UserPreferences,
 }
@@ -145,6 +171,9 @@ impl AccessScope {
             "/" | "/account"
                 | "/account/password"
                 | "/account/preferences"
+                | "/account/profile"
+                | "/account/sessions"
+                | "/account/sessions/revoke-others"
                 | "/logout"
                 | "/sessions"
                 | "/usage"
@@ -158,7 +187,8 @@ impl AccessScope {
         let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
         matches!(
             parts.as_slice(),
-            ["sessions", _]
+            ["account", "sessions", _]
+                | ["sessions", _]
                 | ["sessions", _, "live-status" | "turns" | "generated-images"]
                 | ["sessions", _, "postmortem", "json" | "md"]
                 | ["sessions", _, "generated-images", _]
@@ -183,6 +213,8 @@ struct AccountRow {
     enabled: bool,
     role: String,
     session_generation: i64,
+    display_name: Option<String>,
+    password_changed_at: String,
 }
 
 pub struct AccountPermissions {
@@ -205,6 +237,59 @@ pub enum ChangePasswordResult {
     Changed { generation: i64 },
     InvalidCurrentPassword,
     InvalidNewPassword(PasswordPolicyError),
+}
+
+#[derive(Clone, Copy)]
+enum SecurityEvent {
+    LoginSucceeded,
+    LoginFailed,
+    PasswordChanged,
+    PasswordReset,
+    SessionRevoked,
+    SessionsRevoked,
+    AccountCreated,
+    AccountEnabled,
+    AccountDisabled,
+    RoleChanged,
+    SourceGranted,
+    SourceRevoked,
+    ProfileChanged,
+}
+
+impl SecurityEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LoginSucceeded => "login_succeeded",
+            Self::LoginFailed => "login_failed",
+            Self::PasswordChanged => "password_changed",
+            Self::PasswordReset => "password_reset",
+            Self::SessionRevoked => "session_revoked",
+            Self::SessionsRevoked => "sessions_revoked",
+            Self::AccountCreated => "account_created",
+            Self::AccountEnabled => "account_enabled",
+            Self::AccountDisabled => "account_disabled",
+            Self::RoleChanged => "role_changed",
+            Self::SourceGranted => "source_granted",
+            Self::SourceRevoked => "source_revoked",
+            Self::ProfileChanged => "profile_changed",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AccountSession {
+    pub(crate) id: String,
+    pub(crate) logged_in_at: String,
+    pub(crate) last_seen_at: String,
+    pub(crate) status: &'static str,
+    pub(crate) user_agent_summary: String,
+    pub(crate) current: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct SecurityEventRow {
+    pub(crate) occurred_at: String,
+    pub(crate) label: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,7 +356,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 3,
+                schema_version <= 4,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -290,7 +375,16 @@ impl StateStore {
                 .await
                 .context("add application account roles")?;
         }
-        sqlx::query("UPDATE app_state_metadata SET value='3' WHERE key='schema_version'")
+        if !account_columns
+            .iter()
+            .any(|column| column == "display_name")
+        {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN display_name TEXT")
+                .execute(&pool)
+                .await
+                .context("add application account display names")?;
+        }
+        sqlx::query("UPDATE app_state_metadata SET value='4' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -303,6 +397,17 @@ impl StateStore {
             .delete_expired()
             .await
             .context("delete expired application sessions")?;
+        sqlx::query("DELETE FROM account_sessions WHERE (revoked_at IS NOT NULL OR absolute_expires_at<=unixepoch() OR last_seen_at<unixepoch()-?) AND last_seen_at<unixepoch()-?")
+            .bind(INACTIVITY_MINUTES * 60)
+            .bind(SESSION_HISTORY_RETENTION_DAYS * 86_400)
+            .execute(&pool)
+            .await
+            .context("expire retained application session history")?;
+        sqlx::query("DELETE FROM security_events WHERE occurred_at<unixepoch()-?")
+            .bind(SECURITY_RETENTION_DAYS * 86_400)
+            .execute(&pool)
+            .await
+            .context("expire retained security events")?;
         let dummy_hash = hash_password("synthetic-dummy-password")?;
         Ok(Self {
             auth: AuthState {
@@ -354,14 +459,21 @@ pub async fn create_account(
     } else {
         AccountRole::Viewer
     });
+    let account_id = random_token();
     sqlx::query("INSERT INTO accounts(id,username,password_hash,role) VALUES(?,?,?,?)")
-        .bind(random_token())
+        .bind(&account_id)
         .bind(username)
         .bind(hash)
         .bind(role.as_str())
         .execute(&mut *transaction)
         .await
         .map_err(|error| map_account_write_error("create application account", error))?;
+    insert_security_event(
+        &mut transaction,
+        Some(&account_id),
+        SecurityEvent::AccountCreated,
+    )
+    .await?;
     transaction
         .commit()
         .await
@@ -371,37 +483,83 @@ pub async fn create_account(
 
 pub async fn set_role(state: &StateStore, username: &str, role: AccountRole) -> Result<()> {
     let username = validate_username(username)?;
-    let result = sqlx::query("UPDATE accounts SET role=? WHERE username=? COLLATE NOCASE")
-        .bind(role.as_str())
-        .bind(username)
-        .execute(&state.auth.pool)
-        .await
-        .context("change application account role")?;
-    ensure!(result.rows_affected() == 1, "application account not found");
+    let mut transaction = state.auth.pool.begin().await.context("begin role change")?;
+    let account_id: Option<String> = sqlx::query_scalar(
+        "UPDATE accounts SET role=? WHERE username=? COLLATE NOCASE RETURNING id",
+    )
+    .bind(role.as_str())
+    .bind(username)
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("change application account role")?;
+    let account_id = account_id.context("application account not found")?;
+    insert_security_event(
+        &mut transaction,
+        Some(&account_id),
+        SecurityEvent::RoleChanged,
+    )
+    .await?;
+    transaction.commit().await.context("commit role change")?;
     Ok(())
 }
 
 pub async fn grant_source(state: &StateStore, username: &str, source_key: &str) -> Result<()> {
     let account_id = account_id(state, username).await?;
     validate_source_key(source_key)?;
-    sqlx::query("INSERT OR IGNORE INTO account_source_grants(account_id,source_key) VALUES(?,?)")
-        .bind(account_id)
-        .bind(source_key)
-        .execute(&state.auth.pool)
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
         .await
-        .context("grant source access")?;
+        .context("begin source grant")?;
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO account_source_grants(account_id,source_key) VALUES(?,?)",
+    )
+    .bind(&account_id)
+    .bind(source_key)
+    .execute(&mut *transaction)
+    .await
+    .context("grant source access")?;
+    if result.rows_affected() == 1 {
+        insert_security_event(
+            &mut transaction,
+            Some(&account_id),
+            SecurityEvent::SourceGranted,
+        )
+        .await?;
+    }
+    transaction.commit().await.context("commit source grant")?;
     Ok(())
 }
 
 pub async fn revoke_source(state: &StateStore, username: &str, source_key: &str) -> Result<()> {
     let account_id = account_id(state, username).await?;
     validate_source_key(source_key)?;
-    sqlx::query("DELETE FROM account_source_grants WHERE account_id=? AND source_key=?")
-        .bind(account_id)
-        .bind(source_key)
-        .execute(&state.auth.pool)
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
         .await
-        .context("revoke source access")?;
+        .context("begin source revocation")?;
+    let result =
+        sqlx::query("DELETE FROM account_source_grants WHERE account_id=? AND source_key=?")
+            .bind(&account_id)
+            .bind(source_key)
+            .execute(&mut *transaction)
+            .await
+            .context("revoke source access")?;
+    if result.rows_affected() == 1 {
+        insert_security_event(
+            &mut transaction,
+            Some(&account_id),
+            SecurityEvent::SourceRevoked,
+        )
+        .await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("commit source revocation")?;
     Ok(())
 }
 
@@ -433,9 +591,26 @@ pub async fn reset_password(
     let username = validate_username(username)?;
     let password = read_password(password_file)?;
     let hash = hash_password(&password)?;
-    let result = sqlx::query("UPDATE accounts SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,session_generation=session_generation+1 WHERE username=? COLLATE NOCASE")
-        .bind(hash).bind(username).execute(&state.auth.pool).await.context("reset application account password")?;
-    ensure!(result.rows_affected() == 1, "application account not found");
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
+        .await
+        .context("begin password reset")?;
+    let account_id: Option<String> = sqlx::query_scalar("UPDATE accounts SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,session_generation=session_generation+1 WHERE username=? COLLATE NOCASE RETURNING id")
+        .bind(hash).bind(username).fetch_optional(&mut *transaction).await.context("reset application account password")?;
+    let account_id = account_id.context("application account not found")?;
+    revoke_inventory_in_transaction(&mut transaction, &account_id).await?;
+    insert_security_event(
+        &mut transaction,
+        Some(&account_id),
+        SecurityEvent::PasswordReset,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit password reset")?;
     Ok(())
 }
 
@@ -475,15 +650,28 @@ pub async fn change_password(
     let new_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
         .await
         .context("join password hashing")??;
+    let mut transaction = state.pool.begin().await.context("begin password change")?;
     let generation = sqlx::query_scalar::<_, i64>(
         "UPDATE accounts SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,session_generation=session_generation+1 WHERE id=? AND password_hash=? AND enabled=1 RETURNING session_generation",
     )
     .bind(new_hash)
     .bind(account_id)
     .bind(current_hash)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *transaction)
     .await
     .context("change application account password")?;
+    if generation.is_some() {
+        insert_security_event(
+            &mut transaction,
+            Some(account_id),
+            SecurityEvent::PasswordChanged,
+        )
+        .await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("commit password change")?;
     Ok(
         generation.map_or(ChangePasswordResult::InvalidCurrentPassword, |generation| {
             ChangePasswordResult::Changed { generation }
@@ -521,22 +709,293 @@ pub async fn update_preferences(
     Ok(())
 }
 
+pub async fn update_profile(state: &AuthState, account_id: &str, display_name: &str) -> Result<()> {
+    let display_name = display_name.trim();
+    ensure!(
+        display_name.chars().count() <= 80 && !display_name.chars().any(char::is_control),
+        "display name must be at most 80 characters without control characters"
+    );
+    let value = (!display_name.is_empty()).then_some(display_name);
+    let mut transaction = state.pool.begin().await.context("begin profile update")?;
+    let result = sqlx::query("UPDATE accounts SET display_name=? WHERE id=?")
+        .bind(value)
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .context("update account profile")?;
+    ensure!(result.rows_affected() == 1, "application account not found");
+    insert_security_event(
+        &mut transaction,
+        Some(account_id),
+        SecurityEvent::ProfileChanged,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit profile update")?;
+    Ok(())
+}
+
+pub async fn record_failed_login(state: &AuthState, username: &str) -> Result<()> {
+    let account_id: Option<String> = if validate_username(username).is_ok() {
+        sqlx::query_scalar::<_, String>("SELECT id FROM accounts WHERE username=? COLLATE NOCASE")
+            .bind(username)
+            .fetch_optional(&state.pool)
+            .await
+            .context("resolve failed login account")?
+    } else {
+        None
+    };
+    insert_security_event_pool(state, account_id.as_deref(), SecurityEvent::LoginFailed).await
+}
+
+pub(crate) async fn account_sessions(
+    state: &AuthState,
+    account_id: &str,
+    current_id: Option<&str>,
+    offset: i64,
+    limit: usize,
+) -> Result<Vec<AccountSession>> {
+    type Row = (String, i64, i64, i64, Option<i64>, String);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id,logged_in_at,last_seen_at,absolute_expires_at,revoked_at,user_agent_summary FROM account_sessions WHERE account_id=? ORDER BY last_seen_at DESC,id DESC LIMIT ? OFFSET ?",
+    )
+    .bind(account_id)
+    .bind(limit as i64)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await
+    .context("list account sessions")?;
+    let now = unix_now();
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let current = current_id.is_some_and(|id| id == row.0);
+            let status = if row.4.is_some() {
+                "revoked"
+            } else if row.3 <= now || row.2 < now - INACTIVITY_MINUTES * 60 {
+                "expired"
+            } else if current {
+                "current"
+            } else {
+                "active"
+            };
+            AccountSession {
+                id: row.0,
+                logged_in_at: unix_timestamp(row.1),
+                last_seen_at: unix_timestamp(row.2),
+                status,
+                user_agent_summary: row.5,
+                current,
+            }
+        })
+        .collect())
+}
+
+pub(crate) async fn security_events(
+    state: &AuthState,
+    account_id: &str,
+    offset: i64,
+    limit: usize,
+) -> Result<Vec<SecurityEventRow>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_type,occurred_at FROM security_events WHERE account_id=? ORDER BY occurred_at DESC,id DESC LIMIT ? OFFSET ?",
+    )
+    .bind(account_id)
+    .bind(limit as i64)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await
+    .context("list account security events")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(kind, occurred_at)| {
+            security_event_label(&kind).map(|label| SecurityEventRow {
+                occurred_at: unix_timestamp(occurred_at),
+                label,
+            })
+        })
+        .collect())
+}
+
+pub(crate) async fn revoke_account_session(
+    state: &AuthState,
+    account_id: &str,
+    current_id: &str,
+    target_id: &str,
+) -> Result<bool> {
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .context("begin session revocation")?;
+    let tower_id: Option<String> = sqlx::query_scalar(
+        "UPDATE account_sessions SET revoked_at=unixepoch() WHERE id=? AND account_id=? AND id<>? AND revoked_at IS NULL RETURNING tower_session_id",
+    )
+    .bind(target_id)
+    .bind(account_id)
+    .bind(current_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("revoke account session")?;
+    let Some(tower_id) = tower_id else {
+        return Ok(false);
+    };
+    sqlx::query("DELETE FROM tower_sessions WHERE id=?")
+        .bind(tower_id)
+        .execute(&mut *transaction)
+        .await
+        .context("delete revoked session payload")?;
+    insert_security_event(
+        &mut transaction,
+        Some(account_id),
+        SecurityEvent::SessionRevoked,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit session revocation")?;
+    Ok(true)
+}
+
+pub(crate) async fn revoke_other_account_sessions(
+    state: &AuthState,
+    account_id: &str,
+    current_id: &str,
+) -> Result<u64> {
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .context("begin other-session revocation")?;
+    sqlx::query("DELETE FROM tower_sessions WHERE id IN (SELECT tower_session_id FROM account_sessions WHERE account_id=? AND id<>? AND revoked_at IS NULL)")
+        .bind(account_id)
+        .bind(current_id)
+        .execute(&mut *transaction)
+        .await
+        .context("delete other session payloads")?;
+    let result = sqlx::query("UPDATE account_sessions SET revoked_at=unixepoch() WHERE account_id=? AND id<>? AND revoked_at IS NULL")
+        .bind(account_id)
+        .bind(current_id)
+        .execute(&mut *transaction)
+        .await
+        .context("revoke other account sessions")?;
+    insert_security_event(
+        &mut transaction,
+        Some(account_id),
+        SecurityEvent::SessionsRevoked,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit other-session revocation")?;
+    Ok(result.rows_affected())
+}
+
+pub(crate) async fn current_inventory_id(session: &Session) -> Result<Option<String>> {
+    session
+        .get(INVENTORY_ID)
+        .await
+        .context("load session inventory ID")
+}
+
+pub(crate) fn summarize_user_agent(value: Option<&str>) -> String {
+    let value = value.unwrap_or_default();
+    let client = if value.contains("Edg/") {
+        "Edge"
+    } else if value.contains("Firefox/") {
+        "Firefox"
+    } else if value.contains("Chrome/") || value.contains("Chromium/") {
+        "Chrome"
+    } else if value.contains("Safari/") {
+        "Safari"
+    } else if value.starts_with("curl/") {
+        "curl"
+    } else if value.starts_with("Wget/") {
+        "Wget"
+    } else if value.is_empty() {
+        "Unknown client"
+    } else {
+        "Other client"
+    };
+    let platform = if value.contains("Android") {
+        Some("Android")
+    } else if value.contains("iPhone") || value.contains("iPad") {
+        Some("iOS")
+    } else if value.contains("Windows") {
+        Some("Windows")
+    } else if value.contains("Macintosh") || value.contains("Mac OS X") {
+        Some("macOS")
+    } else if value.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+    platform.map_or_else(
+        || client.to_owned(),
+        |platform| format!("{client} on {platform}"),
+    )
+}
+
 pub async fn set_enabled(state: &StateStore, username: &str, enabled: bool) -> Result<()> {
     let username = validate_username(username)?;
-    let result = if enabled {
-        sqlx::query("UPDATE accounts SET enabled=1 WHERE username=? COLLATE NOCASE").bind(username).execute(&state.auth.pool).await
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
+        .await
+        .context("begin account state change")?;
+    let account_id: Option<String> = if enabled {
+        sqlx::query_scalar("UPDATE accounts SET enabled=1 WHERE username=? COLLATE NOCASE RETURNING id").bind(username).fetch_optional(&mut *transaction).await
     } else {
-        sqlx::query("UPDATE accounts SET enabled=0,session_generation=session_generation+1 WHERE username=? COLLATE NOCASE").bind(username).execute(&state.auth.pool).await
+        sqlx::query_scalar("UPDATE accounts SET enabled=0,session_generation=session_generation+1 WHERE username=? COLLATE NOCASE RETURNING id").bind(username).fetch_optional(&mut *transaction).await
     }.context("change application account state")?;
-    ensure!(result.rows_affected() == 1, "application account not found");
+    let account_id = account_id.context("application account not found")?;
+    if !enabled {
+        revoke_inventory_in_transaction(&mut transaction, &account_id).await?;
+    }
+    insert_security_event(
+        &mut transaction,
+        Some(&account_id),
+        if enabled {
+            SecurityEvent::AccountEnabled
+        } else {
+            SecurityEvent::AccountDisabled
+        },
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit account state change")?;
     Ok(())
 }
 
 pub async fn revoke_sessions(state: &StateStore, username: &str) -> Result<()> {
     let username = validate_username(username)?;
-    let result = sqlx::query("UPDATE accounts SET session_generation=session_generation+1 WHERE username=? COLLATE NOCASE")
-        .bind(username).execute(&state.auth.pool).await.context("revoke application account sessions")?;
-    ensure!(result.rows_affected() == 1, "application account not found");
+    let mut transaction = state
+        .auth
+        .pool
+        .begin()
+        .await
+        .context("begin account-wide session revocation")?;
+    let account_id: Option<String> = sqlx::query_scalar("UPDATE accounts SET session_generation=session_generation+1 WHERE username=? COLLATE NOCASE RETURNING id")
+        .bind(username).fetch_optional(&mut *transaction).await.context("revoke application account sessions")?;
+    let account_id = account_id.context("application account not found")?;
+    revoke_inventory_in_transaction(&mut transaction, &account_id).await?;
+    insert_security_event(
+        &mut transaction,
+        Some(&account_id),
+        SecurityEvent::SessionsRevoked,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("commit account-wide session revocation")?;
     Ok(())
 }
 
@@ -554,7 +1013,7 @@ impl AuthState {
             return Ok(None);
         }
         let account = if validate_username(username).is_ok() {
-            sqlx::query_as::<_, AccountRow>("SELECT id,username,password_hash,enabled,role,session_generation FROM accounts WHERE username=? COLLATE NOCASE")
+            sqlx::query_as::<_, AccountRow>("SELECT id,username,password_hash,enabled,role,session_generation,display_name,password_changed_at FROM accounts WHERE username=? COLLATE NOCASE")
                 .bind(username).fetch_optional(&self.pool).await.context("load application account")?
         } else {
             None
@@ -589,7 +1048,7 @@ impl AuthState {
             return Ok(None);
         }
         let account = sqlx::query_as::<_, AccountRow>(
-            "SELECT id,username,password_hash,enabled,role,session_generation FROM accounts WHERE id=?",
+            "SELECT id,username,password_hash,enabled,role,session_generation,display_name,password_changed_at FROM accounts WHERE id=?",
         )
         .bind(account_id)
         .fetch_optional(&self.pool)
@@ -603,7 +1062,61 @@ impl AuthState {
             session.flush().await?;
             return Ok(None);
         }
+        if !self
+            .touch_or_adopt_session(session, &account.id, generation, issued_at)
+            .await?
+        {
+            session.flush().await?;
+            return Ok(None);
+        }
         Ok(Some(self.current_account(account).await?))
+    }
+
+    async fn touch_or_adopt_session(
+        &self,
+        session: &Session,
+        account_id: &str,
+        generation: i64,
+        issued_at: i64,
+    ) -> Result<bool> {
+        let Some(tower_id) = session.id().map(|id| id.to_string()) else {
+            return Ok(false);
+        };
+        if let Some(inventory_id) = session.get::<String>(INVENTORY_ID).await? {
+            let touched: Option<String> = sqlx::query_scalar(
+                "UPDATE account_sessions SET last_seen_at=unixepoch() WHERE id=? AND account_id=? AND tower_session_id=? AND session_generation=? AND revoked_at IS NULL AND absolute_expires_at>unixepoch() AND last_seen_at>=unixepoch()-? RETURNING id",
+            )
+            .bind(inventory_id)
+            .bind(account_id)
+            .bind(tower_id)
+            .bind(generation)
+            .bind(INACTIVITY_MINUTES * 60)
+            .fetch_optional(&self.pool)
+            .await
+            .context("touch account session inventory")?;
+            return Ok(touched.is_some());
+        }
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM account_sessions WHERE tower_session_id=? AND account_id=? AND revoked_at IS NULL",
+        )
+        .bind(&tower_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("find legacy account session inventory")?;
+        let inventory_id = existing.unwrap_or_else(random_token);
+        sqlx::query("INSERT OR IGNORE INTO account_sessions(id,account_id,tower_session_id,session_generation,logged_in_at,last_seen_at,absolute_expires_at,user_agent_summary) VALUES(?,?,?,?,?,unixepoch(),?,'Unknown client (upgraded session)')")
+            .bind(&inventory_id)
+            .bind(account_id)
+            .bind(tower_id)
+            .bind(generation)
+            .bind(issued_at)
+            .bind(issued_at.saturating_add(self.absolute_lifetime_seconds))
+            .execute(&self.pool)
+            .await
+            .context("adopt legacy account session")?;
+        session.insert(INVENTORY_ID, &inventory_id).await?;
+        Ok(true)
     }
 
     async fn current_account(&self, account: AccountRow) -> Result<CurrentUser> {
@@ -616,6 +1129,8 @@ impl AuthState {
         Ok(CurrentUser {
             id: account.id,
             username: account.username,
+            display_name: account.display_name,
+            password_changed_at: account.password_changed_at,
             preferences,
             access: AccessScope {
                 role,
@@ -654,14 +1169,102 @@ impl AuthState {
 }
 
 pub async fn establish_session(
+    state: &AuthState,
     session: &Session,
     user: &CurrentUser,
     generation: i64,
+    user_agent: Option<&str>,
 ) -> Result<()> {
+    let existing_inventory = session.get::<String>(INVENTORY_ID).await?;
     session.cycle_id().await?;
+    let issued_at = unix_now();
     session.insert(ACCOUNT_ID, &user.id).await?;
     session.insert(SESSION_GENERATION, generation).await?;
-    session.insert(ISSUED_AT, unix_now()).await?;
+    session.insert(ISSUED_AT, issued_at).await?;
+    let rotating_existing = existing_inventory.is_some();
+    let inventory_id = existing_inventory.unwrap_or_else(random_token);
+    session.insert(INVENTORY_ID, &inventory_id).await?;
+    session.save().await?;
+    let tower_id = session
+        .id()
+        .context("rotated application session has no identifier")?
+        .to_string();
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .context("begin session inventory update")?;
+    if rotating_existing {
+        sqlx::query("DELETE FROM tower_sessions WHERE id IN (SELECT tower_session_id FROM account_sessions WHERE account_id=? AND id<>? AND revoked_at IS NULL)")
+            .bind(&user.id)
+            .bind(&inventory_id)
+            .execute(&mut *transaction)
+            .await
+            .context("delete sessions superseded by password change")?;
+        sqlx::query("UPDATE account_sessions SET revoked_at=unixepoch() WHERE account_id=? AND id<>? AND revoked_at IS NULL")
+            .bind(&user.id)
+            .bind(&inventory_id)
+            .execute(&mut *transaction)
+            .await
+            .context("revoke sessions superseded by password change")?;
+        sqlx::query("UPDATE account_sessions SET tower_session_id=?,session_generation=?,last_seen_at=?,absolute_expires_at=?,revoked_at=NULL WHERE id=? AND account_id=?")
+            .bind(&tower_id)
+            .bind(generation)
+            .bind(issued_at)
+            .bind(issued_at.saturating_add(state.absolute_lifetime_seconds))
+            .bind(&inventory_id)
+            .bind(&user.id)
+            .execute(&mut *transaction)
+            .await
+            .context("rotate current account session inventory")?;
+        insert_security_event(
+            &mut transaction,
+            Some(&user.id),
+            SecurityEvent::SessionsRevoked,
+        )
+        .await?;
+    } else {
+        sqlx::query("INSERT INTO account_sessions(id,account_id,tower_session_id,session_generation,logged_in_at,last_seen_at,absolute_expires_at,user_agent_summary) VALUES(?,?,?,?,?,?,?,?)")
+            .bind(&inventory_id)
+            .bind(&user.id)
+            .bind(tower_id)
+            .bind(generation)
+            .bind(issued_at)
+            .bind(issued_at)
+            .bind(issued_at.saturating_add(state.absolute_lifetime_seconds))
+            .bind(summarize_user_agent(user_agent))
+            .execute(&mut *transaction)
+            .await
+            .context("create account session inventory")?;
+        insert_security_event(
+            &mut transaction,
+            Some(&user.id),
+            SecurityEvent::LoginSucceeded,
+        )
+        .await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("commit session inventory update")?;
+    Ok(())
+}
+
+pub async fn end_session(state: &AuthState, session: &Session) -> Result<()> {
+    if let Some(inventory_id) = session.get::<String>(INVENTORY_ID).await? {
+        let account_id: Option<String> = sqlx::query_scalar(
+            "UPDATE account_sessions SET revoked_at=unixepoch() WHERE id=? AND revoked_at IS NULL RETURNING account_id",
+        )
+        .bind(inventory_id)
+        .fetch_optional(&state.pool)
+        .await
+        .context("close account session inventory")?;
+        if let Some(account_id) = account_id {
+            insert_security_event_pool(state, Some(&account_id), SecurityEvent::SessionRevoked)
+                .await?;
+        }
+    }
+    session.flush().await?;
     Ok(())
 }
 
@@ -704,6 +1307,8 @@ pub async fn require_auth(
         request.extensions_mut().insert(CurrentUser {
             id: "local".into(),
             username: "Local developer".into(),
+            display_name: None,
+            password_changed_at: "Unavailable".into(),
             access: AccessScope::all(),
             preferences: crate::preferences::UserPreferences::default(),
         });
@@ -730,6 +1335,8 @@ pub async fn require_auth(
                 request.extensions_mut().insert(CurrentUser {
                     id: "test-account".into(),
                     username: "synthetic".into(),
+                    display_name: None,
+                    password_changed_at: "Unavailable".into(),
                     access: AccessScope::all(),
                     preferences: crate::preferences::UserPreferences::default(),
                 });
@@ -871,6 +1478,83 @@ fn parse_role(role: &str) -> Result<AccountRole> {
         "viewer" => Ok(AccountRole::Viewer),
         _ => anyhow::bail!("invalid application account role"),
     }
+}
+
+async fn insert_security_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: Option<&str>,
+    event: SecurityEvent,
+) -> Result<()> {
+    sqlx::query("DELETE FROM security_events WHERE occurred_at<unixepoch()-?")
+        .bind(SECURITY_RETENTION_DAYS * 86_400)
+        .execute(&mut **transaction)
+        .await
+        .context("expire retained security events")?;
+    sqlx::query("DELETE FROM account_sessions WHERE (revoked_at IS NOT NULL OR absolute_expires_at<=unixepoch() OR last_seen_at<unixepoch()-?) AND last_seen_at<unixepoch()-?")
+        .bind(INACTIVITY_MINUTES * 60)
+        .bind(SESSION_HISTORY_RETENTION_DAYS * 86_400)
+        .execute(&mut **transaction)
+        .await
+        .context("expire retained account sessions")?;
+    sqlx::query("INSERT INTO security_events(account_id,event_type) VALUES(?,?)")
+        .bind(account_id)
+        .bind(event.as_str())
+        .execute(&mut **transaction)
+        .await
+        .context("record security event")?;
+    Ok(())
+}
+
+async fn insert_security_event_pool(
+    state: &AuthState,
+    account_id: Option<&str>,
+    event: SecurityEvent,
+) -> Result<()> {
+    let mut transaction = state.pool.begin().await.context("begin security event")?;
+    insert_security_event(&mut transaction, account_id, event).await?;
+    transaction.commit().await.context("commit security event")
+}
+
+async fn revoke_inventory_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM tower_sessions WHERE id IN (SELECT tower_session_id FROM account_sessions WHERE account_id=? AND revoked_at IS NULL)")
+        .bind(account_id)
+        .execute(&mut **transaction)
+        .await
+        .context("delete account session payloads")?;
+    sqlx::query("UPDATE account_sessions SET revoked_at=unixepoch() WHERE account_id=? AND revoked_at IS NULL")
+        .bind(account_id)
+        .execute(&mut **transaction)
+        .await
+        .context("revoke account session inventory")?;
+    Ok(())
+}
+
+fn security_event_label(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "login_succeeded" => "Signed in",
+        "login_failed" => "Failed sign-in",
+        "password_changed" => "Password changed",
+        "password_reset" => "Password reset by local administrator",
+        "session_revoked" => "Session revoked",
+        "sessions_revoked" => "Other sessions revoked",
+        "account_created" => "Account created",
+        "account_enabled" => "Account enabled",
+        "account_disabled" => "Account disabled",
+        "role_changed" => "Role changed",
+        "source_granted" => "Source access granted",
+        "source_revoked" => "Source access revoked",
+        "profile_changed" => "Profile changed",
+        _ => return None,
+    })
+}
+
+fn unix_timestamp(value: i64) -> String {
+    chrono::DateTime::from_timestamp(value, 0)
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "Unavailable".into())
 }
 
 async fn account_id(state: &StateStore, username: &str) -> Result<String> {
@@ -1206,6 +1890,24 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let events: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT event_type FROM security_events ORDER BY event_type",
+        )
+        .fetch_all(&state.auth.pool)
+        .await
+        .unwrap();
+        for expected in [
+            "account_created",
+            "account_disabled",
+            "account_enabled",
+            "password_reset",
+            "role_changed",
+            "sessions_revoked",
+            "source_granted",
+            "source_revoked",
+        ] {
+            assert!(events.iter().any(|event| event == expected), "{events:?}");
+        }
     }
 
     #[tokio::test]
@@ -1295,6 +1997,145 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_agents_are_reduced_to_bounded_allowlisted_summaries() {
+        assert_eq!(
+            summarize_user_agent(Some(
+                "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0"
+            )),
+            "Firefox on Linux"
+        );
+        assert_eq!(summarize_user_agent(Some("curl/8.12.1")), "curl");
+        assert_eq!(
+            summarize_user_agent(Some("<script>alert('private')</script>")),
+            "Other client"
+        );
+        assert_eq!(summarize_user_agent(None), "Unknown client");
+    }
+
+    #[tokio::test]
+    async fn security_history_is_allowlisted_append_only_and_retained_for_180_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let state = StateStore::open(&path).await.unwrap();
+        let password = password_file(dir.path(), "Synthetic1! password");
+        create_account(&state, "alice", &password, None)
+            .await
+            .unwrap();
+        let alice_id = account_id(&state, "alice").await.unwrap();
+        record_failed_login(&state.auth, "alice").await.unwrap();
+        record_failed_login(&state.auth, "unknown-account")
+            .await
+            .unwrap();
+        let linked_failures: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM security_events WHERE event_type='login_failed' AND account_id=?",
+        )
+        .bind(&alice_id)
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        let unlinked_failures: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM security_events WHERE event_type='login_failed' AND account_id IS NULL",
+        )
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        assert_eq!((linked_failures, unlinked_failures), (1, 1));
+        sqlx::query("INSERT INTO security_events(account_id,event_type,occurred_at) VALUES(?,'login_failed',unixepoch()-181*86400)")
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        let event_id: i64 = sqlx::query_scalar("INSERT INTO security_events(account_id,event_type) VALUES(?,'login_succeeded') RETURNING id")
+            .bind(&alice_id)
+            .fetch_one(&state.auth.pool)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE security_events SET event_type='login_failed' WHERE id=?")
+                .bind(event_id)
+                .execute(&state.auth.pool)
+                .await
+                .is_err()
+        );
+        assert!(sqlx::query("INSERT INTO security_events(account_id,event_type) VALUES(?,'future_arbitrary_event')")
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .is_err());
+        sqlx::query("INSERT INTO account_sessions(id,account_id,tower_session_id,session_generation,logged_in_at,last_seen_at,absolute_expires_at,user_agent_summary,revoked_at) VALUES('old-session',?,'old-tower',0,unixepoch()-40*86400,unixepoch()-31*86400,unixepoch()-30*86400,'Other client',unixepoch()-31*86400),('recent-session',?,'recent-tower',0,unixepoch()-100,unixepoch()-100,unixepoch()+100,'Other client',unixepoch()-50)")
+            .bind(&alice_id)
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        state.auth.pool.close().await;
+
+        let reopened = StateStore::open(&path).await.unwrap();
+        let events: Vec<String> = sqlx::query_scalar(
+            "SELECT event_type FROM security_events WHERE account_id=? ORDER BY id",
+        )
+        .bind(&alice_id)
+        .fetch_all(&reopened.auth.pool)
+        .await
+        .unwrap();
+        assert!(events.contains(&"login_succeeded".to_owned()));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| *event == "login_failed")
+                .count(),
+            1
+        );
+        let retained_sessions: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM account_sessions WHERE account_id=? ORDER BY id")
+                .bind(&alice_id)
+                .fetch_all(&reopened.auth.pool)
+                .await
+                .unwrap();
+        assert_eq!(retained_sessions, vec!["recent-session"]);
+    }
+
+    #[tokio::test]
+    async fn valid_pre_inventory_sessions_are_adopted_without_signing_out() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        let password = password_file(dir.path(), "Synthetic1! password");
+        create_account(&state, "alice", &password, None)
+            .await
+            .unwrap();
+        let (user, generation) = state
+            .auth
+            .authenticate("alice", "Synthetic1! password")
+            .await
+            .unwrap()
+            .unwrap();
+        let session = Session::new(None, Arc::new(state.sessions.clone()), None);
+        session.insert(ACCOUNT_ID, &user.id).await.unwrap();
+        session
+            .insert(SESSION_GENERATION, generation)
+            .await
+            .unwrap();
+        session.insert(ISSUED_AT, unix_now()).await.unwrap();
+        session.save().await.unwrap();
+        assert!(session.get::<String>(INVENTORY_ID).await.unwrap().is_none());
+
+        let adopted = state.auth.current_user(&session).await.unwrap().unwrap();
+        assert_eq!(adopted.id, user.id);
+        let inventory_id = session.get::<String>(INVENTORY_ID).await.unwrap().unwrap();
+        let summary: String =
+            sqlx::query_scalar("SELECT user_agent_summary FROM account_sessions WHERE id=?")
+                .bind(inventory_id)
+                .fetch_one(&state.auth.pool)
+                .await
+                .unwrap();
+        assert_eq!(summary, "Unknown client (upgraded session)");
+    }
+
     #[tokio::test]
     async fn pre_permission_accounts_migrate_to_administrators() {
         let dir = tempfile::tempdir().unwrap();
@@ -1323,7 +2164,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )
@@ -1331,6 +2172,20 @@ mod tests {
         .await
         .unwrap();
         assert!(preferences_table);
+        let session_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_sessions')",
+        )
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        assert!(session_table);
+        let event_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='security_events')",
+        )
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        assert!(event_table);
     }
 
     #[tokio::test]
