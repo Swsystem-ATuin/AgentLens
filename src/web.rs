@@ -27,11 +27,10 @@ use presentation::{
     select_options, sessions_href, usage_href,
 };
 use queries::{
-    MESSAGE_CHUNK_CHARS, MessageChunk, SESSION_PAGE_SIZE, SessionFilters, SessionRow,
-    TRANSCRIPT_SECTION_SIZE, TURN_PAGE_SIZE, ToolChunk, USAGE_PAGE_SIZE, UsageFilters,
+    MESSAGE_CHUNK_CHARS, MessageChunk, SessionFilters, SessionRow, ToolChunk, UsageFilters,
 };
 #[cfg(test)]
-use queries::{MessageRow, TimelineRow};
+use queries::{MessageRow, TimelineRow, USAGE_PAGE_SIZE};
 
 const MAX_SESSION_PAGE: u32 = 100_000;
 
@@ -56,6 +55,7 @@ struct LogoutForm {
 #[derive(Deserialize, Default)]
 struct AccountQuery {
     password_changed: Option<String>,
+    preferences_saved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +64,22 @@ struct ChangePasswordForm {
     current_password: String,
     new_password: String,
     confirm_password: String,
+}
+
+#[derive(Deserialize)]
+struct PreferencesForm {
+    csrf_token: String,
+    timezone_mode: String,
+    timezone_name: String,
+    date_time_format: String,
+    appearance: String,
+    font_scale: u16,
+    page_size: usize,
+    live_interval_seconds: u64,
+    live_paused: Option<String>,
+    transcript_detail: String,
+    code_wrap: Option<String>,
+    default_sessions_view: String,
 }
 
 #[derive(Template)]
@@ -85,6 +101,10 @@ struct AccountTemplate {
     password_changed: bool,
     password_failed: bool,
     password_error: String,
+    preferences: crate::preferences::UserPreferences,
+    preferences_saved: bool,
+    preferences_failed: bool,
+    preferences_error: String,
 }
 
 #[cfg(test)]
@@ -134,6 +154,7 @@ struct Filters {
     from: Option<String>,
     to: Option<String>,
     page: Option<u32>,
+    browser_timezone: Option<String>,
 }
 
 #[derive(Template)]
@@ -158,6 +179,7 @@ struct UsageQuery {
     from: Option<String>,
     to: Option<String>,
     page: Option<u32>,
+    browser_timezone: Option<String>,
 }
 
 #[derive(Template)]
@@ -340,6 +362,7 @@ fn app_routes(
         )
         .route("/account", get(account))
         .route("/account/password", post(change_password))
+        .route("/account/preferences", post(change_preferences))
         .route("/logout", post(logout))
         .route("/sessions", get(sessions))
         .route("/usage", get(usage))
@@ -362,6 +385,8 @@ fn app_routes(
         .route("/assets/favicon-32.png", get(favicon_png))
         .route("/assets/agent-lens-logo.png", get(application_logo))
         .route("/assets/live-reader.js", get(live_reader_script))
+        .route("/assets/preferences.js", get(preferences_script))
+        .route("/assets/preferences.css", get(preferences_stylesheet))
         // Query strings can contain private filter values. Keep request spans
         // useful without recording the URI or authentication material.
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -512,6 +537,8 @@ async fn account(
         &session,
         query.password_changed.as_deref() == Some("1"),
         None,
+        query.preferences_saved.as_deref() == Some("1"),
+        None,
     )
     .await
 }
@@ -522,6 +549,8 @@ async fn render_account(
     session: &tower_sessions::Session,
     password_changed: bool,
     password_error: Option<&str>,
+    preferences_saved: bool,
+    preferences_error: Option<&str>,
 ) -> Result<Html<String>, WebError> {
     let csrf_token = crate::auth::csrf_token(session)
         .await
@@ -536,6 +565,10 @@ async fn render_account(
             password_changed,
             password_failed: password_error.is_some(),
             password_error: password_error.unwrap_or_default().to_owned(),
+            preferences: user.preferences.clone(),
+            preferences_saved,
+            preferences_failed: preferences_error.is_some(),
+            preferences_error: preferences_error.unwrap_or_default().to_owned(),
         }
         .render()
         .map_err(|error| WebError::template("render account page", error))?,
@@ -583,8 +616,16 @@ async fn change_password(
             crate::auth::ChangePasswordResult::InvalidNewPassword(error) => {
                 return Ok((
                     StatusCode::BAD_REQUEST,
-                    render_account(&state, &user, &session, false, Some(&error.to_string()))
-                        .await?,
+                    render_account(
+                        &state,
+                        &user,
+                        &session,
+                        false,
+                        Some(&error.to_string()),
+                        false,
+                        None,
+                    )
+                    .await?,
                 )
                     .into_response());
             }
@@ -592,9 +633,50 @@ async fn change_password(
     };
     Ok((
         StatusCode::BAD_REQUEST,
-        render_account(&state, &user, &session, false, error).await?,
+        render_account(&state, &user, &session, false, error, false, None).await?,
     )
         .into_response())
+}
+
+async fn change_preferences(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    session: tower_sessions::Session,
+    Form(form): Form<PreferencesForm>,
+) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/account").into_response());
+    }
+    if !crate::auth::verify_csrf(&session, &form.csrf_token)
+        .await
+        .map_err(|_| WebError::authentication("verify preferences request"))?
+    {
+        return Err(WebError::invalid_auth_request());
+    }
+    let preferences = crate::preferences::UserPreferences {
+        timezone_mode: form.timezone_mode,
+        timezone_name: form.timezone_name.trim().to_owned(),
+        date_time_format: form.date_time_format,
+        appearance: form.appearance,
+        font_scale: form.font_scale,
+        page_size: form.page_size,
+        live_interval_seconds: form.live_interval_seconds,
+        live_paused: form.live_paused.is_some(),
+        transcript_detail: form.transcript_detail,
+        code_wrap: form.code_wrap.is_some(),
+        default_sessions_view: form.default_sessions_view,
+    };
+    if let Err(error) = preferences.validate() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            render_account(&state, &user, &session, false, None, false, Some(error)).await?,
+        )
+            .into_response());
+    }
+    crate::auth::update_preferences(&state.auth, &user.id, &preferences)
+        .await
+        .map_err(|_| WebError::authentication("save account preferences"))?;
+    Ok(axum::response::Redirect::to("/account?preferences_saved=1").into_response())
 }
 
 async fn logout(
@@ -630,11 +712,52 @@ fn percent_encode_component(value: &str) -> String {
         .collect()
 }
 
+fn format_optional_timestamp(
+    preferences: &crate::preferences::UserPreferences,
+    timestamp: &mut Option<String>,
+) {
+    if let Some(value) = timestamp {
+        *value = preferences.format_timestamp(value);
+    }
+}
+
+fn format_timestamp_or(
+    preferences: &crate::preferences::UserPreferences,
+    timestamp: &str,
+) -> String {
+    if matches!(timestamp, "Unavailable" | "Timestamp unavailable") {
+        timestamp.to_owned()
+    } else {
+        preferences.format_timestamp(timestamp)
+    }
+}
+
+fn effective_preferences(
+    preferences: &crate::preferences::UserPreferences,
+    browser_timezone: Option<&str>,
+) -> crate::preferences::UserPreferences {
+    let mut effective = preferences.clone();
+    if preferences.timezone_mode == "browser"
+        && let Some(timezone) = browser_timezone
+        && timezone.len() <= 64
+        && timezone.parse::<chrono_tz::Tz>().is_ok()
+    {
+        effective.timezone_mode = "iana".into();
+        effective.timezone_name = timezone.to_owned();
+    }
+    effective
+}
+
 async fn usage(
     State(state): State<AppState>,
     Extension(user): Extension<crate::auth::CurrentUser>,
     Query(mut query): Query<UsageQuery>,
 ) -> Result<Html<String>, WebError> {
+    let preferences = effective_preferences(&user.preferences, query.browser_timezone.as_deref());
+    let page_size = user.preferences.page_size;
+    let projects = state
+        .projects
+        .with_timezone(preferences.sql_timezone_modifier());
     query.normalize();
     query.validate()?;
     let page = bounded_page(query.page, "validate usage page")?;
@@ -653,35 +776,58 @@ async fn usage(
         to: query.to.as_deref(),
     };
     let (totals, mut rows, recent) = tokio::try_join!(
-        queries::usage_totals(&state.pool, &filters, &state.projects, &user.access),
+        queries::usage_totals(&state.pool, &filters, &projects, &user.access),
         queries::usage_groups(
             &state.pool,
             &filters,
-            &state.projects,
+            &projects,
             &user.access,
-            i64::from(page - 1) * USAGE_PAGE_SIZE as i64,
+            i64::from(page - 1) * page_size as i64,
+            page_size,
         ),
-        queries::recent_usage(&state.pool, &filters, &state.projects, &user.access),
+        queries::recent_usage(&state.pool, &filters, &projects, &user.access),
     )
     .map_err(|error| WebError::database("load usage dashboard", error))?;
-    let has_next = rows.len() > USAGE_PAGE_SIZE;
-    rows.truncate(USAGE_PAGE_SIZE);
+    let has_next = rows.len() > page_size;
+    rows.truncate(page_size);
     let pagination = Pagination {
         page,
-        previous_href: (page > 1)
-            .then(|| usage_href(period, group, filters.from, filters.to, page - 1)),
-        next_href: (has_next && page < MAX_SESSION_PAGE)
-            .then(|| usage_href(period, group, filters.from, filters.to, page + 1)),
+        previous_href: (page > 1).then(|| {
+            usage_href(
+                period,
+                group,
+                filters.from,
+                filters.to,
+                query.browser_timezone.as_deref(),
+                page - 1,
+            )
+        }),
+        next_href: (has_next && page < MAX_SESSION_PAGE).then(|| {
+            usage_href(
+                period,
+                group,
+                filters.from,
+                filters.to,
+                query.browser_timezone.as_deref(),
+                page + 1,
+            )
+        }),
     };
     let mut groups = vec!["session", "model", "project", "agent"];
     if show_origins {
         groups.extend(["host", "user"]);
     }
+    let mut totals = present_usage_totals(totals);
+    totals.latest_at = format_timestamp_or(&user.preferences, &totals.latest_at);
+    let mut recent = present_recent_usage(recent);
+    for row in &mut recent {
+        row.timestamp = format_timestamp_or(&user.preferences, &row.timestamp);
+    }
     Ok(Html(
         UsageTemplate {
-            totals: present_usage_totals(totals),
+            totals,
             rows: present_usage_groups(rows),
-            recent: present_recent_usage(recent),
+            recent,
             period_options: select_options(
                 ["day", "week", "month"]
                     .into_iter()
@@ -708,7 +854,7 @@ async fn usage(
             },
             from: query.from,
             to: query.to,
-            timezone: state.projects.timezone().to_owned(),
+            timezone: user.preferences.timezone_label().to_owned(),
             pagination,
         }
         .render()
@@ -731,14 +877,31 @@ async fn diagnostics(
             queries::show_origins(&state.pool),
         )
         .map_err(|error| WebError::database("load diagnostics", error))?;
+    let page_size = user.preferences.page_size;
+    let mut pressure = present_pressure(pressure, page_size);
+    for row in &mut pressure {
+        row.timestamp = format_timestamp_or(&user.preferences, &row.timestamp);
+    }
+    let mut interruptions = present_diagnostic_evidence(interruptions, "interruption", page_size);
+    let mut incomplete = present_diagnostic_evidence(incomplete, "incomplete", page_size);
+    let mut accounting = present_diagnostic_evidence(accounting, "accounting", page_size);
+    let mut failures = present_diagnostic_evidence(failures, "failure", page_size);
+    for row in interruptions
+        .iter_mut()
+        .chain(incomplete.iter_mut())
+        .chain(accounting.iter_mut())
+        .chain(failures.iter_mut())
+    {
+        row.timestamp = format_timestamp_or(&user.preferences, &row.timestamp);
+    }
     Ok(Html(
         DiagnosticsTemplate {
             totals: totals.into(),
-            pressure: present_pressure(pressure),
-            interruptions: present_diagnostic_evidence(interruptions, "interruption"),
-            incomplete: present_diagnostic_evidence(incomplete, "incomplete"),
-            accounting: present_diagnostic_evidence(accounting, "accounting"),
-            failures: present_diagnostic_evidence(failures, "failure"),
+            pressure,
+            interruptions,
+            incomplete,
+            accounting,
+            failures,
             show_origins,
         }
         .render()
@@ -755,16 +918,25 @@ async fn health(
         return Err(WebError::forbidden());
     }
     let page = bounded_page(query.page, "validate health page")?;
+    let page_size = user.preferences.page_size;
     let (mut snapshot, show_origins) = tokio::try_join!(
         crate::health::snapshot(
             &state.pool,
-            i64::from(page - 1) * crate::health::SOURCE_PAGE_SIZE as i64,
+            i64::from(page - 1) * page_size as i64,
+            page_size,
         ),
         queries::show_origins(&state.pool),
     )
     .map_err(|error| WebError::database("load source health", error))?;
-    let has_next = snapshot.sources.len() > crate::health::SOURCE_PAGE_SIZE;
-    snapshot.sources.truncate(crate::health::SOURCE_PAGE_SIZE);
+    let has_next = snapshot.sources.len() > page_size;
+    snapshot.sources.truncate(page_size);
+    if let Some(run) = &mut snapshot.latest_run {
+        run.started_at = format_timestamp_or(&user.preferences, &run.started_at);
+        format_optional_timestamp(&user.preferences, &mut run.finished_at);
+    }
+    for source in &mut snapshot.sources {
+        format_optional_timestamp(&user.preferences, &mut source.observed_at);
+    }
     Ok(Html(
         HealthTemplate {
             latest_run: snapshot.latest_run,
@@ -810,6 +982,7 @@ impl UsageQuery {
             &mut self.group,
             &mut self.from,
             &mut self.to,
+            &mut self.browser_timezone,
         ] {
             if value.as_deref().is_some_and(str::is_empty) {
                 *value = None;
@@ -828,6 +1001,13 @@ impl UsageQuery {
                     "session" | "model" | "project" | "host" | "user" | "agent"
                 )
             })
+        {
+            return Err(WebError::invalid_filters());
+        }
+        if self
+            .browser_timezone
+            .as_deref()
+            .is_some_and(|value| value.len() > 64 || value.parse::<chrono_tz::Tz>().is_err())
         {
             return Err(WebError::invalid_filters());
         }
@@ -857,8 +1037,16 @@ async fn sessions(
     Query(mut filters): Query<Filters>,
 ) -> Result<Html<String>, WebError> {
     filters.normalize();
+    if filters.archive.is_none() && user.preferences.default_sessions_view != "all" {
+        filters.archive = Some(user.preferences.default_sessions_view.clone());
+    }
     filters.validate()?;
     let page = filters.page_number()?;
+    let preferences = effective_preferences(&user.preferences, filters.browser_timezone.as_deref());
+    let page_size = user.preferences.page_size;
+    let projects = state
+        .projects
+        .with_timezone(preferences.sql_timezone_modifier());
     let show_origins = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
@@ -866,7 +1054,7 @@ async fn sessions(
         filters.host = None;
         filters.user = None;
     }
-    let values = queries::filter_values(&state.pool, show_origins, &state.projects, &user.access)
+    let values = queries::filter_values(&state.pool, show_origins, &projects, &user.access)
         .await
         .map_err(|error| WebError::database("load filter options", error))?;
     let query_filters = filters.as_query();
@@ -874,14 +1062,19 @@ async fn sessions(
     let mut rows = queries::sessions(
         &state.pool,
         &query_filters,
-        &state.projects,
+        &projects,
         &user.access,
-        i64::from(page - 1) * SESSION_PAGE_SIZE as i64,
+        i64::from(page - 1) * page_size as i64,
+        page_size,
     )
     .await
     .map_err(|error| WebError::database("load sessions", error))?;
-    let has_next = rows.len() > SESSION_PAGE_SIZE;
-    rows.truncate(SESSION_PAGE_SIZE);
+    let has_next = rows.len() > page_size;
+    rows.truncate(page_size);
+    for row in &mut rows {
+        format_optional_timestamp(&user.preferences, &mut row.started_at);
+        format_optional_timestamp(&user.preferences, &mut row.last_activity);
+    }
     if let Some(search) = filters.q.as_deref() {
         let session_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
         let matches = queries::search_matches(&state.pool, &session_ids, search)
@@ -925,7 +1118,7 @@ async fn sessions(
             search: filters.q.clone(),
             from: filters.from.clone(),
             to: filters.to.clone(),
-            timezone: state.projects.timezone().to_owned(),
+            timezone: user.preferences.timezone_label().to_owned(),
             cron_all: filters.cron.as_deref() == Some("all"),
             empty_message: if page > 1 {
                 "No sessions on this page."
@@ -957,6 +1150,7 @@ impl Filters {
             &mut self.cron,
             &mut self.from,
             &mut self.to,
+            &mut self.browser_timezone,
         ] {
             if value.as_deref().is_some_and(str::is_empty) {
                 *value = None;
@@ -969,9 +1163,23 @@ impl Filters {
             return Err(WebError::invalid_filters());
         }
         if self
+            .archive
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "all" | "active" | "archived" | "unknown"))
+        {
+            return Err(WebError::invalid_filters());
+        }
+        if self
             .q
             .as_deref()
             .is_some_and(|query| query.chars().count() > crate::search::MAX_QUERY_CHARS)
+        {
+            return Err(WebError::invalid_filters());
+        }
+        if self
+            .browser_timezone
+            .as_deref()
+            .is_some_and(|value| value.len() > 64 || value.parse::<chrono_tz::Tz>().is_err())
         {
             return Err(WebError::invalid_filters());
         }
@@ -1029,6 +1237,7 @@ impl Filters {
             cron: self.cron.as_deref(),
             from: self.from.as_deref(),
             to: self.to.as_deref(),
+            browser_timezone: self.browser_timezone.as_deref(),
         }
     }
 
@@ -1077,6 +1286,7 @@ async fn session(
     Path(stable_id): Path<String>,
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
+    let page_size = user.preferences.page_size;
     let section = bounded_page(query.section, "validate transcript section")?;
     let event_filter = query.event.as_deref().unwrap_or("all");
     if !matches!(
@@ -1088,22 +1298,30 @@ async fn session(
     let show_origin = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
-    let row = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
-    let live = queries::live_status(&state.pool, &stable_id, &user.access)
+    let mut row = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
+    format_optional_timestamp(&user.preferences, &mut row.started_at);
+    format_optional_timestamp(&user.preferences, &mut row.last_activity);
+    let mut live: LiveStatus = queries::live_status(&state.pool, &stable_id, &user.access)
         .await
         .map_err(|error| WebError::database("load live reader status", error))?
         .ok_or_else(WebError::not_found)?
         .into();
+    format_optional_timestamp(&user.preferences, &mut live.last_successful_import);
+    format_optional_timestamp(&user.preferences, &mut live.source_observed_at);
     let mut events = queries::timeline_section(
         &state.pool,
         row.id,
         event_filter,
-        i64::from(section - 1) * TRANSCRIPT_SECTION_SIZE as i64,
+        i64::from(section - 1) * page_size as i64,
+        page_size,
     )
     .await
     .map_err(|error| WebError::database("load transcript section", error))?;
-    let has_next = events.len() > TRANSCRIPT_SECTION_SIZE;
-    events.truncate(TRANSCRIPT_SECTION_SIZE);
+    let has_next = events.len() > page_size;
+    events.truncate(page_size);
+    for event in &mut events {
+        format_optional_timestamp(&user.preferences, &mut event.timestamp);
+    }
     let pagination = Pagination {
         page: section,
         previous_href: (section > 1)
@@ -1131,13 +1349,16 @@ async fn session(
     } else {
         Vec::new()
     };
-    let segments = present_timeline_with_aliases(
+    let mut segments = present_timeline_with_aliases(
         events,
         &row.agent_kind,
         &stable_id,
         section > 1 && matches!(event_filter, "all" | "messages"),
         &generated_image_aliases,
     );
+    for segment in &mut segments {
+        segment.initially_open = user.preferences.detail_open(segment.initially_open);
+    }
     let event_options = select_options(
         [
             "all",
@@ -1186,7 +1407,9 @@ async fn generated_images(
     Extension(user): Extension<crate::auth::CurrentUser>,
     Path(stable_id): Path<String>,
 ) -> Result<Html<String>, WebError> {
-    let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
+    let mut session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
+    format_optional_timestamp(&user.preferences, &mut session.started_at);
+    format_optional_timestamp(&user.preferences, &mut session.last_activity);
     let source = queries::artifact_source(&state.pool, &stable_id, &user.access)
         .await
         .map_err(|error| WebError::database("load generated image source", error))?
@@ -1331,6 +1554,56 @@ async fn live_reader_script() -> impl IntoResponse {
     )
 }
 
+async fn preferences_script(
+    Extension(user): Extension<crate::auth::CurrentUser>,
+) -> impl IntoResponse {
+    let preferences = user.preferences;
+    let script = format!(
+        "(() => {{\n  'use strict';\n  window.agentLensPreferences = {{ liveIntervalMs: {}, livePaused: {} }};\n  if ({:?} !== 'browser') return;\n  const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;\n  if (browserTimezone && ['/sessions', '/usage'].includes(window.location.pathname)) {{\n    const url = new URL(window.location.href);\n    if (!url.searchParams.has('browser_timezone')) {{\n      url.searchParams.set('browser_timezone', browserTimezone);\n      window.location.replace(url);\n      return;\n    }}\n  }}\n  const format = {:?};\n  const locale = format === 'iso' ? 'sv-SE' : undefined;\n  const options = format === 'long-12' ? {{ dateStyle: 'medium', timeStyle: 'medium', hour12: true }} : format === 'long-24' ? {{ dateStyle: 'medium', timeStyle: 'medium', hour12: false }} : {{ year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }};\n  for (const item of document.querySelectorAll('time[data-user-time]')) {{\n    const parsed = new Date(item.textContent.trim());\n    if (!Number.isNaN(parsed.valueOf())) item.textContent = new Intl.DateTimeFormat(locale, options).format(parsed);\n  }}\n}})();\n",
+        preferences.live_interval_seconds * 1_000,
+        preferences.live_paused,
+        preferences.timezone_mode,
+        preferences.date_time_format,
+    );
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        script,
+    )
+}
+
+async fn preferences_stylesheet(
+    Extension(user): Extension<crate::auth::CurrentUser>,
+) -> impl IntoResponse {
+    let preferences = user.preferences;
+    let theme = match preferences.appearance.as_str() {
+        "light" => {
+            ":root{color-scheme:light;--bg:#f7f9fb;--panel:#fff;--line:#b7c2cc;--text:#17212b;--muted:#52697b;--accent:#08785a}"
+        }
+        "high-contrast" => {
+            ":root{color-scheme:dark;--bg:#000;--panel:#000;--line:#fff;--text:#fff;--muted:#ddd;--accent:#5fffd0}a{text-decoration:underline}button,input,select{border-width:2px}"
+        }
+        "dark" => ":root{color-scheme:dark}",
+        _ => {
+            "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f7f9fb;--panel:#fff;--line:#b7c2cc;--text:#17212b;--muted:#52697b;--accent:#08785a}}"
+        }
+    };
+    let wrapping = if preferences.code_wrap {
+        ".rich-text pre{white-space:pre-wrap;overflow-wrap:anywhere}"
+    } else {
+        ".rich-text pre{white-space:pre;overflow:auto}"
+    };
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        format!(
+            "{theme}\n:root{{font-size:{}%}}\n{wrapping}\n",
+            preferences.font_scale
+        ),
+    )
+}
+
 async fn favicon() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/x-icon")],
@@ -1359,19 +1632,25 @@ async fn turn_history(
     Query(query): Query<TurnHistoryQuery>,
 ) -> Result<Html<String>, WebError> {
     let page = bounded_page(query.page, "validate turn page")?;
+    let page_size = user.preferences.page_size;
     let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let mut rows = queries::session_turns(
         &state.pool,
         session.id,
-        i64::from(page - 1) * TURN_PAGE_SIZE as i64,
+        i64::from(page - 1) * page_size as i64,
+        page_size,
     )
     .await
     .map_err(|error| WebError::database("load turn history", error))?;
-    let has_next = rows.len() > TURN_PAGE_SIZE;
-    rows.truncate(TURN_PAGE_SIZE);
+    let has_next = rows.len() > page_size;
+    rows.truncate(page_size);
+    for row in &mut rows {
+        format_optional_timestamp(&user.preferences, &mut row.start_timestamp);
+        format_optional_timestamp(&user.preferences, &mut row.end_timestamp);
+    }
     Ok(Html(
         TurnsTemplate {
-            turns: present_turns(rows, &stable_id),
+            turns: present_turns(rows, &stable_id, page_size),
             session,
             pagination: Pagination {
                 page,
@@ -1443,17 +1722,18 @@ async fn message(
     let part = bounded_page(query.part, "validate message part")?;
     let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
-    let message = queries::message_chunk(&state.pool, session.id, sequence, offset)
+    let mut message = queries::message_chunk(&state.pool, session.id, sequence, offset)
         .await
         .map_err(|error| WebError::database("load message part", error))?
         .ok_or_else(WebError::not_found)?;
     if part > 1 && offset >= message.total_chars {
         return Err(WebError::invalid_pagination("validate message part"));
     }
+    format_optional_timestamp(&user.preferences, &mut message.timestamp);
     let preceding = queries::preceding_timeline_event_count(&state.pool, session.id, sequence, 0)
         .await
         .map_err(|error| WebError::database("locate message section", error))?;
-    let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    let section = preceding / user.preferences.page_size as i64 + 1;
     let pagination = Pagination {
         page: part,
         previous_href: (part > 1).then(|| message_href(&stable_id, sequence, part - 1)),
@@ -1499,7 +1779,16 @@ async fn tool_call(
     Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
-    tool_detail(state, user.access, stable_id, sequence, query.part, false).await
+    tool_detail(
+        state,
+        user.access,
+        user.preferences,
+        stable_id,
+        sequence,
+        query.part,
+        false,
+    )
+    .await
 }
 
 async fn tool_result(
@@ -1508,21 +1797,32 @@ async fn tool_result(
     Path((stable_id, sequence)): Path<(String, i64)>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Html<String>, WebError> {
-    tool_detail(state, user.access, stable_id, sequence, query.part, true).await
+    tool_detail(
+        state,
+        user.access,
+        user.preferences,
+        stable_id,
+        sequence,
+        query.part,
+        true,
+    )
+    .await
 }
 
 async fn tool_detail(
     state: AppState,
     access: crate::auth::AccessScope,
+    preferences: crate::preferences::UserPreferences,
     stable_id: String,
     sequence: i64,
     requested_part: Option<u32>,
     result: bool,
 ) -> Result<Html<String>, WebError> {
+    let page_size = preferences.page_size;
     let part = bounded_page(requested_part, "validate tool detail part")?;
     let session = load_session(&state.pool, &stable_id, &state.projects, &access).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
-    let item = if result {
+    let mut item = if result {
         queries::tool_result_chunk(&state.pool, session.id, sequence, offset).await
     } else {
         queries::tool_call_chunk(&state.pool, session.id, sequence, offset).await
@@ -1532,12 +1832,13 @@ async fn tool_detail(
     if part > 1 && offset >= item.total_chars {
         return Err(WebError::invalid_pagination("validate tool detail part"));
     }
+    format_optional_timestamp(&preferences, &mut item.timestamp);
     let event_order = if result { 2 } else { 1 };
     let preceding =
         queries::preceding_timeline_event_count(&state.pool, session.id, sequence, event_order)
             .await
             .map_err(|error| WebError::database("locate tool timeline section", error))?;
-    let section = preceding / TRANSCRIPT_SECTION_SIZE as i64 + 1;
+    let section = preceding / page_size as i64 + 1;
     let detail_kind = if result { "results" } else { "tools" };
     let title = if item.kind == "user_input" {
         if result { "Answer" } else { "Question" }.to_owned()
@@ -2143,6 +2444,8 @@ mod tests {
             ("/sessions/1/postmortem/json", StatusCode::NOT_FOUND),
             ("/sessions/1/postmortem/md", StatusCode::NOT_FOUND),
             ("/assets/live-reader.js", StatusCode::OK),
+            ("/assets/preferences.js", StatusCode::OK),
+            ("/assets/preferences.css", StatusCode::OK),
             ("/missing", StatusCode::NOT_FOUND),
         ] {
             let response = app
@@ -2319,7 +2622,7 @@ mod tests {
         let pool = crate::db::open(&dir.path().join("index.sqlite"))
             .await
             .unwrap();
-        let app = session_router(pool, state.clone());
+        let app = session_router(pool.clone(), state.clone());
         let other_cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
         let changing_cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
 
@@ -2448,6 +2751,225 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn account_preferences_validate_persist_and_drive_accessible_assets() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "alice", &password_file, None)
+            .await
+            .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = session_router(pool.clone(), state.clone());
+        let cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
+        let account = account_response(&app, &cookie).await;
+        let html = String::from_utf8(
+            to_bytes(account.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("action=\"/account/preferences\""));
+        assert!(html.contains("Browser-local display uses UTC"));
+        let csrf = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let fields = "timezone_mode=iana&timezone_name=Europe%2FLondon&date_time_format=long-24&appearance=high-contrast&font_scale=125&page_size=25&live_interval_seconds=30&transcript_detail=expanded&code_wrap=1&default_sessions_view=active";
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/preferences")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!("csrf_token=wrong&{fields}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_timezone = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/preferences")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        "csrf_token={csrf}&{}",
+                        fields.replace("Europe%2FLondon", "Invalid%2FZone")
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_timezone.status(), StatusCode::BAD_REQUEST);
+        let invalid_timezone = String::from_utf8(
+            to_bytes(invalid_timezone.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(invalid_timezone.contains("timezone must be a valid IANA name"));
+
+        let saved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/account/preferences")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!("csrf_token={csrf}&{fields}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            saved.headers()[header::LOCATION],
+            "/account?preferences_saved=1"
+        );
+
+        let account = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/account?preferences_saved=1")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = String::from_utf8(
+            to_bytes(account.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for selected in [
+            "value=\"iana\" selected",
+            "value=\"high-contrast\" selected",
+            "value=\"25\" selected",
+            "value=\"expanded\" selected",
+            "Preferences saved.",
+        ] {
+            assert!(html.contains(selected), "missing {selected} in {html}");
+        }
+
+        for (path, expected) in [
+            ("/assets/preferences.css", "font-size:125%"),
+            ("/assets/preferences.js", "liveIntervalMs: 30000"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = String::from_utf8(
+                to_bytes(response.into_body(), 32 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(body.contains(expected), "{path}: {body}");
+        }
+
+        sqlx::raw_sql(
+            "INSERT INTO agents VALUES(1,'codex','Codex'); INSERT INTO hosts VALUES(1,'host'); INSERT INTO users VALUES(1,1,'user'); INSERT INTO agent_instances(id,agent_id,user_id,source_home) VALUES(1,1,1,'home');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..30 {
+            sqlx::query("INSERT INTO sessions(instance_id,external_id,stable_id,title,started_at) VALUES(1,?,?,?,'2026-07-01T12:00:00Z')")
+                .bind(format!("native-{index}"))
+                .bind(format!("preference-{index:02}"))
+                .bind(format!("Preference {index:02}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let default_sessions = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let default_sessions = String::from_utf8(
+            to_bytes(default_sessions.into_body(), 128 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(default_sessions.contains("No sessions match these filters."));
+
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions?archive=unknown")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let page = String::from_utf8(
+            to_bytes(page.into_body(), 256 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(page.matches("href=\"/sessions/preference-").count(), 25);
+        assert!(page.contains("page=2"));
+        assert!(page.len() < 256 * 1024, "preference page was too large");
     }
 
     #[tokio::test]
@@ -3139,11 +3661,12 @@ mod tests {
             from: Some("2026-01-01".into()),
             to: Some("2026-01-31".into()),
             page: Some(2),
+            browser_timezone: Some("Europe/London".into()),
         };
 
         assert_eq!(
             filters.href(3),
-            "/sessions?q=needle%20text&host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&cron=all&from=2026-01-01&to=2026-01-31&page=3"
+            "/sessions?q=needle%20text&host=host%20name&user=user%2Fname&model=model%20%26%2B&status=%E5%AE%8C%E4%BA%86&agent=codex&project=project%20one&archive=active&cron=all&from=2026-01-01&to=2026-01-31&browser_timezone=Europe%2FLondon&page=3"
         );
     }
 

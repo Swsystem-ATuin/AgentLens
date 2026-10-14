@@ -4,7 +4,7 @@ The authenticated `/usage` route aggregates the checked cumulative-counter delta
 
 ## Time and grouping
 
-Each delta is attributed to the timestamp of the source observation that reported it. The configured fixed offset from the project configuration is applied before inclusive `from` and `to` dates and before period boundaries. Days start at local midnight, weeks start on Monday, and months use the local calendar month. An observation without a SQLite-readable timestamp cannot be placed in a period; the dashboard reports its count separately and excludes it from period totals.
+Each delta is attributed to the timestamp of the source observation that reported it. The signed-in account's UTC, browser-local, or validated IANA timezone preference is applied before inclusive `from` and `to` dates and before period boundaries. Named zones use the historical offset at each observation, including daylight-saving transitions. Days start at local midnight, weeks start on Monday, and months use the local calendar month. An observation without a SQLite-readable timestamp cannot be placed in a period; the dashboard reports its count separately and excludes it from period totals. Browser-local mode falls back to UTC without scripting or successful timezone discovery; see [user preferences](user-preferences.md).
 
 This is observation-time attribution, not billing-time attribution. In particular, the first usable cumulative snapshot can include tokens consumed before its timestamp, and a value following a missing snapshot can include usage from that gap. The page states this limitation next to the totals.
 
@@ -18,10 +18,10 @@ When only some observations in an aggregate provide a metric, the displayed know
 
 ## Bounds and drill-down
 
-The breakdown returns 100 rows per page and preserves period, grouping, and date range in navigation. Recent activity is limited to the latest 20 timestamped observations within the selected range. Session-group rows and recent observations link to the corresponding transcript using its stable public ID. Overview totals always cover the complete selected range, even when breakdown rows span multiple pages.
+The breakdown returns the account's selected 25, 50, or 100 rows per page and preserves period, grouping, date range, and browser timezone in navigation. Recent activity is limited to the latest 20 timestamped observations within the selected range. Session-group rows and recent observations link to the corresponding transcript using its stable public ID. Overview totals always cover the complete selected range, even when breakdown rows span multiple pages.
 
 Run one `refresh` after upgrading from parser version 4 or earlier so legacy order-unknown usage rows are replaced with calculated deltas. No additional rebuild or schema migration is required for the dashboard itself.
 
 ## Verification
 
-Run `bash scripts/check.sh`. Synthetic route/query regressions cover fixed-offset day and month boundaries, Monday-based weeks, all six grouping dimensions, unknown models, zero denominators, partially available reasoning, hidden-model scope, unattributed timestamps, recent transcript links, invalid ranges, direct-home origin suppression, bounded pagination, and reconciliation of a complete grouped result with its overview totals. Tests do not read the private development fixture.
+Run `bash scripts/check.sh`. Synthetic route/query regressions cover timezone-aware day and month boundaries, daylight-saving changes, Monday-based weeks, all six grouping dimensions, unknown models, zero denominators, partially available reasoning, hidden-model scope, unattributed timestamps, recent transcript links, invalid ranges, direct-home origin suppression, bounded pagination, and reconciliation of a complete grouped result with its overview totals. Tests do not read the private development fixture.

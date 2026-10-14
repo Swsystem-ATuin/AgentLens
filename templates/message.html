@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block title %}Message · Agent Lens{% endblock %}{% block content %}
-<h1>Message #{{ message.sequence }}</h1><div class="meta"><span>{{ message.role }}</span><span>{{ message.timestamp.as_deref().unwrap_or("") }}</span><a href="{{ transcript_href }}">Back to transcript</a></div>
+<h1>Message #{{ message.sequence }}</h1><div class="meta"><span>{{ message.role }}</span><span><time data-user-time>{{ message.timestamp.as_deref().unwrap_or("") }}</time></span><a href="{{ transcript_href }}">Back to transcript</a></div>
 <div class="message {{ message.role }}"><div class="message-content">{{ content_html|safe }}</div></div>
 {% if pagination.previous_href.is_some() || pagination.next_href.is_some() %}<nav class="pagination" aria-label="Message parts">{% if let Some(href) = pagination.previous_href %}<a rel="prev" href="{{ href }}">Previous part</a>{% else %}<span class="muted">Previous part</span>{% endif %}<span class="muted">Part {{ pagination.page }}</span>{% if let Some(href) = pagination.next_href %}<a rel="next" href="{{ href }}">Next part</a>{% else %}<span class="muted">Next part</span>{% endif %}</nav>{% endif %}
 {% endblock %}

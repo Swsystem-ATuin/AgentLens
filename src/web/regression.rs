@@ -829,7 +829,7 @@ async fn projects_dates_archives_and_agents_filter_rendered_sessions() {
     assert!(all.contains("<td>Windows Repo / UI</td>"));
     assert!(all.contains("<option value=\"Mono / API\">Mono / API</option>"));
     assert!(all.contains("Missing metadata"));
-    assert!(all.contains("Dates in UTC+01:00"));
+    assert!(all.contains("Dates in UTC"));
     assert!(all.find("/sessions/session-z").unwrap() < all.find("/sessions/session-a").unwrap());
     assert!(all.find("/sessions/session-a").unwrap() < all.find("/sessions/session-two").unwrap());
     assert!(
@@ -871,8 +871,8 @@ async fn projects_dates_archives_and_agents_filter_rendered_sessions() {
     }
     let (_, local_boundary) = get(&app, "/sessions?from=2026-01-02&to=2026-01-02").await;
     assert!(
-        local_boundary.contains("/sessions/session-one"),
-        "23:30Z belongs to the next date at UTC+01:00"
+        !local_boundary.contains("/sessions/session-one"),
+        "the default account preference uses UTC date boundaries"
     );
     assert!(!local_boundary.contains("Missing metadata"));
 
@@ -904,13 +904,13 @@ async fn usage_dashboard_uses_event_time_and_reconciles_grouped_detail() {
     let (status, html) = get(&app, uri).await;
     assert_eq!(status, StatusCode::OK);
     assert!(html.contains("Historical usage"));
-    assert!(html.contains("UTC+01:00"));
-    assert!(html.contains("<strong>150</strong>"));
-    assert!(html.contains("<strong>50</strong><small>33.3%</small>"));
-    assert!(html.contains("<strong>37</strong>"));
-    assert!(html.contains("<strong>5 (partial)</strong>"));
-    assert!(html.contains("<strong>187</strong>"));
-    assert!(html.contains("3 attributed observations across 2 sessions"));
+    assert!(html.contains("observed in UTC"));
+    assert!(html.contains("<strong>50</strong>"));
+    assert!(html.contains("<strong>10</strong><small>20.0%</small>"));
+    assert!(html.contains("<strong>17</strong>"));
+    assert!(html.contains("<strong>Unavailable</strong>"));
+    assert!(html.contains("<strong>67</strong>"));
+    assert!(html.contains("2 attributed observations across 2 sessions"));
     assert!(html.contains("1 observations have no usable timestamp"));
     assert!(html.contains("Unknown model"));
     assert!(html.contains("<td>0</td><td>0</td><td>Unavailable</td><td>7</td>"));
@@ -930,7 +930,7 @@ async fn usage_dashboard_uses_event_time_and_reconciles_grouped_detail() {
     let totals = queries::usage_totals(&pool, &filters, &projects, &access)
         .await
         .unwrap();
-    let detail = queries::usage_groups(&pool, &filters, &projects, &access, 0)
+    let detail = queries::usage_groups(&pool, &filters, &projects, &access, 0, USAGE_PAGE_SIZE)
         .await
         .unwrap();
     assert_eq!(
@@ -972,10 +972,10 @@ async fn usage_dashboard_uses_event_time_and_reconciles_grouped_detail() {
     assert!(weekly.contains("href=\"/sessions/usage-one\""));
     let (_, daily) = get(
         &app,
-        "/usage?period=day&group=agent&from=2026-02-01&to=2026-02-01",
+        "/usage?period=day&group=agent&from=2026-01-31&to=2026-01-31",
     )
     .await;
-    assert!(daily.contains("<td>2026-02-01</td><td>codex</td>"));
+    assert!(daily.contains("<td>2026-01-31</td><td>codex</td>"));
     for (group, expected) in [
         ("project", "Fixture project"),
         ("host", "alpha"),
@@ -1047,7 +1047,10 @@ async fn usage_dashboard_bounds_rows_and_preserves_range_navigation() {
     ));
     let (_, second) = get(&app, &format!("/usage?{query}&page=2")).await;
     assert!(second.contains("rel=\"prev\""));
-    assert!(!second.contains("rel=\"next\""));
+    assert!(second.contains("rel=\"next\""));
+    let (_, third) = get(&app, &format!("/usage?{query}&page=3")).await;
+    assert!(third.contains("rel=\"prev\""));
+    assert!(!third.contains("rel=\"next\""));
 }
 
 #[tokio::test]
@@ -2187,7 +2190,7 @@ async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
         "{first}"
     );
     assert!(first.contains("102"), "{first}");
-    assert_eq!(first.matches("<code>file_").count(), 100);
+    assert_eq!(first.matches("<code>file_").count(), 50);
     assert!(first.contains("/health?page=2"), "{first}");
     for private in [
         "PRIVATE_PATH",
@@ -2203,10 +2206,10 @@ async fn source_health_is_bounded_sanitised_and_hides_direct_home_origins() {
     assert!(!first.contains("<th>Host</th>"), "{first}");
     assert!(!first.contains("<th>User</th>"), "{first}");
 
-    let (status, second) = get(&app, "/health?page=2").await;
+    let (status, second) = get(&app, "/health?page=3").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second.matches("<code>file_").count(), 2);
-    assert!(second.contains("/health?page=1"), "{second}");
+    assert!(second.contains("/health?page=2"), "{second}");
     assert!(
         second.len() < 32 * 1024,
         "health page was {} bytes",

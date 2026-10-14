@@ -70,6 +70,7 @@ pub(crate) struct HealthSnapshot {
 pub(crate) async fn snapshot(
     pool: &SqlitePool,
     offset: i64,
+    page_size: usize,
 ) -> Result<HealthSnapshot, sqlx::Error> {
     let (latest_run, totals, rows) = tokio::try_join!(
         sqlx::query_as::<_, RawIngestHealth>(
@@ -83,7 +84,7 @@ pub(crate) async fn snapshot(
         sqlx::query_as::<_, RawSourceHealth>(
             "SELECT i.source_key,sf.path,sf.kind,sf.parse_status,sf.parse_error,sf.observed_at,CAST((julianday('now')-julianday(sf.observed_at))*86400 AS INTEGER) age_seconds,h.name hostname,u.os_user,a.kind agent_kind,s.stable_id FROM source_files sf JOIN agent_instances i ON i.id=sf.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN sessions s ON s.source_file_id=sf.id ORDER BY CASE sf.parse_status WHEN 'error' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,sf.observed_at,sf.id LIMIT ? OFFSET ?"
         )
-        .bind((SOURCE_PAGE_SIZE + 1) as i64)
+        .bind((page_size + 1) as i64)
         .bind(offset)
         .fetch_all(pool),
     )?;
@@ -169,7 +170,7 @@ fn classify_error(detail: Option<&str>) -> &'static str {
 }
 
 pub(crate) async fn cli_report(pool: &SqlitePool) -> Result<String> {
-    let mut snapshot = snapshot(pool, 0).await?;
+    let mut snapshot = snapshot(pool, 0, SOURCE_PAGE_SIZE).await?;
     let has_more = snapshot.sources.len() > SOURCE_PAGE_SIZE;
     snapshot.sources.truncate(SOURCE_PAGE_SIZE);
     let mut output = String::new();

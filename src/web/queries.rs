@@ -1,11 +1,9 @@
 use crate::projects::ProjectConfig;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
-pub(super) const SESSION_PAGE_SIZE: usize = 50;
-pub(super) const TRANSCRIPT_SECTION_SIZE: usize = 50;
+#[cfg(test)]
 pub(super) const USAGE_PAGE_SIZE: usize = 100;
 pub(super) const RECENT_USAGE_LIMIT: i64 = 20;
-pub(super) const TURN_PAGE_SIZE: usize = 50;
 pub(super) const DIAGNOSTIC_EVIDENCE_LIMIT: i64 = 20;
 pub(super) const PRESSURE_SNAPSHOT_LIMIT: i64 = 50;
 pub(super) const MESSAGE_PREVIEW_CHARS: i64 = 2_048;
@@ -108,6 +106,7 @@ pub(super) struct SessionFilters<'a> {
     pub(super) from: Option<&'a str>,
     pub(super) to: Option<&'a str>,
     pub(super) search: Option<&'a str>,
+    pub(super) browser_timezone: Option<&'a str>,
 }
 
 #[derive(FromRow)]
@@ -306,6 +305,7 @@ pub(super) async fn sessions(
     projects: &ProjectConfig,
     access: &crate::auth::AccessScope,
     offset: i64,
+    page_size: usize,
 ) -> Result<Vec<SessionRow>, sqlx::Error> {
     let model_exclusion = crate::sources::model_exclusion();
     let mut query = QueryBuilder::<Sqlite>::new(
@@ -341,7 +341,9 @@ pub(super) async fn sessions(
     query
         .push(" AND (")
         .push_bind(filters.archive)
-        .push(" IS NULL OR CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END=")
+        .push(" IS NULL OR ")
+        .push_bind(filters.archive)
+        .push("='all' OR CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END=")
         .push_bind(filters.archive)
         .push(")");
     push_date_boundary(&mut query, filters.from, projects.timezone(), ">=");
@@ -363,7 +365,7 @@ pub(super) async fn sessions(
     }
     query
         .push(" ORDER BY julianday(COALESCE(s.ended_at,s.started_at)) DESC,s.stable_id DESC LIMIT ")
-        .push_bind((SESSION_PAGE_SIZE + 1) as i64)
+        .push_bind((page_size + 1) as i64)
         .push(" OFFSET ")
         .push_bind(offset);
     query.build_query_as::<SessionRow>().fetch_all(pool).await
@@ -541,6 +543,7 @@ pub(super) async fn usage_groups(
     projects: &ProjectConfig,
     access: &crate::auth::AccessScope,
     offset: i64,
+    page_size: usize,
 ) -> Result<Vec<UsageGroupRow>, sqlx::Error> {
     let mut query = QueryBuilder::<Sqlite>::new("SELECT ");
     push_usage_period(&mut query, filters.period, projects.timezone());
@@ -559,7 +562,7 @@ pub(super) async fn usage_groups(
     push_source_access(&mut query, access);
     push_usage_date_boundaries(&mut query, filters, projects.timezone());
     query.push(" GROUP BY period,dimension,stable_id ORDER BY period DESC,total_tokens DESC,dimension LIMIT ")
-        .push_bind((USAGE_PAGE_SIZE + 1) as i64)
+        .push_bind((page_size + 1) as i64)
         .push(" OFFSET ")
         .push_bind(offset);
     query
@@ -593,12 +596,13 @@ pub(super) async fn session_turns(
     pool: &SqlitePool,
     session_id: i64,
     offset: i64,
+    page_size: usize,
 ) -> Result<Vec<TurnRow>, sqlx::Error> {
     sqlx::query_as::<_, TurnRow>(
         "SELECT t.ordinal,t.turn_id,t.start_sequence,t.start_timestamp,t.start_kind,t.end_sequence,t.end_timestamp,t.outcome,t.resumed,t.requested_model,t.requested_model_sequence,t.observed_model,t.observed_model_sequence,CASE WHEN unixepoch(t.start_timestamp) IS NOT NULL AND unixepoch(t.end_timestamp)>=unixepoch(t.start_timestamp) THEN unixepoch(t.end_timestamp)-unixepoch(t.start_timestamp) END duration_seconds,(SELECT count(*) FROM tool_calls c WHERE c.session_id=t.session_id AND c.turn_ordinal=t.ordinal) tool_request_count,(SELECT count(*) FROM tool_results r WHERE r.session_id=t.session_id AND r.turn_ordinal=t.ordinal) tool_result_count,(SELECT count(*) FROM tool_results r WHERE r.session_id=t.session_id AND r.turn_ordinal=t.ordinal AND r.outcome='failed') failed_tool_count,(SELECT count(*) FROM tool_calls c WHERE c.session_id=t.session_id AND c.turn_ordinal=t.ordinal AND NOT EXISTS(SELECT 1 FROM tool_results r WHERE r.tool_call_id=c.id)) unknown_tool_count,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<COALESCE(t.start_sequence,t.end_sequence)) start_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.end_sequence) end_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.requested_model_sequence) requested_model_position,(SELECT count(*) FROM turn_events e WHERE e.session_id=t.session_id AND e.source_sequence<t.observed_model_sequence) observed_model_position FROM turns t WHERE t.session_id=? ORDER BY t.ordinal DESC LIMIT ? OFFSET ?",
     )
     .bind(session_id)
-    .bind((TURN_PAGE_SIZE + 1) as i64)
+    .bind((page_size + 1) as i64)
     .bind(offset)
     .fetch_all(pool)
     .await
@@ -717,12 +721,13 @@ fn push_usage_date_boundaries<'a>(
     filters: &UsageFilters<'a>,
     timezone: &'a str,
 ) {
+    let timezone = crate::preferences::sqlite_timezone_expression(timezone, "u.timestamp");
     for (value, comparison) in [(filters.from, ">="), (filters.to, "<=")] {
         query
             .push(" AND (")
             .push_bind(value)
             .push(" IS NULL OR date(u.timestamp,")
-            .push_bind(timezone)
+            .push(&timezone)
             .push(") ")
             .push(comparison)
             .push(" ")
@@ -732,26 +737,24 @@ fn push_usage_date_boundaries<'a>(
 }
 
 fn push_usage_period<'a>(query: &mut QueryBuilder<'a, Sqlite>, period: &str, timezone: &'a str) {
+    let timezone = crate::preferences::sqlite_timezone_expression(timezone, "u.timestamp");
     match period {
         "week" => {
             query
                 .push("date(u.timestamp,")
-                .push_bind(timezone)
+                .push(&timezone)
                 .push(",'-' || ((CAST(strftime('%w',u.timestamp,")
-                .push_bind(timezone)
+                .push(&timezone)
                 .push(") AS INTEGER)+6)%7) || ' days')");
         }
         "month" => {
             query
                 .push("strftime('%Y-%m',u.timestamp,")
-                .push_bind(timezone)
+                .push(&timezone)
                 .push(")");
         }
         _ => {
-            query
-                .push("date(u.timestamp,")
-                .push_bind(timezone)
-                .push(")");
+            query.push("date(u.timestamp,").push(&timezone).push(")");
         }
     }
 }
@@ -891,11 +894,15 @@ fn push_date_boundary<'a>(
     timezone: &'a str,
     comparison: &str,
 ) {
+    let timezone = crate::preferences::sqlite_timezone_expression(
+        timezone,
+        "COALESCE(s.ended_at,s.started_at)",
+    );
     query
         .push(" AND (")
         .push_bind(value)
         .push(" IS NULL OR date(COALESCE(s.ended_at,s.started_at),")
-        .push_bind(timezone)
+        .push(timezone)
         .push(") ")
         .push(comparison)
         .push(" ")
@@ -940,6 +947,7 @@ pub(super) async fn timeline_section(
     session_id: i64,
     event_filter: &str,
     offset: i64,
+    page_size: usize,
 ) -> Result<Vec<TimelineRow>, sqlx::Error> {
     sqlx::query_as::<_, TimelineRow>(
         "SELECT 'diagnostic_event' event_type,u.source_sequence sequence,u.sequence_known,u.timestamp,NULL role,trim(CASE WHEN u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL THEN 'Context: ' || COALESCE(u.context_tokens,'Unavailable') || ' / ' || COALESCE(u.context_window,'Unavailable') || char(10) ELSE '' END || CASE WHEN u.primary_used_percent IS NOT NULL THEN printf('Primary rate: %.1f%% used',u.primary_used_percent) || char(10) ELSE '' END || CASE WHEN u.secondary_used_percent IS NOT NULL THEN printf('Secondary rate: %.1f%% used',u.secondary_used_percent) || char(10) ELSE '' END || CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 'Accounting flags: ' || trim(CASE WHEN u.has_reset THEN 'reset ' ELSE '' END || CASE WHEN u.has_missing THEN 'missing ' ELSE '' END || CASE WHEN u.has_inconsistent THEN 'inconsistent' ELSE '' END) ELSE '' END) content,length(COALESCE(u.raw_json,'')) total_chars,CASE WHEN u.context_window IS NOT NULL OR u.context_tokens IS NOT NULL OR u.primary_used_percent IS NOT NULL OR u.secondary_used_percent IS NOT NULL OR u.rate_limit_id IS NOT NULL OR u.rate_limit_name IS NOT NULL OR u.rate_limit_reached_type IS NOT NULL THEN 'pressure' ELSE 'accounting' END tool_name,NULL call_id,CASE WHEN u.has_reset OR u.has_missing OR u.has_inconsistent THEN 'review evidence' END outcome,3 event_order \
@@ -976,7 +984,7 @@ pub(super) async fn timeline_section(
     .bind(event_filter)
     .bind(event_filter)
     .bind(event_filter)
-    .bind((TRANSCRIPT_SECTION_SIZE + 1) as i64)
+    .bind((page_size + 1) as i64)
     .bind(offset)
     .fetch_all(pool)
     .await

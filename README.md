@@ -198,7 +198,7 @@ Planned features and architecture follow-ups are tracked only in [ROADMAP.md](RO
 
 Internal web failures return a generic response. Server diagnostics record only an allowlisted operation, error category, optional database/IO code, HTTP status, and request method; they do not record request URIs, authorization headers, database error text, or transcript content. See [web error handling](docs/web-errors.md).
 
-Multiple application identities and source-scoped permissions are implemented following the [framework decision](docs/multi-user-framework-decision.md). Accounts, roles, grants, and sessions persist independently of the rebuildable agent index, completing the multi-user deployment gate while keeping future per-user features on the same stable identity boundary.
+Multiple application identities and source-scoped permissions are implemented following the [framework decision](docs/multi-user-framework-decision.md). Accounts, roles, grants, sessions, and [typed user preferences](docs/user-preferences.md) persist independently of the rebuildable agent index. Signed-in users can select timezone and date formatting, appearance, font scale, bounded page size, live-reader and transcript defaults, code wrapping, and a default sessions view from the Account page.
 
 ```bash
 cargo fmt --check

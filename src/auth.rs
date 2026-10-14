@@ -35,7 +35,7 @@ const CSRF_TOKEN: &str = "auth.csrf";
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','2');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','3');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -51,6 +51,21 @@ CREATE TABLE IF NOT EXISTS account_source_grants (
     source_key TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(account_id,source_key)
+);
+CREATE TABLE IF NOT EXISTS account_preferences (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    timezone_mode TEXT NOT NULL DEFAULT 'utc',
+    timezone_name TEXT NOT NULL DEFAULT 'UTC',
+    date_time_format TEXT NOT NULL DEFAULT 'iso',
+    appearance TEXT NOT NULL DEFAULT 'system',
+    font_scale INTEGER NOT NULL DEFAULT 100,
+    page_size INTEGER NOT NULL DEFAULT 50,
+    live_interval_seconds INTEGER NOT NULL DEFAULT 5,
+    live_paused INTEGER NOT NULL DEFAULT 1,
+    transcript_detail TEXT NOT NULL DEFAULT 'standard',
+    code_wrap INTEGER NOT NULL DEFAULT 0,
+    default_sessions_view TEXT NOT NULL DEFAULT 'all',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 "#;
 
@@ -75,6 +90,7 @@ pub struct CurrentUser {
     pub id: String,
     pub username: String,
     pub access: AccessScope,
+    pub(crate) preferences: crate::preferences::UserPreferences,
 }
 
 #[derive(Clone, Debug)]
@@ -128,11 +144,14 @@ impl AccessScope {
             path,
             "/" | "/account"
                 | "/account/password"
+                | "/account/preferences"
                 | "/logout"
                 | "/sessions"
                 | "/usage"
                 | "/diagnostics"
                 | "/assets/live-reader.js"
+                | "/assets/preferences.js"
+                | "/assets/preferences.css"
         ) {
             return true;
         }
@@ -252,7 +271,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 2,
+                schema_version <= 3,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -271,7 +290,7 @@ impl StateStore {
                 .await
                 .context("add application account roles")?;
         }
-        sqlx::query("UPDATE app_state_metadata SET value='2' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='3' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -472,6 +491,36 @@ pub async fn change_password(
     )
 }
 
+pub async fn update_preferences(
+    state: &AuthState,
+    account_id: &str,
+    preferences: &crate::preferences::UserPreferences,
+) -> Result<()> {
+    preferences
+        .validate()
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let result = sqlx::query(
+        "INSERT INTO account_preferences(account_id,timezone_mode,timezone_name,date_time_format,appearance,font_scale,page_size,live_interval_seconds,live_paused,transcript_detail,code_wrap,default_sessions_view,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET timezone_mode=excluded.timezone_mode,timezone_name=excluded.timezone_name,date_time_format=excluded.date_time_format,appearance=excluded.appearance,font_scale=excluded.font_scale,page_size=excluded.page_size,live_interval_seconds=excluded.live_interval_seconds,live_paused=excluded.live_paused,transcript_detail=excluded.transcript_detail,code_wrap=excluded.code_wrap,default_sessions_view=excluded.default_sessions_view,updated_at=CURRENT_TIMESTAMP",
+    )
+    .bind(account_id)
+    .bind(&preferences.timezone_mode)
+    .bind(&preferences.timezone_name)
+    .bind(&preferences.date_time_format)
+    .bind(&preferences.appearance)
+    .bind(i64::from(preferences.font_scale))
+    .bind(preferences.page_size as i64)
+    .bind(preferences.live_interval_seconds as i64)
+    .bind(preferences.live_paused)
+    .bind(&preferences.transcript_detail)
+    .bind(preferences.code_wrap)
+    .bind(&preferences.default_sessions_view)
+    .execute(&state.pool)
+    .await
+    .context("save account preferences")?;
+    ensure!(result.rows_affected() == 1, "application account not found");
+    Ok(())
+}
+
 pub async fn set_enabled(state: &StateStore, username: &str, enabled: bool) -> Result<()> {
     let username = validate_username(username)?;
     let result = if enabled {
@@ -563,9 +612,11 @@ impl AuthState {
         let source_count = source_keys.len();
         let source_keys_json = serde_json::to_string(&source_keys)
             .context("encode application account source grants")?;
+        let preferences = load_preferences(&self.pool, &account.id).await?;
         Ok(CurrentUser {
             id: account.id,
             username: account.username,
+            preferences,
             access: AccessScope {
                 role,
                 source_keys_json,
@@ -654,6 +705,7 @@ pub async fn require_auth(
             id: "local".into(),
             username: "Local developer".into(),
             access: AccessScope::all(),
+            preferences: crate::preferences::UserPreferences::default(),
         });
         return next.run(request).await;
     }
@@ -679,6 +731,7 @@ pub async fn require_auth(
                     id: "test-account".into(),
                     username: "synthetic".into(),
                     access: AccessScope::all(),
+                    preferences: crate::preferences::UserPreferences::default(),
                 });
                 return next.run(request).await;
             }
@@ -838,6 +891,49 @@ async fn source_grants(pool: &SqlitePool, account_id: &str) -> Result<Vec<String
     .fetch_all(pool)
     .await
     .context("load application account source grants")
+}
+
+async fn load_preferences(
+    pool: &SqlitePool,
+    account_id: &str,
+) -> Result<crate::preferences::UserPreferences> {
+    type PreferenceRow = (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        bool,
+        String,
+        bool,
+        String,
+    );
+    let row: Option<PreferenceRow> = sqlx::query_as(
+        "SELECT timezone_mode,timezone_name,date_time_format,appearance,font_scale,page_size,live_interval_seconds,live_paused,transcript_detail,code_wrap,default_sessions_view FROM account_preferences WHERE account_id=?",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .context("load account preferences")?;
+    let Some(row) = row else {
+        return Ok(crate::preferences::UserPreferences::default());
+    };
+    Ok(crate::preferences::UserPreferences {
+        timezone_mode: row.0,
+        timezone_name: row.1,
+        date_time_format: row.2,
+        appearance: row.3,
+        font_scale: u16::try_from(row.4).unwrap_or_default(),
+        page_size: usize::try_from(row.5).unwrap_or_default(),
+        live_interval_seconds: u64::try_from(row.6).unwrap_or_default(),
+        live_paused: row.7,
+        transcript_detail: row.8,
+        code_wrap: row.9,
+        default_sessions_view: row.10,
+    }
+    .sanitized())
 }
 
 fn read_password(path: &Path) -> Result<String> {
@@ -1112,6 +1208,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn typed_preferences_are_isolated_and_unknown_values_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        let password = password_file(dir.path(), "Synthetic1! password");
+        create_account(&state, "alice", &password, None)
+            .await
+            .unwrap();
+        create_account(&state, "bob", &password, None)
+            .await
+            .unwrap();
+        let alice_id = account_id(&state, "alice").await.unwrap();
+        let bob_id = account_id(&state, "bob").await.unwrap();
+        let alice_preferences = crate::preferences::UserPreferences {
+            timezone_mode: "iana".into(),
+            timezone_name: "Europe/London".into(),
+            appearance: "high-contrast".into(),
+            page_size: 25,
+            live_interval_seconds: 30,
+            live_paused: false,
+            transcript_detail: "expanded".into(),
+            code_wrap: true,
+            default_sessions_view: "active".into(),
+            ..crate::preferences::UserPreferences::default()
+        };
+        update_preferences(&state.auth, &alice_id, &alice_preferences)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_preferences(&state.auth.pool, &alice_id).await.unwrap(),
+            alice_preferences
+        );
+        assert_eq!(
+            load_preferences(&state.auth.pool, &bob_id).await.unwrap(),
+            crate::preferences::UserPreferences::default()
+        );
+
+        sqlx::query("UPDATE account_preferences SET appearance='future-theme',page_size=999 WHERE account_id=?")
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        let sanitized = load_preferences(&state.auth.pool, &alice_id).await.unwrap();
+        assert_eq!(sanitized.appearance, "system");
+        assert_eq!(sanitized.page_size, 50);
+        assert_eq!(sanitized.timezone_name, "Europe/London");
+    }
+
     #[test]
     fn return_targets_are_same_origin_paths_only() {
         assert_eq!(safe_return_to("/sessions?model=x"), "/sessions?model=x");
@@ -1177,7 +1323,14 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
+        let preferences_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
+        )
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+        assert!(preferences_table);
     }
 
     #[tokio::test]

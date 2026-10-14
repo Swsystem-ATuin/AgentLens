@@ -379,7 +379,7 @@ pub(super) struct DiagnosticEvidenceView {
     pub(super) href: String,
 }
 
-pub(super) fn present_pressure(rows: Vec<PressureRow>) -> Vec<PressureView> {
+pub(super) fn present_pressure(rows: Vec<PressureRow>, page_size: usize) -> Vec<PressureView> {
     rows.into_iter()
         .map(|row| {
             let context = match (row.context_tokens, row.context_window) {
@@ -450,7 +450,7 @@ pub(super) fn present_pressure(rows: Vec<PressureRow>) -> Vec<PressureView> {
                 reached: row
                     .rate_limit_reached_type
                     .unwrap_or_else(|| "Not reported".into()),
-                evidence_href: diagnostic_event_href(&row.stable_id, sequence, position),
+                evidence_href: diagnostic_event_href(&row.stable_id, sequence, position, page_size),
             }
         })
         .collect()
@@ -459,23 +459,28 @@ pub(super) fn present_pressure(rows: Vec<PressureRow>) -> Vec<PressureView> {
 pub(super) fn present_diagnostic_evidence(
     rows: Vec<DiagnosticEvidenceRow>,
     kind: &str,
+    page_size: usize,
 ) -> Vec<DiagnosticEvidenceView> {
     rows.into_iter()
         .filter_map(|row| {
             let href = match kind {
                 "incomplete" => {
                     let ordinal = row.ordinal?;
-                    let page = row.position / super::queries::TURN_PAGE_SIZE as i64 + 1;
+                    let page = row.position / page_size as i64 + 1;
                     format!(
                         "/sessions/{}/turns?page={page}#turn-{ordinal}",
                         row.stable_id
                     )
                 }
-                "interruption" => turn_event_href(&row.stable_id, row.sequence?, row.position),
-                "accounting" => diagnostic_event_href(&row.stable_id, row.sequence?, row.position),
+                "interruption" => {
+                    turn_event_href(&row.stable_id, row.sequence?, row.position, page_size)
+                }
+                "accounting" => {
+                    diagnostic_event_href(&row.stable_id, row.sequence?, row.position, page_size)
+                }
                 "failure" => {
                     let sequence = row.sequence?;
-                    let section = row.position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+                    let section = row.position / page_size as i64 + 1;
                     filtered_transcript_href(
                         &row.stable_id,
                         section as u32,
@@ -496,8 +501,13 @@ pub(super) fn present_diagnostic_evidence(
         .collect()
 }
 
-fn diagnostic_event_href(stable_id: &str, sequence: i64, position: i64) -> String {
-    let section = position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+fn diagnostic_event_href(
+    stable_id: &str,
+    sequence: i64,
+    position: i64,
+    page_size: usize,
+) -> String {
+    let section = position / page_size as i64 + 1;
     filtered_transcript_href(
         stable_id,
         section as u32,
@@ -576,7 +586,11 @@ pub(super) struct TurnView {
     pub(super) observed_model_href: Option<String>,
 }
 
-pub(super) fn present_turns(rows: Vec<TurnRow>, stable_id: &str) -> Vec<TurnView> {
+pub(super) fn present_turns(
+    rows: Vec<TurnRow>,
+    stable_id: &str,
+    page_size: usize,
+) -> Vec<TurnView> {
     rows.into_iter()
         .map(|row| TurnView {
             ordinal: row.ordinal,
@@ -606,24 +620,24 @@ pub(super) fn present_turns(rows: Vec<TurnRow>, stable_id: &str) -> Vec<TurnView
             tool_result_count: row.tool_result_count,
             failed_tool_count: row.failed_tool_count,
             unknown_tool_count: row.unknown_tool_count,
-            start_href: row
-                .start_sequence
-                .map(|sequence| turn_event_href(stable_id, sequence, row.start_position)),
+            start_href: row.start_sequence.map(|sequence| {
+                turn_event_href(stable_id, sequence, row.start_position, page_size)
+            }),
             end_href: row
                 .end_sequence
-                .map(|sequence| turn_event_href(stable_id, sequence, row.end_position)),
-            requested_model_href: row
-                .requested_model_sequence
-                .map(|sequence| turn_event_href(stable_id, sequence, row.requested_model_position)),
-            observed_model_href: row
-                .observed_model_sequence
-                .map(|sequence| turn_event_href(stable_id, sequence, row.observed_model_position)),
+                .map(|sequence| turn_event_href(stable_id, sequence, row.end_position, page_size)),
+            requested_model_href: row.requested_model_sequence.map(|sequence| {
+                turn_event_href(stable_id, sequence, row.requested_model_position, page_size)
+            }),
+            observed_model_href: row.observed_model_sequence.map(|sequence| {
+                turn_event_href(stable_id, sequence, row.observed_model_position, page_size)
+            }),
         })
         .collect()
 }
 
-fn turn_event_href(stable_id: &str, sequence: i64, position: i64) -> String {
-    let section = position / super::queries::TRANSCRIPT_SECTION_SIZE as i64 + 1;
+fn turn_event_href(stable_id: &str, sequence: i64, position: i64, page_size: usize) -> String {
+    let section = position / page_size as i64 + 1;
     filtered_transcript_href(
         stable_id,
         section as u32,
@@ -793,13 +807,18 @@ pub(super) fn usage_href(
     group: &str,
     from: Option<&str>,
     to: Option<&str>,
+    browser_timezone: Option<&str>,
     page: u32,
 ) -> String {
     let mut pairs = vec![
         format!("period={}", percent_encode(period)),
         format!("group={}", percent_encode(group)),
     ];
-    for (name, value) in [("from", from), ("to", to)] {
+    for (name, value) in [
+        ("from", from),
+        ("to", to),
+        ("browser_timezone", browser_timezone),
+    ] {
         if let Some(value) = value {
             pairs.push(format!("{name}={}", percent_encode(value)));
         }
@@ -822,6 +841,7 @@ pub(super) fn sessions_href(filters: &SessionFilters<'_>, page: u32) -> String {
         ("cron", filters.cron),
         ("from", filters.from),
         ("to", filters.to),
+        ("browser_timezone", filters.browser_timezone),
     ] {
         if let Some(value) = value {
             pairs.push(format!("{name}={}", percent_encode(value)));

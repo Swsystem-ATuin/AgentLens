@@ -6,6 +6,7 @@ mod identity;
 mod ingest;
 mod metrics;
 mod postmortem;
+mod preferences;
 mod projects;
 mod search;
 mod sources;

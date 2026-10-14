@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const POLL_MS = 5000;
+  const preferences = window.agentLensPreferences || {};
+  const POLL_MS = preferences.liveIntervalMs || 5000;
   const RETRY_MS = 10000;
   const reader = document.querySelector("[data-live-reader]");
   if (!reader) return;
@@ -17,16 +18,18 @@
 
   const storedEnabled = () => {
     try {
-      return sessionStorage.getItem(storageKey) === "enabled";
+      const stored = sessionStorage.getItem(storageKey);
+      if (stored === "enabled") return true;
+      if (stored === "disabled") return false;
+      return !preferences.livePaused;
     } catch (_) {
-      return false;
+      return !preferences.livePaused;
     }
   };
 
   const storeEnabled = (enabled) => {
     try {
-      if (enabled) sessionStorage.setItem(storageKey, "enabled");
-      else sessionStorage.removeItem(storageKey);
+      sessionStorage.setItem(storageKey, enabled ? "enabled" : "disabled");
     } catch (_) {
       // Private browsing policies can disable storage; the current toggle still works.
     }

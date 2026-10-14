@@ -143,6 +143,13 @@ impl ProjectConfig {
         &self.timezone
     }
 
+    pub(crate) fn with_timezone(&self, timezone: String) -> Self {
+        Self {
+            timezone,
+            rules: self.rules.clone(),
+        }
+    }
+
     pub(crate) fn rules(&self) -> &[ProjectRule] {
         &self.rules
     }
