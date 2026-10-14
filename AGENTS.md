@@ -19,6 +19,10 @@ These instructions apply to the entire repository.
 - Never commit `data/*`, local SQLite indexes, credentials, build output, or unredacted agent artifacts.
 - Preserve unrelated working-tree changes.
 
+## Local development service
+
+- On this host, whenever a build or other operation replaces `target/debug/agent-lens`, restart the local `agent-lens` service with `systemctl restart agent-lens.service` and verify that it is active before handing off. If service access requires escalation, request it through the command approval mechanism. Report any restart failure.
+
 ## Rust expectations
 
 - Format changes with `cargo fmt`.
