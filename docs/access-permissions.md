@@ -1,11 +1,13 @@
 # Application access permissions
 
-Agent Lens authorizes application accounts independently of the operating-system users indexed from copied agent homes. The policy has two roles:
+Agent Lens authorizes application accounts independently of the operating-system users indexed from copied agent homes. The policy has four roles:
 
 - `admin` accounts can read every indexed source and use the operational `/health` and `/metrics` endpoints.
-- `viewer` accounts can read only sources explicitly granted by stable Agent Lens source ID. A viewer with no grants sees empty session, usage, and diagnostics views.
+- `viewer` accounts can read sources granted directly or through teams by stable source ID. No grants means empty session and report views.
+- `auditor` accounts can read scoped reports, not transcripts or their child routes; report metadata is not a PII-masking guarantee.
+- `operator` accounts have viewer content/report access plus installation-wide health and metrics, but no unrestricted source access or account administration.
 
-The first account in a new state database defaults to `admin`; later accounts default to `viewer`. `account create --role admin|viewer` can select a role explicitly. Accounts created before the permission schema upgrade migrate to `admin`, preserving their existing visibility. There is no browser administration surface: role and grant changes require local access to the application state database through the CLI.
+The first account must be `admin`; later accounts default to `viewer`. `account create --role admin|viewer|auditor|operator` selects a role explicitly. Pre-permission accounts migrate to `admin`, preserving visibility. There is no browser administration surface: role, team, and grant changes require local CLI access. The signed-in `/account/access` page explains one's own capabilities and grant origins. See [teams and roles](teams-and-roles.md) for exact capabilities, metadata disclosure, additive union semantics, and commands.
 
 ## Grant workflow
 
@@ -20,7 +22,7 @@ cargo run -- account set-role --username analyst --role admin
 cargo run -- account set-role --username analyst --role viewer
 ```
 
-Granting a source exposes all current and future sessions projected beneath that source, including active and archived transcripts, messages, tool events, turns, usage, diagnostics, live status, and redacted postmortems. It does not grant access to another source on the same host or belonging to the same indexed operating-system user. Stored source grants are retained when an account is temporarily promoted to `admin`, so demotion restores its previous source scope.
+Granting a source permits the role's capabilities across its current and future sessions: viewers/operators receive content and reports, auditors receive reports only. It does not grant another source on the same host or indexed user. Direct and member-team grants form a sorted, deduplicated union; removing one origin preserves any independent grant. Grants survive temporary promotion to `admin`.
 
 Role, grant, revoke, disable, and account deletion effects are evaluated from persistent state on every request; an existing browser session does not need to log in again. Password reset and session revocation remain authentication controls and do not change permissions.
 
@@ -28,7 +30,7 @@ Role, grant, revoke, disable, and account deletion effects are evaluated from pe
 
 Session lists, transcript search, every filter option, usage totals and breakdowns, diagnostic totals and evidence, transcript pages, message/tool fragments, turn history, live status, and postmortem exports all apply the same source scope. Pagination and aggregates are computed after authorization, so hidden rows do not affect counts, options, ordering, or page boundaries.
 
-An unauthorized stable session or child resource returns the same `404` as an unknown session. This avoids confirming that another account's session exists. Operational health and Prometheus metrics contain installation-wide ingest information and therefore return `403` to viewers. Viewer Basic credentials cannot scrape `/metrics`. The [typed capability matrix](capabilities.md) classifies implemented routes and methods; unknown routes and unsupported methods fail closed for every role until deliberately implemented and tested.
+An ungranted session or child resource returns the same `404` as an unknown session. Role-denied routes return `403`, including auditor content routes and viewer/auditor installation-wide health and metrics. Admin/operator Basic credentials or appropriately scoped tokens can scrape `/metrics`. The [typed capability matrix](capabilities.md) classifies routes and methods; unknown routes and unsupported methods fail closed for every role.
 
 The policy is enforced server-side; hiding host/user controls or links in rendered HTML is never treated as authorization. All permission SQL remains parameterized. Source grants are serialized into one bounded SQLite JSON value per request, avoiding a variable-count SQL placeholder list as grants grow.
 
@@ -36,7 +38,7 @@ The policy is enforced server-side; hiding host/user controls or links in render
 
 Roles and grants live in `agent-lens-state.sqlite`, not the disposable index. Grants reference stable `src_…` identities rather than index row IDs. Refresh and rebuild do not modify them. State schema v2 adds roles and grants; opening a v1 state database migrates existing accounts to `admin` so an upgrade does not silently remove access. A database from a newer unsupported schema fails closed without downgrading its version. If a logical source identity changes, its old grant safely matches nothing until a local administrator grants the new source ID.
 
-Use the same stopped-service, owner-only backup and restore procedure documented in [application authentication](application-authentication.md). A local administrator who removes all administrator access can recover with `account set-role`; no indexed data rebuild is required.
+Use the stopped-service, owner-only backup and restore procedure in [application authentication](application-authentication.md). Current [schema v6](teams-and-roles.md) preserves existing state and adds teams and roles without an index rebuild. Database guards reject disabling, deleting, or demoting the last enabled administrator, including concurrent updates. Local CLI provisioning, enabling, or promoting an alternative administrator remains the break-glass boundary.
 
 ## Verification
 

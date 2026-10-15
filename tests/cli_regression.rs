@@ -63,6 +63,140 @@ fn serve_help_documents_loopback_port_and_session_options() {
 }
 
 #[test]
+fn team_cli_explains_union_access_and_protects_the_last_administrator() {
+    let dir = tempfile::tempdir().unwrap();
+    let password = dir.path().join("password");
+    std::fs::write(&password, "Synthetic1-password").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for username in ["admin", "member"] {
+        assert!(
+            run(
+                dir.path(),
+                &[
+                    "account",
+                    "create",
+                    "--username",
+                    username,
+                    "--password-file",
+                    "password"
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let guard = run(dir.path(), &["account", "disable", "--username", "admin"]);
+    assert!(!guard.status.success());
+    assert!(String::from_utf8_lossy(&guard.stderr).contains("last enabled administrator"));
+    for role in ["auditor", "operator", "viewer"] {
+        assert!(
+            run(
+                dir.path(),
+                &[
+                    "account",
+                    "set-role",
+                    "--username",
+                    "member",
+                    "--role",
+                    role
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let team = run(dir.path(), &["team", "create", "--name", "Synthetic team"]);
+    assert!(team.status.success());
+    let output = String::from_utf8(team.stdout).unwrap();
+    let id = output.trim().strip_prefix("team: ").unwrap();
+    assert!(id.starts_with("team_"));
+    let source = format!("src_{}", "d".repeat(64));
+    for args in [
+        vec![
+            "team",
+            "add-member",
+            "--team-id",
+            id,
+            "--username",
+            "member",
+        ],
+        vec![
+            "team",
+            "grant-source",
+            "--team-id",
+            id,
+            "--source-id",
+            &source,
+        ],
+        vec![
+            "account",
+            "grant-source",
+            "--username",
+            "member",
+            "--source-id",
+            &source,
+        ],
+    ] {
+        assert!(run(dir.path(), &args).status.success());
+    }
+    let inspect = run(dir.path(), &["team", "inspect", "--team-id", id]);
+    assert!(inspect.status.success());
+    let output = String::from_utf8(inspect.stdout).unwrap();
+    assert!(output.contains("member: member"));
+    assert!(output.contains(&format!("source: {source}")));
+    let permissions = run(
+        dir.path(),
+        &["account", "permissions", "--username", "member"],
+    );
+    let output = String::from_utf8(permissions.stdout).unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("source:"))
+            .count(),
+        1
+    );
+    assert!(output.contains("via Direct grant"));
+    assert!(output.contains("via Synthetic team"));
+    assert!(
+        run(
+            dir.path(),
+            &["team", "rename", "--team-id", id, "--name", "Renamed team"]
+        )
+        .status
+        .success()
+    );
+    let listed = run(dir.path(), &["team", "list"]);
+    assert!(
+        String::from_utf8(listed.stdout)
+            .unwrap()
+            .contains("Renamed team")
+    );
+    assert!(
+        !run(dir.path(), &["team", "list", "--page", "0"])
+            .status
+            .success()
+    );
+    assert!(
+        run(dir.path(), &["team", "delete", "--team-id", id])
+            .status
+            .success()
+    );
+    let permissions = run(
+        dir.path(),
+        &["account", "permissions", "--username", "member"],
+    );
+    let output = String::from_utf8(permissions.stdout).unwrap();
+    assert!(output.contains(&source));
+    assert!(!output.contains("Renamed team"));
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
+}
+
+#[test]
 fn invalid_project_configuration_fails_before_opening_the_database() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

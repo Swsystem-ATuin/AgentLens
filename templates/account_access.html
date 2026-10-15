@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}Effective access · Agent Lens{% endblock %}{% block content %}
+<h1>Effective access</h1><p><a href="/account">← Account</a></p>
+<p>Role: <strong>{{ role }}</strong></p>
+<h2>Capabilities</h2><ul>{% for capability in capabilities %}<li>{{ capability }}</li>{% endfor %}</ul>
+{% if unrestricted %}<p>Your role grants access to all sources. The stored direct and team grants below remain available if your role changes.</p>{% else %}<p>Your source access is the union of direct grants and grants from every team you belong to. Removing one grant preserves access when another grant still applies.</p>{% endif %}
+<h2>Source grant origins</h2>
+{% if origins.is_empty() %}<p>No grant origins on this page.</p>{% else %}
+<table><thead><tr><th>Source</th><th>Granted through</th><th>Team identifier</th></tr></thead><tbody>{% for grant in origins %}<tr><td><code>{{ grant.source_key }}</code></td><td>{{ grant.origin }}</td><td>{% if let Some(id) = grant.team_id %}<code>{{ id }}</code>{% else %}—{% endif %}</td></tr>{% endfor %}</tbody></table>{% endif %}
+<nav class="pagination" aria-label="Source grant origin pages">{% if let Some(href) = pagination.previous_href %}<a href="{{ href }}">← Previous</a>{% endif %}<span>Page {{ pagination.page }}</span>{% if let Some(href) = pagination.next_href %}<a href="{{ href }}">Next →</a>{% endif %}</nav>
+{% endblock %}

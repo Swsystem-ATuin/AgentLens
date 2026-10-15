@@ -16,7 +16,7 @@ ${EDITOR:-vi} /tmp/agent-lens-password
 cargo run -- account create --username alice --password-file /tmp/agent-lens-password
 ```
 
-Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, or security-question recovery. The first account defaults to `admin`, later accounts to `viewer`, and `account create --role` can override that default. Local administrators use:
+Usernames contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and are case-insensitively unique. There is no public registration, email requirement, or security-question recovery. The first account must be `admin`; later accounts default to `viewer`, with `account create --role` allowing an explicit role. Database guards protect the last enabled administrator. Local administrators use:
 
 ```bash
 cargo run -- account reset-password --username alice --password-file /tmp/agent-lens-password
@@ -50,7 +50,7 @@ All responses, including login and authentication failures, retain `Cache-Contro
 
 `/metrics` accepts either a current browser session or HTTP Basic credentials for one enabled application account. Basic credentials are Argon2id-verified on every scrape, stripped before the metrics handler, and affected immediately by password reset or account disablement. This preserves ordinary Prometheus `basic_auth` configuration without restoring shared plaintext credential storage. Use HTTPS and a conservative scrape interval; password verification is intentionally expensive.
 
-Only accounts with the `admin` role can read `/metrics`; valid viewer session or Basic credentials receive `403`. Administrators can alternatively use a [personal access token](personal-access-tokens.md) with `metrics:read`, allowing automated scrapes without sharing an account password. Other bearer scopes cannot scrape metrics.
+Only `admin` and `operator` accounts can read `/metrics`; viewer/auditor session or Basic credentials receive `403`. Authorized accounts can alternatively use a [personal access token](personal-access-tokens.md) with `metrics:read`, allowing automated scrapes without sharing an account password. Other bearer scopes cannot scrape metrics.
 
 ## Persistent state, rebuilds, and backup
 
@@ -61,7 +61,7 @@ cargo run -- --state-database /srv/agent-lens/state.sqlite account create --user
 cargo run -- --state-database /srv/agent-lens/state.sqlite serve --secure-cookies
 ```
 
-The state schema is created automatically, uses SQLite WAL for concurrent account/grant reads and short session writes, and restricts the main file to mode `0600` on Unix. Schema version 3 added [typed per-account preferences](user-preferences.md); version 4 added display names, app-owned session inventory, and security events; version 5 adds [personal access token digests and metadata](personal-access-tokens.md) and token audit events. Existing version 1–4 databases migrate automatically when opened, preserving retained security history, and existing valid sessions are adopted lazily. The file contains password hashes and live session material and must be backed up as sensitive data. Stop the server and all account commands, make a filesystem-level copy of the state database, then restart. Restore only while the server is stopped, preserve owner-only permissions and ownership, and start with the same `--state-database` path. Do not copy only a live main SQLite file while write-ahead or journal files may exist.
+The state schema is created automatically, uses SQLite WAL for concurrent account/grant reads and short session writes, and restricts the main file to mode `0600` on Unix. Schema version 3 added [typed preferences](user-preferences.md); v4 added session inventory and security events; v5 added [personal access tokens](personal-access-tokens.md); v6 adds [teams and intermediate roles](teams-and-roles.md). Existing v1–v5 databases migrate automatically, preserving retained state, and valid legacy sessions are adopted lazily. The file contains password hashes and live session material and must be backed up as sensitive data. Stop the server and all account commands, make a filesystem-level copy of the state database, then restart. Restore only while stopped, preserve owner-only permissions and ownership, and use the same `--state-database` path. Do not copy only a live main SQLite file while write-ahead or journal files may exist.
 
 Deleting or rebuilding `agent-lens.sqlite` does not touch application state. Deleting the state database removes all accounts and sessions and makes `serve` fail closed until a new account is provisioned. No source refresh or index rebuild is required when adding, resetting, disabling, enabling, or revoking an account. Existing deployments must provision an account, stop the old server, update their launch command to use the intended state path and cookie setting, and then start the new binary; the former `auth.local.json` file and `--auth-file` option are no longer used.
 

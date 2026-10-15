@@ -403,9 +403,10 @@ fn app_routes(
         .route("/login", get(login).post(login_submit))
         .route(
             "/",
-            get(|| async { axum::response::Redirect::temporary("/sessions") }),
+            get(home),
         )
         .route("/account", get(account))
+        .route("/account/access", get(account_access))
         .route("/account/tokens", get(token_pages::list).post(token_pages::create))
         .route("/account/tokens/{id}", post(token_pages::revoke))
         .route("/api/sessions/{id}/live-status", get(live_status))
@@ -526,6 +527,21 @@ pub fn validate_local_bind(bind: &str) -> Result<()> {
     Ok(())
 }
 
+async fn home(Extension(user): Extension<crate::auth::CurrentUser>) -> axum::response::Redirect {
+    axum::response::Redirect::temporary(default_landing(&user))
+}
+
+fn default_landing(user: &crate::auth::CurrentUser) -> &'static str {
+    if user
+        .access
+        .permits(crate::authorization::Capability::ContentRead)
+    {
+        "/sessions"
+    } else {
+        "/usage"
+    }
+}
+
 async fn login(
     State(state): State<AppState>,
     session: tower_sessions::Session,
@@ -584,7 +600,12 @@ async fn login_submit(
         )
         .await
         .map_err(|_| WebError::authentication("establish session"))?;
-        return Ok(axum::response::Redirect::to(&return_to).into_response());
+        let target = if return_to == "/sessions" {
+            default_landing(&user)
+        } else {
+            &return_to
+        };
+        return Ok(axum::response::Redirect::to(target).into_response());
     }
     crate::auth::record_failed_login(&state.auth, &form.username)
         .await
@@ -594,6 +615,59 @@ async fn login_submit(
         percent_encode_component(&return_to)
     );
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)], "").into_response())
+}
+
+#[derive(Template)]
+#[template(path = "account_access.html")]
+struct AccountAccessTemplate {
+    role: &'static str,
+    capabilities: Vec<&'static str>,
+    unrestricted: bool,
+    origins: Vec<crate::access::GrantOrigin>,
+    pagination: Pagination,
+}
+
+async fn account_access(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    Query(query): Query<AccountSessionsQuery>,
+) -> Result<Response, WebError> {
+    if state.auth.is_local_mode() {
+        return Ok(axum::response::Redirect::to("/account").into_response());
+    }
+    let page = bounded_page(query.page, "validate effective access page")?;
+    let size = user.preferences.page_size;
+    let mut origins = crate::access::grant_origins(
+        &state.auth.pool,
+        &user.id,
+        i64::from(page - 1) * size as i64,
+        Some(size as i64 + 1),
+    )
+    .await
+    .map_err(|_| WebError::authentication("explain account access"))?;
+    let next = origins.len() > size;
+    origins.truncate(size);
+    Ok(Html(
+        AccountAccessTemplate {
+            role: user.access.role(),
+            capabilities: crate::authorization::Capability::ALL
+                .into_iter()
+                .filter(|capability| user.access.permits(*capability))
+                .map(|capability| capability.label())
+                .collect(),
+            unrestricted: user.access.unrestricted(),
+            origins,
+            pagination: Pagination {
+                page,
+                previous_href: (page > 1).then(|| format!("/account/access?page={}", page - 1)),
+                next_href: (next && page < MAX_SESSION_PAGE)
+                    .then(|| format!("/account/access?page={}", page + 1)),
+            },
+        }
+        .render()
+        .map_err(|error| WebError::template("render effective account access", error))?,
+    )
+    .into_response())
 }
 
 async fn account(
@@ -2817,6 +2891,14 @@ mod tests {
         );
 
         let cookie = login_cookie(&restarted, "alice", "Synthetic1-password").await;
+        crate::auth::create_account(
+            &state,
+            "recovery",
+            &password_file,
+            Some(crate::auth::AccountRole::Admin),
+        )
+        .await
+        .unwrap();
         crate::auth::set_enabled(&state, "alice", false)
             .await
             .unwrap();
@@ -4185,6 +4267,130 @@ mod tests {
             get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
             StatusCode::NOT_FOUND
         );
+        let team = crate::access::create(&state, "<b>Synthetic team</b>")
+            .await
+            .unwrap();
+        crate::access::membership(&state, &team, "viewer", true)
+            .await
+            .unwrap();
+        crate::access::grant(&state, &team, &source_a, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
+            StatusCode::OK
+        );
+        let (_, access_page) = get(&app, &viewer_cookie, "/account/access").await;
+        assert!(access_page.contains("&#60;b&#62;Synthetic team&#60;/b&#62;"));
+        assert!(access_page.contains(&team));
+        assert!(
+            !get(&app, &admin_cookie, "/account/access")
+                .await
+                .1
+                .contains(&team)
+        );
+        crate::auth::set_role(&state, "viewer", crate::auth::AccountRole::Auditor)
+            .await
+            .unwrap();
+        for path in [
+            "/usage",
+            "/diagnostics",
+            "/account/access",
+            "/sessions/ses_allowed/postmortem/json",
+        ] {
+            assert_eq!(
+                get(&app, &viewer_cookie, path).await.0,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
+        for path in [
+            "/sessions",
+            "/sessions/ses_allowed",
+            "/sessions/ses_allowed/messages/1",
+            "/sessions/ses_allowed/tools/3",
+            "/sessions/ses_allowed/results/4",
+            "/sessions/ses_allowed/generated-images",
+            "/health",
+            "/metrics",
+        ] {
+            assert_eq!(
+                get(&app, &viewer_cookie, path).await.0,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        let home = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, &viewer_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(home.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(home.headers()[header::LOCATION], "/usage");
+        assert_eq!(
+            bearer_request(
+                &app,
+                &report_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/postmortem"
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            bearer_request(
+                &app,
+                &status_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/live-status"
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        crate::auth::set_role(&state, "viewer", crate::auth::AccountRole::Operator)
+            .await
+            .unwrap();
+        assert_eq!(get(&app, &viewer_cookie, "/health").await.0, StatusCode::OK);
+        assert_eq!(
+            get(&app, &viewer_cookie, "/metrics").await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
+            StatusCode::OK
+        );
+        crate::access::membership(&state, &team, "viewer", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            bearer_request(
+                &app,
+                &report_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/postmortem"
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        for path in ["/admin/accounts", "/admin/audit", "/refresh"] {
+            assert_eq!(
+                get(&app, &viewer_cookie, path).await.0,
+                StatusCode::FORBIDDEN
+            );
+        }
         crate::auth::grant_source(&state, "viewer", &source_b)
             .await
             .unwrap();
@@ -4206,6 +4412,33 @@ mod tests {
             get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
             StatusCode::NOT_FOUND
         );
+        let viewer = state
+            .auth
+            .authenticate("viewer", "Synthetic1-password")
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        crate::auth::update_preferences(
+            &state.auth,
+            &viewer.id,
+            &crate::preferences::UserPreferences {
+                page_size: 25,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for index in 0..30 {
+            crate::auth::grant_source(&state, "viewer", &format!("src_{index:064x}"))
+                .await
+                .unwrap();
+        }
+        let (_, first) = get(&app, &viewer_cookie, "/account/access").await;
+        assert_eq!(first.matches("<td><code>src_").count(), 25);
+        assert!(first.contains("/account/access?page=2"));
+        let (_, second) = get(&app, &viewer_cookie, "/account/access?page=2").await;
+        assert_eq!(second.matches("<td><code>src_").count(), 6);
     }
 
     #[test]

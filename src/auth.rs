@@ -38,13 +38,13 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','5');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','6');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
     password_hash TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
-    role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('admin','viewer')),
+    role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('admin','viewer','auditor','operator')),
     session_generation INTEGER NOT NULL DEFAULT 0,
     display_name TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -86,7 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_account_sessions_account_activity ON account_sess
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT REFERENCES accounts(id),
-    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked')),
+    team_id TEXT,
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked')),
     occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
@@ -133,6 +134,8 @@ pub struct AccessScope {
 pub enum AccountRole {
     Admin,
     Viewer,
+    Auditor,
+    Operator,
 }
 
 impl AccountRole {
@@ -140,6 +143,8 @@ impl AccountRole {
         match self {
             Self::Admin => "admin",
             Self::Viewer => "viewer",
+            Self::Auditor => "auditor",
+            Self::Operator => "operator",
         }
     }
 }
@@ -185,7 +190,7 @@ impl AccessScope {
     pub(crate) fn all() -> Self {
         Self {
             role: AccountRole::Admin,
-            capabilities: crate::authorization::Capabilities::for_role(true),
+            capabilities: crate::authorization::Capabilities::for_role(AccountRole::Admin),
             source_keys_json: "[]".to_owned(),
             source_count: 0,
         }
@@ -208,6 +213,7 @@ pub struct AccountPermissions {
     pub username: String,
     pub role: &'static str,
     pub source_keys: Vec<String>,
+    pub origins: Vec<crate::access::GrantOrigin>,
 }
 
 #[derive(Deserialize)]
@@ -243,10 +249,17 @@ pub(crate) enum SecurityEvent {
     ProfileChanged,
     TokenCreated,
     TokenRevoked,
+    TeamCreated,
+    TeamRenamed,
+    TeamDeleted,
+    TeamMemberAdded,
+    TeamMemberRemoved,
+    TeamSourceGranted,
+    TeamSourceRevoked,
 }
 
 impl SecurityEvent {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::LoginSucceeded => "login_succeeded",
             Self::LoginFailed => "login_failed",
@@ -263,6 +276,13 @@ impl SecurityEvent {
             Self::ProfileChanged => "profile_changed",
             Self::TokenCreated => "token_created",
             Self::TokenRevoked => "token_revoked",
+            Self::TeamCreated => "team_created",
+            Self::TeamRenamed => "team_renamed",
+            Self::TeamDeleted => "team_deleted",
+            Self::TeamMemberAdded => "team_member_added",
+            Self::TeamMemberRemoved => "team_member_removed",
+            Self::TeamSourceGranted => "team_source_granted",
+            Self::TeamSourceRevoked => "team_source_revoked",
         }
     }
 }
@@ -347,7 +367,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 5,
+                schema_version <= 6,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -375,7 +395,12 @@ impl StateStore {
                 .await
                 .context("add application account display names")?;
         }
-        migrate_token_events(&pool).await?;
+        crate::access::migrate_roles(&pool).await?;
+        migrate_security_events(&pool).await?;
+        sqlx::raw_sql(crate::access::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate team access policy")?;
         sqlx::raw_sql(crate::tokens::SCHEMA)
             .execute(&pool)
             .await
@@ -386,7 +411,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='5' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='6' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -438,27 +463,27 @@ impl StateStore {
     }
 }
 
-async fn migrate_token_events(pool: &SqlitePool) -> Result<()> {
+async fn migrate_security_events(pool: &SqlitePool) -> Result<()> {
     let schema: String = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='security_events'",
     )
     .fetch_one(pool)
     .await
     .context("inspect security event vocabulary")?;
-    if schema.contains("'token_created'") {
+    if schema.contains("'team_deleted'") {
         return Ok(());
     }
     let mut transaction = pool
         .begin()
         .await
         .context("begin security event migration")?;
-    sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; ALTER TABLE security_events RENAME TO security_events_v4;")
+    sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; ALTER TABLE security_events RENAME TO security_events_legacy;")
         .execute(&mut *transaction).await.context("prepare security event migration")?;
     sqlx::raw_sql(STATE_SCHEMA)
         .execute(&mut *transaction)
         .await
         .context("create updated security event vocabulary")?;
-    sqlx::raw_sql("INSERT INTO security_events(id,account_id,event_type,occurred_at) SELECT id,account_id,event_type,occurred_at FROM security_events_v4; DROP TABLE security_events_v4;")
+    sqlx::raw_sql("INSERT INTO security_events(id,account_id,event_type,occurred_at) SELECT id,account_id,event_type,occurred_at FROM security_events_legacy; DROP TABLE security_events_legacy;")
         .execute(&mut *transaction).await.context("preserve security event history")?;
     transaction
         .commit()
@@ -490,6 +515,10 @@ pub async fn create_account(
     } else {
         AccountRole::Viewer
     });
+    ensure!(
+        account_count != 0 || role == AccountRole::Admin,
+        "the first account must be an administrator"
+    );
     let account_id = random_token();
     sqlx::query("INSERT INTO accounts(id,username,password_hash,role) VALUES(?,?,?,?)")
         .bind(&account_id)
@@ -611,6 +640,7 @@ pub async fn account_permissions(state: &StateStore, username: &str) -> Result<A
         username,
         role: role.as_str(),
         source_keys,
+        origins: crate::access::grant_origins(&state.auth.pool, &id, 0, None).await?,
     })
 }
 
@@ -1178,9 +1208,7 @@ impl AuthState {
             preferences,
             access: AccessScope {
                 role,
-                capabilities: crate::authorization::Capabilities::for_role(
-                    role == AccountRole::Admin,
-                ),
+                capabilities: crate::authorization::Capabilities::for_role(role),
                 source_keys_json,
                 source_count,
             },
@@ -1611,7 +1639,7 @@ fn validate_username(username: &str) -> Result<&str> {
     Ok(username)
 }
 
-fn validate_source_key(source_key: &str) -> Result<()> {
+pub(crate) fn validate_source_key(source_key: &str) -> Result<()> {
     ensure!(
         source_key.len() == 68
             && source_key.starts_with("src_")
@@ -1625,6 +1653,8 @@ fn parse_role(role: &str) -> Result<AccountRole> {
     match role {
         "admin" => Ok(AccountRole::Admin),
         "viewer" => Ok(AccountRole::Viewer),
+        "auditor" => Ok(AccountRole::Auditor),
+        "operator" => Ok(AccountRole::Operator),
         _ => anyhow::bail!("invalid application account role"),
     }
 }
@@ -1698,6 +1728,13 @@ fn security_event_label(kind: &str) -> Option<&'static str> {
         "profile_changed" => "Profile changed",
         "token_created" => "Personal access token created",
         "token_revoked" => "Personal access token revoked",
+        "team_created" => "Team created",
+        "team_renamed" => "Team renamed",
+        "team_deleted" => "Team deleted",
+        "team_member_added" => "Team membership added",
+        "team_member_removed" => "Team membership removed",
+        "team_source_granted" => "Team source access granted",
+        "team_source_revoked" => "Team source access revoked",
         _ => return None,
     })
 }
@@ -1708,7 +1745,7 @@ fn unix_timestamp(value: i64) -> String {
         .unwrap_or_else(|| "Unavailable".into())
 }
 
-async fn account_id(state: &StateStore, username: &str) -> Result<String> {
+pub(crate) async fn account_id(state: &StateStore, username: &str) -> Result<String> {
     let username = validate_username(username)?;
     sqlx::query_scalar("SELECT id FROM accounts WHERE username=? COLLATE NOCASE")
         .bind(username)
@@ -1720,8 +1757,9 @@ async fn account_id(state: &StateStore, username: &str) -> Result<String> {
 
 async fn source_grants(pool: &SqlitePool, account_id: &str) -> Result<Vec<String>> {
     sqlx::query_scalar(
-        "SELECT source_key FROM account_source_grants WHERE account_id=? ORDER BY source_key",
+        "SELECT source_key FROM account_source_grants WHERE account_id=? UNION SELECT g.source_key FROM team_source_grants g JOIN team_members m ON m.team_id=g.team_id WHERE m.account_id=? ORDER BY source_key",
     )
+    .bind(account_id)
     .bind(account_id)
     .fetch_all(pool)
     .await
@@ -1849,7 +1887,7 @@ fn verify_password(hash: &str, password: &str) -> bool {
         .is_some_and(|hash| hasher.verify_password(password.as_bytes(), &hash).is_ok())
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -2301,8 +2339,10 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','5'", "'schema_version','4'")
-            .replace(",'token_created','token_revoked'", "");
+            .replace("'schema_version','6'", "'schema_version','4'")
+            .replace(",'auditor','operator'", "")
+            .replace("    team_id TEXT,\n", "")
+            .replace(",'token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked'", "");
         sqlx::raw_sql(&old_schema).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO security_events(id,event_type,occurred_at) VALUES(42,'login_failed',unixepoch())")
             .execute(&pool).await.unwrap();
@@ -2328,7 +2368,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2361,7 +2401,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

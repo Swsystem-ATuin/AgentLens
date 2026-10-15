@@ -20,7 +20,7 @@ Network addresses are not collected or displayed. Agent Lens does not currently 
 
 ## Security events
 
-The `security_events` table accepts only fixed event codes for account creation, successful and failed sign-ins, password changes and administrative resets, session revocation, account enable/disable, role changes, source grants, and profile changes. A database trigger rejects updates, making retained rows append-only; the only deletion path is retention pruning. Event rows contain an account reference, fixed code, timestamp, and no free-form detail.
+The `security_events` table accepts only fixed event codes for account creation, successful and failed sign-ins, password changes/resets, session revocation, account enable/disable, role and source grants, profile and token changes, and team creation/rename/deletion/membership/grants. A database trigger rejects updates; retention pruning removes old rows. Rows contain optional account and stable team references, a fixed code, and timestamp, with no free-form detail. Team IDs remain in retained events after team deletion.
 
 Failures for a known account are visible only to that account. Unknown or syntactically invalid usernames produce the same browser response and timing-oriented dummy password verification, and their events remain unlinked; no external response reveals whether an account exists. The ledger never stores passwords or hashes, cookie/session/token values, request headers, network addresses, transcript data, paths, or error text.
 
@@ -28,6 +28,6 @@ Security history uses the account's 25/50/100 page-size preference and is retain
 
 ## Upgrade and verification
 
-Schema version 4 introduced session inventory and security events. The current binary migrates earlier schemas through that change and [schema v5 for personal access tokens](personal-access-tokens.md), preserving retained audit history. Back up the stopped state database first, then restart the service; no agent-index rebuild or source refresh is required.
+Schema version 4 introduced session inventory and security events. The current binary migrates earlier schemas through [v5 tokens](personal-access-tokens.md) and [v6 teams and roles](teams-and-roles.md), preserving sessions and retained audit history. Back up the stopped state database first, then restart the service; no agent-index rebuild or source refresh is required.
 
 Run `bash scripts/check.sh`. Synthetic tests cover v1-to-v4 migration, legacy-session adoption, identifier rotation, inactivity and absolute expiry, immediate payload deletion, current-session preservation, individual and bulk revocation, CSRF, account isolation, escaped profile output, client-header sanitization, bounded pagination, append-only/allowlisted events, known and unknown failed sign-ins, and 30/180-day retention. Fixtures contain no private account or request data.

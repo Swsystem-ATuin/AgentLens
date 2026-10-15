@@ -8,7 +8,7 @@ The initial automation use cases are Prometheus scraping, collecting redacted pe
 
 | Scope | Accepted GET/HEAD endpoint | Response | Account requirement |
 | --- | --- | --- | --- |
-| `metrics:read` | `/metrics` | Prometheus text | Current admin role |
+| `metrics:read` | `/metrics` | Prometheus text | Current admin or operator role |
 | `reports:read` | `/api/sessions/{stable_id}/postmortem` | Redacted postmortem JSON | Current access to the session's source |
 | `content:read` | `/api/sessions/{stable_id}/live-status` | Live-status JSON | Current access to the session's source |
 
@@ -49,6 +49,6 @@ Authorized tokens are limited to 60 requests per UTC calendar minute, with the b
 
 ## Deployment and verification
 
-Back up the stopped persistent state database before upgrading. Opening it migrates v1–v4 to v5, preserves retained audit history and append-only enforcement, and adds token storage. Restart the web service; no source refresh or index rebuild is required. On the development host, restart `agent-lens.service` whenever the debug executable is replaced.
+Back up the stopped persistent state database before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v5 through [schema v6](teams-and-roles.md), preserving tokens and retained audit history. Restart the web service; no source refresh or index rebuild is required. Direct and team source grants are rechecked for tokens just as for browser sessions. On the development host, restart `agent-lens.service` whenever the debug executable is replaced.
 
 Run `bash scripts/check.sh`. Synthetic tests cover storage without bearer values, one-time reveal, unknown digest versions, scope/role denial, source isolation, cookie precedence, duplicate headers, CSRF, password confirmation, escaped descriptions, account isolation, expiry, revocation, disable/re-enable, stale confirmation, rate and creation limits, retention, bounded pagination, audit events, and v4 migration. Tests use temporary databases and synthetic credentials.

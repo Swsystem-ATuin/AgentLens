@@ -1,3 +1,4 @@
+mod access;
 mod auth;
 mod authorization;
 mod db;
@@ -55,6 +56,11 @@ enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    /// Manage teams and their additive source grants through local recovery access.
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
     /// Serve the local web UI.
     Serve {
         #[arg(long, env = "AGENT_LENS_BIND", default_value = "127.0.0.1:3001")]
@@ -105,28 +111,28 @@ enum AccountCommand {
         #[arg(long)]
         username: String,
     },
-    /// Change whether an account administers all data or sees granted sources.
+    /// Select the account's documented capability role.
     SetRole {
         #[arg(long)]
         username: String,
         #[arg(long, value_enum)]
         role: RoleArg,
     },
-    /// Allow a viewer to read one stable source ID.
+    /// Grant a scoped account access to one stable source ID.
     GrantSource {
         #[arg(long)]
         username: String,
         #[arg(long)]
         source_id: String,
     },
-    /// Remove a viewer's access to one stable source ID.
+    /// Remove one direct source grant; independent team grants remain effective.
     RevokeSource {
         #[arg(long)]
         username: String,
         #[arg(long)]
         source_id: String,
     },
-    /// Print an account's role and stable source grants.
+    /// Explain an account's role, effective sources, and direct/team grant origins.
     Permissions {
         #[arg(long)]
         username: String,
@@ -137,6 +143,8 @@ enum AccountCommand {
 enum RoleArg {
     Admin,
     Viewer,
+    Auditor,
+    Operator,
 }
 
 impl From<RoleArg> for auth::AccountRole {
@@ -144,8 +152,60 @@ impl From<RoleArg> for auth::AccountRole {
         match value {
             RoleArg::Admin => Self::Admin,
             RoleArg::Viewer => Self::Viewer,
+            RoleArg::Auditor => Self::Auditor,
+            RoleArg::Operator => Self::Operator,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    Rename {
+        #[arg(long)]
+        team_id: String,
+        #[arg(long)]
+        name: String,
+    },
+    Delete {
+        #[arg(long)]
+        team_id: String,
+    },
+    AddMember {
+        #[arg(long)]
+        team_id: String,
+        #[arg(long)]
+        username: String,
+    },
+    RemoveMember {
+        #[arg(long)]
+        team_id: String,
+        #[arg(long)]
+        username: String,
+    },
+    GrantSource {
+        #[arg(long)]
+        team_id: String,
+        #[arg(long)]
+        source_id: String,
+    },
+    RevokeSource {
+        #[arg(long)]
+        team_id: String,
+        #[arg(long)]
+        source_id: String,
+    },
+    Inspect {
+        #[arg(long)]
+        team_id: String,
+    },
+    List {
+        #[arg(long,default_value="1",value_parser=clap::value_parser!(u32).range(1..=100_000))]
+        page: u32,
+    },
 }
 
 #[tokio::main]
@@ -255,6 +315,71 @@ async fn main() -> Result<()> {
                     println!("role: {}", permissions.role);
                     for source_key in permissions.source_keys {
                         println!("source: {source_key}");
+                    }
+                    for origin in permissions.origins {
+                        println!(
+                            "grant: {} via {}{}",
+                            origin.source_key,
+                            origin.origin,
+                            origin
+                                .team_id
+                                .map(|id| format!(" ({id})"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+            }
+        }
+        Command::Team { command } => {
+            let state = auth::StateStore::open(&cli.state_database).await?;
+            match command {
+                TeamCommand::Create { name } => {
+                    println!("team: {}", access::create(&state, &name).await?)
+                }
+                TeamCommand::Rename { team_id, name } => {
+                    access::rename(&state, &team_id, &name).await?;
+                    println!("team renamed");
+                }
+                TeamCommand::Delete { team_id } => {
+                    access::delete(&state, &team_id).await?;
+                    println!("team deleted; memberships and team source grants removed");
+                }
+                TeamCommand::AddMember { team_id, username } => {
+                    access::membership(&state, &team_id, &username, true).await?;
+                    println!("team membership added");
+                }
+                TeamCommand::RemoveMember { team_id, username } => {
+                    access::membership(&state, &team_id, &username, false).await?;
+                    println!("team membership removed");
+                }
+                TeamCommand::GrantSource { team_id, source_id } => {
+                    access::grant(&state, &team_id, &source_id, true).await?;
+                    println!("team source access granted");
+                }
+                TeamCommand::RevokeSource { team_id, source_id } => {
+                    access::grant(&state, &team_id, &source_id, false).await?;
+                    println!("team source access revoked");
+                }
+                TeamCommand::Inspect { team_id } => {
+                    let (team, members, sources) = access::inspect(&state, &team_id).await?;
+                    println!("team: {}\nname: {}", team.id, team.name);
+                    for member in members {
+                        println!("member: {member}");
+                    }
+                    for source in sources {
+                        println!("source: {source}");
+                    }
+                }
+                TeamCommand::List { page } => {
+                    let mut teams =
+                        access::list(&state.auth.pool, i64::from(page - 1) * 50, 51).await?;
+                    let next = teams.len() > 50;
+                    teams.truncate(50);
+                    for team in teams {
+                        println!("team: {}\t{}", team.id, team.name);
+                    }
+                    if next {
+                        println!("more teams available on page {}", page + 1);
                     }
                 }
             }

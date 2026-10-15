@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Stable-ID teams, additive direct/team source grants, auditor and operator capabilities, local team-management commands, and a bounded own-access explanation page. State schema v6 preserves existing identities, sessions, preferences, tokens, and grants, audits team changes, and prevents disabling, deleting, or demoting the last enabled administrator.
+
 - Personal access tokens now support one-time bearer reveal, digest-only persistent storage, bounded expiry, read scopes for metrics/redacted postmortems/live status, current account/source permission checks, password-confirmed and CSRF-protected creation, revocation, rate limits, bounded listing, retention, and audited schema-v5 migration.
 
 - A shared typed capability policy now governs browser and metrics authentication, source-wide access, and self-service account/security routes. Unknown routes and unsupported methods fail closed for every role; tested credential ceilings prepare least-privilege token scopes without enabling future administrative features.

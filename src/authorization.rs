@@ -1,4 +1,5 @@
 //! Shared policy vocabulary for browser identities and future scoped credentials.
+use crate::auth::AccountRole;
 use axum::http::Method;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +19,21 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ContentRead => "Read session content",
+            Self::ReportsRead => "Read scoped reports",
+            Self::OperationsRead => "Read installation health and metrics",
+            Self::AllSourcesRead => "Read all sources",
+            Self::AccountSelfManage => "Manage own account",
+            Self::AuditSelfRead => "Read own security history",
+            Self::TokensManage => "Manage own tokens",
+            Self::SourceRefresh => "Refresh sources",
+            Self::AnnotationsWrite => "Write annotations",
+            Self::AccountsAdminister => "Administer accounts",
+            Self::AuditRead => "Read installation audit history",
+        }
+    }
     pub(crate) const ALL: [Self; 11] = [
         Self::ContentRead,
         Self::ReportsRead,
@@ -37,10 +53,10 @@ impl Capability {
 pub(crate) struct Capabilities(u16);
 
 impl Capabilities {
-    pub(crate) fn for_role(admin: bool) -> Self {
+    pub(crate) fn for_role(role: AccountRole) -> Self {
         // Reserved capabilities do not authorize unimplemented browser features.
-        let allowed: &[Capability] = if admin {
-            &[
+        let allowed: &[Capability] = match role {
+            AccountRole::Admin => &[
                 Capability::ContentRead,
                 Capability::ReportsRead,
                 Capability::AccountSelfManage,
@@ -48,15 +64,28 @@ impl Capabilities {
                 Capability::OperationsRead,
                 Capability::AllSourcesRead,
                 Capability::TokensManage,
-            ]
-        } else {
-            &[
+            ],
+            AccountRole::Viewer => &[
                 Capability::ContentRead,
                 Capability::ReportsRead,
                 Capability::AccountSelfManage,
                 Capability::AuditSelfRead,
                 Capability::TokensManage,
-            ]
+            ],
+            AccountRole::Auditor => &[
+                Capability::ReportsRead,
+                Capability::AccountSelfManage,
+                Capability::AuditSelfRead,
+                Capability::TokensManage,
+            ],
+            AccountRole::Operator => &[
+                Capability::ContentRead,
+                Capability::ReportsRead,
+                Capability::OperationsRead,
+                Capability::AccountSelfManage,
+                Capability::AuditSelfRead,
+                Capability::TokensManage,
+            ],
         };
         Self(u16::MAX)
             .constrained(&Capability::ALL)
@@ -83,10 +112,14 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     if read {
         match path {
             "/account/tokens" => return Some(Capability::TokensManage),
-            "/" | "/sessions" | "/assets/live-reader.js" => return Some(Capability::ContentRead),
+            "/" => return Some(Capability::AccountSelfManage),
+            "/sessions" | "/assets/live-reader.js" => return Some(Capability::ContentRead),
             "/usage" | "/diagnostics" => return Some(Capability::ReportsRead),
             "/health" | "/metrics" => return Some(Capability::OperationsRead),
-            "/account" | "/assets/preferences.js" | "/assets/preferences.css" => {
+            "/account"
+            | "/account/access"
+            | "/assets/preferences.js"
+            | "/assets/preferences.css" => {
                 return Some(Capability::AccountSelfManage);
             }
             "/account/sessions" => return Some(Capability::AuditSelfRead),
@@ -154,25 +187,29 @@ mod tests {
 
     #[test]
     fn role_matrix_and_credential_ceilings_do_not_widen_access() {
-        for admin in [false, true] {
-            let account = Capabilities::for_role(admin);
+        for role in [
+            AccountRole::Admin,
+            AccountRole::Viewer,
+            AccountRole::Auditor,
+            AccountRole::Operator,
+        ] {
+            let account = Capabilities::for_role(role);
             for capability in Capability::ALL {
                 let expected = matches!(
                     capability,
-                    Capability::ContentRead
-                        | Capability::ReportsRead
+                    Capability::ReportsRead
                         | Capability::AccountSelfManage
                         | Capability::AuditSelfRead
                         | Capability::TokensManage
-                ) || (admin
-                    && matches!(
-                        capability,
-                        Capability::OperationsRead | Capability::AllSourcesRead
-                    ));
+                ) || (role != AccountRole::Auditor
+                    && capability == Capability::ContentRead)
+                    || (matches!(role, AccountRole::Admin | AccountRole::Operator)
+                        && capability == Capability::OperationsRead)
+                    || (role == AccountRole::Admin && capability == Capability::AllSourcesRead);
                 assert_eq!(
                     account.permits(capability),
                     expected,
-                    "{admin}: {capability:?}"
+                    "{role:?}: {capability:?}"
                 );
                 let limited = account.constrained(&[capability]);
                 for other in Capability::ALL {

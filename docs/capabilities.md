@@ -1,29 +1,29 @@
 # Capability authorization
 
-The shared policy in `src/authorization.rs` maps live account roles to typed capabilities and classifies implemented HTTP routes by method and path. Browser sessions and metrics Basic authentication use this evaluator after checking the current account. Unknown routes and unsupported methods return `403` for both roles. Local loopback mode retains its explicit unrestricted development behavior.
+The shared policy in `src/authorization.rs` maps live account roles to typed capabilities and classifies implemented HTTP routes by method and path. Browser sessions and metrics Basic authentication use this evaluator after checking the current account. Unknown routes and unsupported methods return `403` for all roles. Local loopback mode retains its explicit unrestricted development behavior.
 
-| Capability | Admin | Viewer | Current surface |
-| --- | --- | --- | --- |
-| ContentRead | Yes | Yes, granted sources | Sessions, search, transcripts, turns, live status, artifacts, message/tool details |
-| ReportsRead | Yes | Yes, granted sources | Usage, diagnostics, redacted postmortem exports |
-| OperationsRead | Yes | No | Installation-wide health and metrics |
-| AllSourcesRead | Yes | No | Bypass explicit source grants for authorized data reads |
-| AccountSelfManage | Own account | Own account | Profile, preferences, password, logout, session revocation |
-| AuditSelfRead | Own account | Own account | Session inventory and security history |
-| SourceRefresh | No | No | Reserved for a future authenticated refresh surface |
-| AnnotationsWrite | No | No | Reserved for future annotations |
-| AccountsAdminister | No | No | Reserved for browser administration |
-| AuditRead | No | No | Reserved for installation-wide audit review |
-| TokensManage | Own account | Own account | Personal access token creation, listing, and revocation |
+| Capability | Admin | Viewer | Auditor | Operator | Current surface |
+| --- | --- | --- | --- | --- | --- |
+| ContentRead | Yes | Scoped | No | Scoped | Sessions, search, transcripts, turns, live status, artifacts, message/tool details |
+| ReportsRead | Yes | Scoped | Scoped | Scoped | Usage, diagnostic metadata, redacted postmortem exports |
+| OperationsRead | Yes | No | No | Yes | Installation-wide health and metrics |
+| AllSourcesRead | Yes | No | No | No | Bypass explicit source grants for authorized data reads |
+| AccountSelfManage | Own | Own | Own | Own | Profile, preferences, password, logout, session revocation, effective-access explanation |
+| AuditSelfRead | Own | Own | Own | Own | Session inventory and security history |
+| SourceRefresh | No | No | No | No | Reserved for a future authenticated refresh surface |
+| AnnotationsWrite | No | No | No | No | Reserved for future annotations |
+| AccountsAdminister | No | No | No | No | Reserved for browser administration |
+| AuditRead | No | No | No | No | Reserved for installation-wide audit review |
+| TokensManage | Own | Own | Own | Own | Personal access token creation, listing, and revocation |
 
 Reserved capabilities have no HTTP routes or browser grants. Local administrator CLI commands continue to use filesystem access to the state database as their recovery boundary. Capability names establish the vocabulary for later roadmap work without enabling that work.
 
 ## Source and account scope
 
-Capabilities authorize actions; source grants limit the records those actions can see. Parameterized query predicates use `AllSourcesRead` for installation-wide visibility and otherwise apply stable source grants before filtering, counts, aggregates, and pagination. A scope without content or report access supplies neither an unrestricted predicate nor source grants. Session and child-resource lookups retain `404` for ungranted identifiers. Self-service handlers derive the account ID from the authenticated session and retain CSRF validation for mutations.
+Capabilities authorize actions; source grants limit the records those actions can see. [Team grants and direct grants](teams-and-roles.md) combine as a deterministic union. Parameterized query predicates use `AllSourcesRead` for installation-wide visibility and otherwise apply effective stable source grants before filtering, counts, aggregates, and pagination. A scope without content or report access supplies neither an unrestricted predicate nor source grants. Session and child-resource lookups retain `404` for ungranted identifiers. Self-service handlers derive the account ID from the authenticated session and retain CSRF validation for mutations.
 
 The capability set supports intersection with an explicit credential ceiling. [Personal access tokens](personal-access-tokens.md) use the live account's set intersected with token scopes, retain account disablement and current source-grant enforcement, and use a separate allowlist of machine-readable read endpoints. Tokens cannot add a capability absent from the account or invoke browser self-service routes.
 
 ## Verification and deployment
 
-Run `bash scripts/check.sh`. The normal test suite verifies the complete role matrix, every credential-ceiling intersection, unsupported methods, unknown and reserved routes for both roles, metrics Basic authorization, and existing source-isolation query/render/export regressions. Role and grant changes still take effect on the next request. No state migration, source refresh, or index rebuild is required; restart the web service after deploying the new binary.
+Run `bash scripts/check.sh`. The normal test suite verifies the complete four-role matrix, every credential-ceiling intersection, unsupported methods, unknown and reserved routes, metrics Basic authorization, and source-isolation query/render/export regressions. Role, team membership, and grant changes take effect on the next request. Schema v6 migrates the account role vocabulary and teams automatically; no source refresh or index rebuild is required. Restart the web service after deploying the new binary.

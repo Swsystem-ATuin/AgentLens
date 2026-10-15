@@ -282,6 +282,9 @@ mod tests {
         crate::auth::create_account(&state, "viewer", &password_file, None)
             .await
             .unwrap();
+        crate::auth::create_account(&state, "recovery", &password_file, Some(AccountRole::Admin))
+            .await
+            .unwrap();
         let admin = state
             .auth
             .authenticate("admin", "Synthetic1-password")
