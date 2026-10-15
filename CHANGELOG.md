@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Offline OIDC configuration preflight with required issuer/client/public URL and explicit linking, local-permission, logout, and break-glass policies. Rejects incomplete/unsafe configuration without contacting providers or reading secrets; federated sign-in remains unavailable.
+
 - Opt-in WebAuthn passkeys as password-first second factors, disabled until an exact public HTTPS URL and Secure cookies are configured. Adds named device enrollment/removal, required-MFA and shared recovery integration, bounded server-only challenges, single-use action proofs, current credential/session checks, committed counter protection, schema-v9 migration, signed software-authenticator regressions, and OpenSSL container dependencies.
 
 - Opt-in TOTP MFA with administrator-required enrollment and recovery/reset controls, restricted setup sessions, one-time recovery-code reveal and digest-only storage, authenticated encrypted secret storage with durable key rotation, replay protection, persisted verification limits, fresh factors for sensitive actions, credential invalidation, and schema-v8 audit migration. MFA accounts use scoped tokens instead of password-only metrics authentication.

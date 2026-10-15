@@ -9,6 +9,7 @@ mod identity;
 mod ingest;
 mod metrics;
 mod mfa;
+mod oidc;
 mod passkeys;
 mod postmortem;
 mod preferences;
@@ -45,6 +46,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate a proposed OIDC configuration without enabling sign-in or contacting a provider.
+    OidcCheck {
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
         #[arg(long, env = "AGENT_LENS_DATA", default_value = "data")]
@@ -425,6 +431,12 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::OidcCheck { config } => {
+            oidc::check_file(&config)?;
+            println!(
+                "OIDC configuration valid; sign-in remains unavailable pending protocol implementation"
+            );
         }
         Command::Serve {
             bind,
