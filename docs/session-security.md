@@ -20,6 +20,8 @@ Network addresses are not collected or displayed. Agent Lens does not currently 
 
 ## Security events
 
+[MFA lifecycle events](totp-mfa.md) also use fixed codes for setup, enable/disable, verification failure, recovery use/replacement, administrator requirement/reset, and key rotation. Their records never include factor codes, provisioning secrets/URIs, or key bytes. MFA policy/enrollment changes revoke existing sessions and tokens; completed self-service changes rotate and preserve only the confirmed current browser session.
+
 The `security_events` table accepts only fixed event codes for account creation, successful and failed sign-ins, password changes/resets, session revocation, account enable/disable, role and source grants, profile and token changes, and team creation/rename/deletion/membership/grants. A database trigger rejects updates; retention pruning removes old rows. Rows contain optional account and stable team references, a fixed code, and timestamp, with no free-form detail. Team IDs remain in retained events after team deletion.
 
 Failures for a known account are visible to that account and authorized administrators through [installation security review](browser-administration.md). Unknown or invalid usernames receive the same browser response and timing-oriented dummy password verification, and their events remain unlinked. Shared password-attempt throttling returns the same response for all identities without locking accounts. The ledger never stores passwords or hashes, cookie/session/token values, headers, network addresses, transcripts, paths, or errors.
@@ -28,6 +30,6 @@ Security history uses the account's 25/50/100 page-size preference and is retain
 
 ## Upgrade and verification
 
-Schema version 4 introduced session inventory and security events. The current binary migrates earlier schemas through [v5 tokens](personal-access-tokens.md), [v6 teams and roles](teams-and-roles.md), and [v7 administration facts](browser-administration.md), preserving sessions and retained history. Back up the stopped state database first, then restart; no index rebuild or source refresh is required.
+Schema v4 introduced session inventory and security events. The current binary migrates earlier schemas through [v5 tokens](personal-access-tokens.md), [v6 teams](teams-and-roles.md), [v7 administration](browser-administration.md), and [v8 MFA](totp-mfa.md), preserving sessions and history. Back up stopped state and its MFA keyring first, then restart; no index rebuild or source refresh is required.
 
 Run `bash scripts/check.sh`. Synthetic tests cover v1-to-v4 migration, legacy-session adoption, identifier rotation, inactivity and absolute expiry, immediate payload deletion, current-session preservation, individual and bulk revocation, CSRF, account isolation, escaped profile output, client-header sanitization, bounded pagination, append-only/allowlisted events, known and unknown failed sign-ins, and 30/180-day retention. Fixtures contain no private account or request data.

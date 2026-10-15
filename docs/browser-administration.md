@@ -4,6 +4,8 @@ Signed-in administrators can open `/admin/accounts` from Account. Viewers, audit
 
 ## Workflow and confirmation
 
+[TOTP MFA](totp-mfa.md) is optional by default. Account details show enrollment and requirement state and offer require-enrollment, release-requirement, and MFA reset controls. These are audited account mutations, require the administrator's own current password and fresh factor when enrolled, and revoke the target's existing credentials. Removing the requirement does not disable an enrolled authenticator; reset preserves the requirement.
+
 - `/admin/accounts` lists accounts and provisions a new account with an explicit role and policy-compliant initial password.
 - `/admin/accounts/ACCOUNT_ID` shows the target's enabled state, role, direct/team grant origins, and token metadata. Select enable/disable, role change, password reset, all-session revocation, direct source grant/revocation, or individual token revocation. The value field supplies only the selected operation's role, stable source ID, or public token ID.
 - `/admin/teams` creates and lists teams. `/admin/teams/TEAM_ID` supports rename/delete, membership changes, and team source grants, and shows bounded member/source lists. Teams still grant sources, not capabilities; independent grants survive removal.
@@ -26,6 +28,8 @@ Provision `recovery-admin` first if it does not exist, using the owner-only pass
 
 ## Atomic security boundary
 
+Enrolled administrators must confirm a fresh authenticator or recovery code for every mutation. Required-but-unenrolled accounts cannot administer anything until setup completes. Account stale-state snapshots include MFA enrollment and requirement state as well as role/enabled/generation fields.
+
 After password confirmation, the domain layer takes SQLite's writer lock and rechecks the actor's enabled state, credential generation, current capabilities, and the originating session's inventory identity, expiry, activity, and revocation state. Stale administrators and revoked sessions cannot commit a mutation even if middleware initially accepted them. The same transaction resolves and confirms the target, applies the mutation, appends the affected-account/team security event, and records administrative before/after facts. An audit failure rolls back the mutation. Existing database guards prevent disabling or demoting the last enabled administrator, including concurrent requests; CLI recovery remains available. Self-disable, self-demotion, password reset, and own-session revocation take effect immediately and can terminate administrative access.
 
 State schema v7 adds `admin_events` with an allowlisted operation vocabulary and an update-rejecting trigger. Rows contain the actor ID, optional affected account/team IDs, an optional stable source/public-token subject, and bounded before/after facts: roles, enabled/granted/member state, generation numbers, or team names. No password, password hash, bearer value, digest, cookie, session-store identifier, transcript, arbitrary header, or free-form error is recorded. Confirmed idempotent operations may record identical before/after values. Application logs use existing fixed failure categories, never form values or underlying SQL errors.
@@ -40,6 +44,6 @@ This is a process-wide backstop, not distributed brute-force protection. Other c
 
 ## Migration and verification
 
-Back up the stopped persistent state database before upgrading. Opening schemas v1–v6 automatically migrates to v7 without changing the disposable index, source files, existing account IDs, grants, team IDs, sessions, preferences, or tokens. No source refresh or index rebuild is required. Restart after deploying; on this host, always restart `agent-lens.service` after replacing `target/debug/agent-lens` and verify it is active.
+Back up stopped persistent state and its MFA keyring before upgrading. The current binary migrates schemas v1–v7 to [v8 MFA](totp-mfa.md), preserving existing state and audit facts. No source refresh or index rebuild is required. Restart after deploying; on this host, always restart `agent-lens.service` after replacing `target/debug/agent-lens` and verify it is active.
 
 Run `bash scripts/check.sh`. Synthetic tests cover browser account/team operations, CSRF, per-operation password confirmation, exact-target and stale-state checks, non-admin/token/local-mode denial, stale actor/session enforcement inside the writer transaction, concurrent updates, last-administrator safeguards, rollback on audit failure, append-only facts, secret-free/escaped HTML, pagination, credential invalidation, and shared throttling without account lockout. No private fixtures are read.

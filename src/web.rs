@@ -16,6 +16,9 @@ mod admin_pages;
 #[cfg(test)]
 mod administration;
 mod markdown;
+mod mfa_pages;
+#[cfg(test)]
+mod mfa_regression;
 mod presentation;
 pub(crate) mod queries;
 #[cfg(test)]
@@ -67,6 +70,8 @@ struct AccountQuery {
 struct ChangePasswordForm {
     csrf_token: String,
     current_password: String,
+    #[serde(default)]
+    mfa_code: String,
     new_password: String,
     confirm_password: String,
 }
@@ -411,6 +416,7 @@ fn app_routes(
         )
         .route("/account", get(account))
         .route("/account/access", get(account_access))
+        .route("/account/mfa",get(mfa_pages::page).post(mfa_pages::mutate))
         .route("/admin/accounts", get(admin_pages::accounts))
         .route("/admin/accounts/{id}", get(admin_pages::account))
         .route("/admin/teams", get(admin_pages::teams))
@@ -601,6 +607,9 @@ async fn login_submit(
         .authenticate(&form.username, &form.password)
         .await
         .map_err(|_| WebError::authentication("authenticate account"))?
+        && crate::mfa::verify(&state.auth, &user, &form.mfa_code)
+            .await
+            .map_err(|_| WebError::authentication("verify login factor"))?
     {
         crate::auth::establish_session(
             &state.auth,
@@ -613,6 +622,10 @@ async fn login_submit(
         )
         .await
         .map_err(|_| WebError::authentication("establish session"))?;
+        session
+            .insert("auth.mfa_verified", true)
+            .await
+            .map_err(|_| WebError::authentication("record completed sign-in factors"))?;
         let target = if return_to == "/sessions" {
             default_landing(&user)
         } else {
@@ -759,6 +772,28 @@ async fn change_password(
     if !state.auth.accept_password_attempt() {
         return Ok(crate::auth::password_rate_limited());
     }
+    if crate::mfa::status(&state.auth, &user.id)
+        .await
+        .map_err(|_| WebError::authentication("check password-change MFA status"))?
+        .enrolled
+    {
+        let confirmed = state
+            .auth
+            .authenticate(&user.username, &form.current_password)
+            .await
+            .map_err(|_| WebError::authentication("confirm password-change credentials"))?;
+        if !confirmed.is_some_and(|(confirmed, _)| {
+            confirmed.id == user.id && confirmed.credential_generation == user.credential_generation
+        }) {
+            return Err(WebError::forbidden());
+        }
+    }
+    if !crate::mfa::verify(&state.auth, &user, &form.mfa_code)
+        .await
+        .map_err(|_| WebError::authentication("confirm password change factor"))?
+    {
+        return Err(WebError::forbidden());
+    }
     let error = if form.new_password != form.confirm_password {
         Some("New password and confirmation do not match.")
     } else {
@@ -775,6 +810,12 @@ async fn change_password(
                 crate::auth::establish_session(&state.auth, &session, &user, generation, None)
                     .await
                     .map_err(|_| WebError::authentication("refresh changed-password session"))?;
+                session
+                    .insert("auth.mfa_verified", true)
+                    .await
+                    .map_err(|_| {
+                        WebError::authentication("preserve changed-password factor proof")
+                    })?;
                 return Ok(
                     axum::response::Redirect::to("/account?password_changed=1").into_response()
                 );

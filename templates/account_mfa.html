@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block title %}Two-factor authentication · Agent Lens{% endblock %}{% block content %}
+<h1>Two-factor authentication</h1><p><a href="/account">← Account</a></p>
+<p>Authenticator enrolled: {{ status.enrolled }}. Administrator-required: {{ status.required }}. Unused recovery codes: {{ status.recovery_count }}.</p>
+{% if status.required && !status.enrolled %}<p class="error">Your administrator requires enrollment. Other application access is blocked until setup is complete.</p>{% endif %}
+{% if !codes.is_empty() %}<section aria-label="New recovery codes"><h2>Save your recovery codes now</h2><p>These ten codes are shown only in this response. Each replaces one authenticator code once. Store them separately from your password and authenticator. Previous recovery codes are invalid.</p><pre>{% for code in codes %}{{ code }}
+{% endfor %}</pre></section>{% endif %}
+{% if let Some(setup) = enrollment %}<section aria-label="Authenticator setup"><h2>Add this authenticator</h2><p>In your authenticator choose a manual time-based account: SHA-1, six digits, 30-second period. Enter this secret:</p><pre>{{ setup.secret }}</pre><p>Alternatively import this provisioning URI directly into your trusted authenticator; do not send it to a QR-code website:</p><pre>{{ setup.uri }}</pre><p>Setup expires after ten minutes and is bound to this browser session. Enter a current code below to activate it.</p></section>{% endif %}
+<form method="post" action="/account/mfa" class="account-options"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Action<select name="action">{% if !status.enrolled %}<option value="begin">Start or replace pending setup</option><option value="finish"{% if enrollment.is_some() %} selected{% endif %}>Confirm setup with authenticator code</option>{% else %}<option value="recovery">Replace recovery codes</option>{% if !status.required %}<option value="disable">Disable optional MFA</option>{% endif %}{% endif %}</select></label>
+<label>Current password<input type="password" name="current_password" autocomplete="current-password" required maxlength="1024"></label>
+<label>Authenticator or recovery code (required to confirm setup or change enrolled MFA)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label>
+<button type="submit">Apply MFA action</button></form>
+<p>Enabling, disabling, or replacing recovery codes revokes other sessions and tokens. There is no remembered-device bypass. Reusing an authenticator time step is rejected, so wait for the next code after sign-in. Required MFA cannot be disabled by the account; ask an administrator for recovery.</p>
+<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Sign out</button></form>
+{% endblock %}

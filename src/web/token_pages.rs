@@ -9,6 +9,8 @@ pub(super) struct TokenQuery {
 pub(super) struct CreateForm {
     csrf_token: String,
     current_password: String,
+    #[serde(default)]
+    mfa_code: String,
     description: String,
     scope: String,
     days: i64,
@@ -139,6 +141,12 @@ pub(super) async fn create(
         )
             .into_response());
     };
+    if !crate::mfa::verify(&state.auth, &confirmed_user, &form.mfa_code)
+        .await
+        .map_err(|_| WebError::authentication("confirm token creation factor"))?
+    {
+        return Err(WebError::forbidden());
+    }
     if !crate::tokens::scope_capability(&form.scope)
         .is_some_and(|capability| confirmed_user.access.permits(capability))
     {

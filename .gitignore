@@ -10,3 +10,5 @@
 /auth.local.json.*
 /projects.local.json
 /projects.local.json.*
+/*.mfa-keys.json
+/*.mfa-keys.json.*

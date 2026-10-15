@@ -121,6 +121,7 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
             "/usage" | "/diagnostics" => return Some(Capability::ReportsRead),
             "/health" | "/metrics" => return Some(Capability::OperationsRead),
             "/account"
+            | "/account/mfa"
             | "/account/access"
             | "/assets/preferences.js"
             | "/assets/preferences.css" => {
@@ -134,6 +135,7 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
             "/admin/actions" => return Some(Capability::AccountsAdminister),
             "/account/tokens" => return Some(Capability::TokensManage),
             "/account/password"
+            | "/account/mfa"
             | "/account/preferences"
             | "/account/profile"
             | "/logout"

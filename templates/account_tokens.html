@@ -10,6 +10,7 @@
 <label>Read scope<select name="scope"><option value="reports:read">Redacted postmortem reports</option><option value="content:read">Session live status</option>{% if metrics_allowed %}<option value="metrics:read">Prometheus metrics</option>{% endif %}</select></label>
 <label>Expires in days<input type="number" name="days" value="30" min="1" max="90" required></label>
 <label>Current password<input type="password" name="current_password" autocomplete="current-password" maxlength="1024" required></label>
+<label>Authenticator or recovery code (if MFA enrolled)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label>
 <button type="submit">Create token</button>
 </form>
 <p class="muted">Each token has one read scope and follows your current source access. Choose the shortest useful lifetime. Password changes and account-wide session revocation also invalidate existing tokens.</p>

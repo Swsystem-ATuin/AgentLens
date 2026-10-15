@@ -11,6 +11,8 @@ pub(super) struct PageQuery {
 pub(super) struct ActionForm {
     csrf_token: String,
     current_password: String,
+    #[serde(default)]
+    mfa_code: String,
     #[serde(flatten)]
     command: admin::Command,
 }
@@ -238,6 +240,12 @@ pub(super) async fn mutate(
     if confirmed.id != user.id
         || confirmed.credential_generation != user.credential_generation
         || !confirmed.access.permits(Capability::AccountsAdminister)
+    {
+        return Err(WebError::forbidden());
+    }
+    if !crate::mfa::verify(&state.auth, &confirmed, &form.mfa_code)
+        .await
+        .map_err(|_| WebError::authentication("confirm administrator factor"))?
     {
         return Err(WebError::forbidden());
     }

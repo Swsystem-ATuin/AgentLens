@@ -38,7 +38,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','7');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','8');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT REFERENCES accounts(id),
     team_id TEXT,
-    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked','mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated')),
     occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
@@ -97,6 +97,7 @@ CREATE TRIGGER IF NOT EXISTS security_events_no_update BEFORE UPDATE ON security
 #[derive(Clone)]
 pub struct AuthState {
     pub(crate) pool: SqlitePool,
+    pub(crate) mfa_key_file: std::path::PathBuf,
     local_mode: bool,
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
@@ -221,6 +222,8 @@ pub struct AccountPermissions {
 pub struct LoginForm {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub mfa_code: String,
     pub csrf_token: String,
     #[serde(default)]
     pub return_to: String,
@@ -257,6 +260,16 @@ pub(crate) enum SecurityEvent {
     TeamMemberRemoved,
     TeamSourceGranted,
     TeamSourceRevoked,
+    MfaEnrollmentStarted,
+    MfaEnabled,
+    MfaDisabled,
+    MfaFailed,
+    MfaRecoveryUsed,
+    MfaRecoveryRotated,
+    MfaReset,
+    MfaRequired,
+    MfaReleased,
+    MfaKeyRotated,
 }
 
 impl SecurityEvent {
@@ -284,6 +297,16 @@ impl SecurityEvent {
             Self::TeamMemberRemoved => "team_member_removed",
             Self::TeamSourceGranted => "team_source_granted",
             Self::TeamSourceRevoked => "team_source_revoked",
+            Self::MfaEnrollmentStarted => "mfa_enrollment_started",
+            Self::MfaEnabled => "mfa_enabled",
+            Self::MfaDisabled => "mfa_disabled",
+            Self::MfaFailed => "mfa_failed",
+            Self::MfaRecoveryUsed => "mfa_recovery_used",
+            Self::MfaRecoveryRotated => "mfa_recovery_rotated",
+            Self::MfaReset => "mfa_reset",
+            Self::MfaRequired => "mfa_required",
+            Self::MfaReleased => "mfa_released",
+            Self::MfaKeyRotated => "mfa_key_rotated",
         }
     }
 }
@@ -337,6 +360,16 @@ impl StateStore {
     }
 
     pub async fn open(path: &Path) -> Result<Self> {
+        Self::open_with_mfa_key(path, None).await
+    }
+
+    pub async fn open_with_mfa_key(path: &Path, key: Option<&Path>) -> Result<Self> {
+        Self::open_inner(path, key, false).await
+    }
+    pub async fn open_for_mfa_recovery(path: &Path, key: Option<&Path>) -> Result<Self> {
+        Self::open_inner(path, key, true).await
+    }
+    async fn open_inner(path: &Path, key: Option<&Path>, recovery: bool) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -368,7 +401,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 7,
+                schema_version <= 8,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -402,10 +435,16 @@ impl StateStore {
             .execute(&pool)
             .await
             .context("migrate team access policy")?;
+        crate::admin::migrate(&pool).await?;
         sqlx::raw_sql(crate::admin::SCHEMA)
             .execute(&pool)
             .await
             .context("migrate browser administration audit")?;
+        sqlx::raw_sql(crate::mfa::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate MFA state")?;
+        crate::mfa::prune_pending(&pool).await?;
         sqlx::query("DELETE FROM admin_events WHERE occurred_at<unixepoch()-?")
             .bind(SECURITY_RETENTION_DAYS * 86_400)
             .execute(&pool)
@@ -421,7 +460,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='7' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='8' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -446,9 +485,12 @@ impl StateStore {
             .await
             .context("expire retained security events")?;
         let dummy_hash = hash_password("synthetic-dummy-password")?;
-        Ok(Self {
+        let state = Self {
             auth: AuthState {
                 pool,
+                mfa_key_file: key
+                    .map(Path::to_owned)
+                    .unwrap_or_else(|| crate::mfa::default_key_path(path)),
                 local_mode: false,
                 dummy_hash,
                 absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
@@ -458,7 +500,11 @@ impl StateStore {
                 test_digest: None,
             },
             sessions,
-        })
+        };
+        if !recovery {
+            crate::mfa::check_keys(&state.auth).await?;
+        }
+        Ok(state)
     }
 
     pub async fn require_active_account(&self) -> Result<()> {
@@ -481,21 +527,28 @@ async fn migrate_security_events(pool: &SqlitePool) -> Result<()> {
     .fetch_one(pool)
     .await
     .context("inspect security event vocabulary")?;
-    if schema.contains("'team_deleted'") {
+    if schema.contains("'mfa_enabled'") {
         return Ok(());
     }
     let mut transaction = pool
         .begin()
         .await
         .context("begin security event migration")?;
-    sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; ALTER TABLE security_events RENAME TO security_events_legacy;")
+    sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; DROP INDEX IF EXISTS idx_security_events_time; ALTER TABLE security_events RENAME TO security_events_legacy;")
         .execute(&mut *transaction).await.context("prepare security event migration")?;
     sqlx::raw_sql(STATE_SCHEMA)
         .execute(&mut *transaction)
         .await
         .context("create updated security event vocabulary")?;
-    sqlx::raw_sql("INSERT INTO security_events(id,account_id,event_type,occurred_at) SELECT id,account_id,event_type,occurred_at FROM security_events_legacy; DROP TABLE security_events_legacy;")
-        .execute(&mut *transaction).await.context("preserve security event history")?;
+    let copy = if schema.contains("team_id") {
+        "INSERT INTO security_events(id,account_id,team_id,event_type,occurred_at) SELECT id,account_id,team_id,event_type,occurred_at FROM security_events_legacy; DROP TABLE security_events_legacy;"
+    } else {
+        "INSERT INTO security_events(id,account_id,event_type,occurred_at) SELECT id,account_id,event_type,occurred_at FROM security_events_legacy; DROP TABLE security_events_legacy;"
+    };
+    sqlx::raw_sql(copy)
+        .execute(&mut *transaction)
+        .await
+        .context("preserve security event history")?;
     transaction
         .commit()
         .await
@@ -1083,7 +1136,13 @@ impl AuthState {
         let account: Option<AccountRow> = sqlx::query_as("SELECT id,username,password_hash,enabled,role,session_generation,display_name,password_changed_at FROM accounts WHERE id=? AND enabled=1 AND session_generation=?")
             .bind(account_id).bind(generation).fetch_optional(&self.pool).await.context("load token account")?;
         match account {
-            Some(account) => Ok(Some(self.current_account(account).await?)),
+            Some(account) => {
+                let mfa = crate::mfa::status(self, &account.id).await?;
+                if mfa.required && !mfa.enrolled {
+                    return Ok(None);
+                }
+                Ok(Some(self.current_account(account).await?))
+            }
             None => Ok(None),
         }
     }
@@ -1265,6 +1324,8 @@ pub async fn establish_session(
     user_agent: Option<&str>,
 ) -> Result<()> {
     let existing_inventory = session.get::<String>(INVENTORY_ID).await?;
+    // Callers completing MFA set this again after rotation. Never inherit a proof across identities.
+    session.remove::<bool>("auth.mfa_verified").await?;
     session.cycle_id().await?;
     let issued_at = unix_now();
     session.insert(ACCOUNT_ID, &user.id).await?;
@@ -1463,6 +1524,38 @@ pub async fn require_auth(
     }
     match auth.current_user(&session).await {
         Ok(Some(user)) => {
+            let mfa = match crate::mfa::status(&auth, &user.id).await {
+                Ok(status) => status,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Authentication unavailable",
+                    )
+                        .into_response();
+                }
+            };
+            let verified = session
+                .get::<bool>("auth.mfa_verified")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if mfa.enrolled && !verified {
+                let _ = session.flush().await;
+                return unauthenticated(&request);
+            }
+            if mfa.required
+                && !mfa.enrolled
+                && !matches!(
+                    request.uri().path(),
+                    "/account/mfa"
+                        | "/logout"
+                        | "/assets/preferences.js"
+                        | "/assets/preferences.css"
+                )
+            {
+                return axum::response::Redirect::to("/account/mfa").into_response();
+            }
             if !user
                 .access
                 .permits_route(request.method(), request.uri().path())
@@ -1495,6 +1588,21 @@ pub async fn require_auth(
                 }
                 match auth.authenticate(&username, &password).await {
                     Ok(Some((user, _))) => {
+                        let mfa = crate::mfa::status(&auth, &user.id).await;
+                        if !matches!(
+                            mfa,
+                            Ok(crate::mfa::Status {
+                                required: false,
+                                enrolled: false,
+                                ..
+                            })
+                        ) {
+                            return (
+                                StatusCode::FORBIDDEN,
+                                "Use a scoped personal access token for MFA accounts",
+                            )
+                                .into_response();
+                        }
                         if !user
                             .access
                             .permits_route(request.method(), request.uri().path())
@@ -1761,6 +1869,16 @@ fn security_event_label(kind: &str) -> Option<&'static str> {
         "team_member_removed" => "Team membership removed",
         "team_source_granted" => "Team source access granted",
         "team_source_revoked" => "Team source access revoked",
+        "mfa_enrollment_started" => "MFA enrollment started",
+        "mfa_enabled" => "MFA enabled",
+        "mfa_disabled" => "MFA disabled",
+        "mfa_failed" => "MFA verification failed",
+        "mfa_recovery_used" => "MFA recovery code used",
+        "mfa_recovery_rotated" => "MFA recovery codes replaced",
+        "mfa_reset" => "MFA reset by administrator",
+        "mfa_required" => "MFA enrollment required",
+        "mfa_released" => "MFA enrollment requirement removed",
+        "mfa_key_rotated" => "MFA encryption key rotated",
         _ => return None,
     })
 }
@@ -1920,7 +2038,7 @@ pub(crate) fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1980,6 +2098,7 @@ pub fn test_state(credentials: Credentials) -> AuthState {
         .connect_lazy_with(SqliteConnectOptions::new().filename(":memory:"));
     AuthState {
         pool,
+        mfa_key_file: std::path::PathBuf::new(),
         local_mode: false,
         dummy_hash: String::new(),
         absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
@@ -2366,7 +2485,8 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','7'", "'schema_version','4'")
+            .replace("'schema_version','8'", "'schema_version','4'")
+            .replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'", "")
             .replace(",'auditor','operator'", "")
             .replace("    team_id TEXT,\n", "")
             .replace(",'token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked'", "");
@@ -2395,7 +2515,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2428,7 +2548,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

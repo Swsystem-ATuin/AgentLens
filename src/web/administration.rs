@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 const PASSWORD: &str = "Synthetic1-password";
 
-async fn fixture() -> (tempfile::TempDir, StateStore, Router) {
+pub(super) async fn fixture() -> (tempfile::TempDir, StateStore, Router) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("password");
     std::fs::write(&path, PASSWORD).unwrap();
@@ -37,7 +37,7 @@ async fn fixture() -> (tempfile::TempDir, StateStore, Router) {
     let app = session_router(pool, state.clone());
     (dir, state, app)
 }
-async fn get(app: &Router, cookie: &str, path: &str) -> (StatusCode, String) {
+pub(super) async fn get(app: &Router, cookie: &str, path: &str) -> (StatusCode, String) {
     let response = app
         .clone()
         .oneshot(
@@ -53,7 +53,7 @@ async fn get(app: &Router, cookie: &str, path: &str) -> (StatusCode, String) {
     let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
 }
-fn csrf(html: &str) -> String {
+pub(super) fn csrf(html: &str) -> String {
     html.split("name=\"csrf_token\" value=\"")
         .nth(1)
         .expect("admin form CSRF token")
@@ -72,7 +72,7 @@ fn command(operation: Operation, target: &str, confirmation: &str, value: &str) 
         new_password: String::new(),
     }
 }
-async fn account_command(
+pub(super) async fn account_command(
     state: &StateStore,
     username: &str,
     operation: Operation,
@@ -84,7 +84,13 @@ async fn account_command(
     cmd.expected = target.version();
     cmd
 }
-async fn post(app: &Router, cookie: &str, csrf: &str, password: &str, cmd: &Command) -> Response {
+pub(super) async fn post(
+    app: &Router,
+    cookie: &str,
+    csrf: &str,
+    password: &str,
+    cmd: &Command,
+) -> Response {
     let body = [
         ("csrf_token", csrf),
         ("current_password", password),
@@ -719,7 +725,7 @@ async fn v6_migration_preserves_identity_sessions_tokens_teams_grants_and_prefer
         .fetch_one(&state.auth.pool)
         .await
         .unwrap(),
-        "7"
+        "8"
     );
     assert!(
         sqlx::query("PRAGMA foreign_key_check")

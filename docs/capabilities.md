@@ -26,4 +26,4 @@ The capability set supports intersection with an explicit credential ceiling. [P
 
 ## Verification and deployment
 
-Run `bash scripts/check.sh`. The suite verifies all four roles, credential ceilings, unsupported methods, unknown/reserved routes, metrics Basic authorization, browser administration, and source isolation. Role, team membership, and grant changes take effect on the next request. Schema v7 adds administrative audit facts while preserving existing roles and teams; no source refresh or index rebuild is required. Restart after deploying.
+Run `bash scripts/check.sh`. The suite verifies all four roles, credential ceilings, unsupported methods, unknown/reserved routes, metrics authorization, administration, MFA enrollment gates, and source isolation. Role, team, grant, and MFA changes take effect on the next request. [Schema v8](totp-mfa.md) preserves existing roles, teams, and audits while adding optional/required MFA. No source refresh or index rebuild is required; restart after deploying.

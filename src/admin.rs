@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS admin_events (
     actor_id TEXT NOT NULL,
     account_id TEXT,
     team_id TEXT,
-    operation TEXT NOT NULL CHECK(operation IN ('create_account','enable','disable','set_role','reset_password','revoke_sessions','grant_source','revoke_source','revoke_token','create_team','rename_team','delete_team','add_member','remove_member','grant_team_source','revoke_team_source')),
+    operation TEXT NOT NULL CHECK(operation IN ('create_account','enable','disable','set_role','reset_password','revoke_sessions','grant_source','revoke_source','revoke_token','create_team','rename_team','delete_team','add_member','remove_member','grant_team_source','revoke_team_source','require_mfa','release_mfa','reset_mfa')),
     subject TEXT NOT NULL,
     before_value TEXT NOT NULL,
     after_value TEXT NOT NULL,
@@ -24,6 +24,29 @@ CREATE INDEX IF NOT EXISTS idx_admin_events_time ON admin_events(occurred_at DES
 CREATE INDEX IF NOT EXISTS idx_security_events_time ON security_events(occurred_at DESC,id DESC);
 CREATE TRIGGER IF NOT EXISTS admin_events_no_update BEFORE UPDATE ON admin_events BEGIN SELECT RAISE(ABORT,'administration events are append-only'); END;
 "#;
+
+pub(crate) async fn migrate(pool: &sqlx::SqlitePool) -> Result<()> {
+    let schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='admin_events'",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("inspect administrative audit vocabulary")?;
+    if schema.is_none_or(|s| s.contains("'require_mfa'")) {
+        return Ok(());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin MFA administrative audit migration")?;
+    sqlx::raw_sql("DROP TRIGGER admin_events_no_update; DROP INDEX idx_admin_events_time; ALTER TABLE admin_events RENAME TO admin_events_legacy;").execute(&mut *tx).await.context("prepare MFA audit vocabulary")?;
+    sqlx::raw_sql(SCHEMA)
+        .execute(&mut *tx)
+        .await
+        .context("expand administrative audit vocabulary")?;
+    sqlx::raw_sql("INSERT INTO admin_events SELECT * FROM admin_events_legacy; DROP TABLE admin_events_legacy;").execute(&mut *tx).await.context("preserve administrative audit facts")?;
+    tx.commit().await.context("commit MFA audit migration")
+}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +67,9 @@ pub(crate) enum Operation {
     RemoveMember,
     GrantTeamSource,
     RevokeTeamSource,
+    RequireMfa,
+    ReleaseMfa,
+    ResetMfa,
 }
 impl Operation {
     pub(crate) fn as_str(self) -> &'static str {
@@ -64,6 +90,9 @@ impl Operation {
             Self::RemoveMember => "remove_member",
             Self::GrantTeamSource => "grant_team_source",
             Self::RevokeTeamSource => "revoke_team_source",
+            Self::RequireMfa => "require_mfa",
+            Self::ReleaseMfa => "release_mfa",
+            Self::ResetMfa => "reset_mfa",
         }
     }
     fn team(self) -> bool {
@@ -99,21 +128,26 @@ pub(crate) struct Account {
     pub(crate) role: String,
     pub(crate) enabled: bool,
     pub(crate) generation: i64,
+    pub(crate) mfa_required: bool,
+    pub(crate) mfa_enrolled: bool,
 }
 impl Account {
     pub(crate) fn version(&self) -> String {
-        format!("{}:{}:{}", self.role, self.enabled, self.generation)
+        format!(
+            "{}:{}:{}:{}:{}",
+            self.role, self.enabled, self.generation, self.mfa_required, self.mfa_enrolled
+        )
     }
 }
 
 pub(crate) async fn accounts(auth: &AuthState, offset: i64, limit: i64) -> Result<Vec<Account>> {
-    sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation FROM accounts ORDER BY username COLLATE NOCASE,id LIMIT ? OFFSET ?")
+    sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts ORDER BY username COLLATE NOCASE,id LIMIT ? OFFSET ?")
         .bind(limit).bind(offset).fetch_all(&auth.pool).await.context("list administrative accounts")
 }
 
 pub(crate) async fn account(auth: &AuthState, id: &str) -> Result<Option<Account>> {
     sqlx::query_as(
-        "SELECT id,username,role,enabled,session_generation AS generation FROM accounts WHERE id=?",
+        "SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts WHERE id=?",
     )
     .bind(id)
     .fetch_optional(&auth.pool)
@@ -194,6 +228,14 @@ pub(crate) async fn execute(
         Capabilities::for_role(role).permits(Capability::AccountsAdminister),
         "administrator capability no longer available"
     );
+    let mfa_required:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND required=1 AND secret IS NULL)").bind(&actor.id).fetch_one(&mut *tx).await.context("recheck administrator MFA enrollment gate")?;
+    ensure!(
+        !mfa_required,
+        "administrator must complete required MFA enrollment"
+    );
+    if matches!(command.operation, Operation::RequireMfa) {
+        crate::mfa::prepare_key(auth, &mut tx).await?;
+    }
 
     let mut facts = Facts {
         account_id: None,
@@ -242,7 +284,7 @@ pub(crate) async fn execute(
     } else if command.operation.team() {
         team_change(&mut tx, &command, &mut facts).await?
     } else {
-        let target: Account=sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation FROM accounts WHERE id=?")
+        let target: Account=sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts WHERE id=?")
             .bind(&command.target).fetch_optional(&mut *tx).await.context("resolve administrative target")?.context("target account not found")?;
         ensure!(
             command.confirmation == target.username,
@@ -289,6 +331,27 @@ async fn account_change(
 ) -> Result<SecurityEvent> {
     let id = &target.id;
     Ok(match command.operation {
+        Operation::RequireMfa | Operation::ReleaseMfa | Operation::ResetMfa => {
+            facts.before = format!(
+                "required:{},enrolled:{}",
+                target.mfa_required, target.mfa_enrolled
+            );
+            if matches!(command.operation, Operation::ResetMfa) {
+                crate::mfa::reset_in_transaction(tx, id).await?;
+                facts.after = format!("required:{},enrolled:false", target.mfa_required);
+            } else {
+                let required = matches!(command.operation, Operation::RequireMfa);
+                sqlx::query("INSERT INTO account_mfa(account_id,required) VALUES(?,?) ON CONFLICT(account_id) DO UPDATE SET required=excluded.required")
+                    .bind(id).bind(required).execute(&mut **tx).await.context("set mandatory MFA enrollment policy")?;
+                facts.after = format!("required:{required},enrolled:{}", target.mfa_enrolled);
+            }
+            crate::mfa::invalidate(tx, id).await?;
+            match command.operation {
+                Operation::RequireMfa => SecurityEvent::MfaRequired,
+                Operation::ReleaseMfa => SecurityEvent::MfaReleased,
+                _ => SecurityEvent::MfaReset,
+            }
+        }
         Operation::Enable | Operation::Disable => {
             let enabled = matches!(command.operation, Operation::Enable);
             facts.before = target.enabled.to_string();

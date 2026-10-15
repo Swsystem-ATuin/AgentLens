@@ -15,6 +15,7 @@ base64 = "0.22"
 blake3 = "1"
 chrono = "0.4"
 chrono-tz = "0.10"
+chacha20poly1305 = "0.10.1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 password-hash = { version = "0.5", features = ["getrandom"] }
@@ -29,6 +30,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tower-sessions = "0.14"
 tower-sessions-sqlx-store = { version = "0.15", features = ["sqlite"] }
+totp-rs = { version = "5.7", features = ["otpauth"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"

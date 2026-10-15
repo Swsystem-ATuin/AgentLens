@@ -4,6 +4,8 @@ Signed-in users manage personal access tokens at `/account/tokens`. Creating a t
 
 ## Automation endpoints and scopes
 
+With [MFA](totp-mfa.md), token creation also requires a current authenticator or recovery code. Existing tokens are revoked when enrollment, enforcement, recovery-code replacement, or reset changes credential generation. Required-but-unenrolled accounts cannot create or authenticate tokens. Newly created tokens remain noninteractive read credentials: they do not require a factor per request and replace password-only metrics Basic authentication for MFA accounts.
+
 The initial automation use cases are Prometheus scraping, collecting redacted per-session reports, and polling source observation status. Each token has exactly one read scope:
 
 | Scope | Accepted GET/HEAD endpoint | Response | Account requirement |
@@ -49,6 +51,6 @@ Authorized tokens are limited to 60 requests per UTC calendar minute, with the b
 
 ## Deployment and verification
 
-Back up the stopped persistent state database before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v6 through [schema v7](browser-administration.md), preserving tokens and retained history. Restart the web service; no source refresh or index rebuild is required. Direct and team grants are rechecked for tokens just as for browser sessions. On the development host, restart `agent-lens.service` whenever the debug executable is replaced.
+Back up stopped state and its MFA keyring before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v7 through [schema v8](totp-mfa.md), preserving tokens and retained history. Restart; no source refresh or index rebuild is required. Direct and team grants are rechecked for tokens as for browser sessions. On this host, restart `agent-lens.service` whenever the debug executable is replaced.
 
 Run `bash scripts/check.sh`. Synthetic tests cover storage without bearer values, one-time reveal, unknown digest versions, scope/role denial, source isolation, cookie precedence, duplicate headers, CSRF, password confirmation, escaped descriptions, account isolation, expiry, revocation, disable/re-enable, stale confirmation, rate and creation limits, retention, bounded pagination, audit events, and v4 migration. Tests use temporary databases and synthetic credentials.

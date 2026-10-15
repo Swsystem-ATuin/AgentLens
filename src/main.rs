@@ -8,6 +8,7 @@ mod health;
 mod identity;
 mod ingest;
 mod metrics;
+mod mfa;
 mod postmortem;
 mod preferences;
 mod projects;
@@ -34,6 +35,9 @@ struct Cli {
         default_value = "agent-lens-state.sqlite"
     )]
     state_database: PathBuf,
+    /// Owner-only MFA encryption keyring; defaults beside the persistent state database.
+    #[arg(long, env = "AGENT_LENS_MFA_KEY_FILE")]
+    mfa_key_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -80,6 +84,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// Recover lost MFA without removing an administrator's enrollment requirement.
+    ResetMfa {
+        #[arg(long)]
+        username: String,
+    },
+    /// Rotate the encryption key and rewrap enrolled and pending MFA secrets.
+    RotateMfaKey,
     /// Create a locally managed application account.
     Create {
         #[arg(long)]
@@ -209,6 +220,16 @@ enum TeamCommand {
     },
 }
 
+async fn open_state(
+    path: &std::path::Path,
+    key: Option<&std::path::Path>,
+) -> Result<auth::StateStore> {
+    match key {
+        Some(key) => auth::StateStore::open_with_mfa_key(path, Some(key)).await,
+        None => auth::StateStore::open(path).await,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -262,8 +283,24 @@ async fn main() -> Result<()> {
             print!("{}", health::cli_report(&pool).await?);
         }
         Command::Account { command } => {
-            let state = auth::StateStore::open(&cli.state_database).await?;
+            let state = if matches!(command, AccountCommand::ResetMfa { .. }) {
+                auth::StateStore::open_for_mfa_recovery(
+                    &cli.state_database,
+                    cli.mfa_key_file.as_deref(),
+                )
+                .await?
+            } else {
+                open_state(&cli.state_database, cli.mfa_key_file.as_deref()).await?
+            };
             match command {
+                AccountCommand::ResetMfa { username } => {
+                    mfa::cli_reset(&state.auth, &username).await?;
+                    println!("MFA reset; credentials revoked; enrollment requirement preserved");
+                }
+                AccountCommand::RotateMfaKey => {
+                    mfa::rotate_key(&state.auth).await?;
+                    println!("MFA encryption key rotated; existing secrets rewrapped");
+                }
                 AccountCommand::Create {
                     username,
                     password_file,
@@ -332,7 +369,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Team { command } => {
-            let state = auth::StateStore::open(&cli.state_database).await?;
+            let state = open_state(&cli.state_database, cli.mfa_key_file.as_deref()).await?;
             match command {
                 TeamCommand::Create { name } => {
                     println!("team: {}", access::create(&state, &name).await?)
@@ -395,7 +432,7 @@ async fn main() -> Result<()> {
             if local {
                 web::validate_local_bind(&bind)?;
             }
-            let mut state = auth::StateStore::open(&cli.state_database).await?;
+            let mut state = open_state(&cli.state_database, cli.mfa_key_file.as_deref()).await?;
             if local {
                 state.enable_local_mode();
             } else {

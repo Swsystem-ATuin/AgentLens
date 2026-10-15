@@ -8,6 +8,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .current_dir(root)
         .env_remove("AGENT_LENS_DB")
         .env_remove("AGENT_LENS_STATE_DB")
+        .env_remove("AGENT_LENS_MFA_KEY_FILE")
         .env_remove("AGENT_LENS_SECURE_COOKIES")
         .env_remove("AGENT_LENS_PROJECTS_FILE")
         .env_remove("AGENT_LENS_DATA")
@@ -18,6 +19,99 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[tokio::test]
+async fn mfa_cli_rotates_custom_keys_and_recovers_missing_keys_without_touching_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let password = dir.path().join("password");
+    std::fs::write(&password, "Synthetic1-password").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "account",
+                "create",
+                "--username",
+                "admin",
+                "--password-file",
+                "password"
+            ]
+        )
+        .status
+        .success()
+    );
+    let rotated = run(
+        dir.path(),
+        &[
+            "--mfa-key-file",
+            "custom.mfa-keys.json",
+            "account",
+            "rotate-mfa-key",
+        ],
+    );
+    assert!(
+        rotated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rotated.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(rotated.stdout).unwrap().trim(),
+        "MFA encryption key rotated; existing secrets rewrapped"
+    );
+    assert!(dir.path().join("custom.mfa-keys.json").exists());
+    assert!(!dir.path().join("agent-lens-state.mfa-keys.json").exists());
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        dir.path().join("agent-lens-state.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO account_mfa(account_id,required,secret) SELECT id,1,'synthetic-unreadable-ciphertext' FROM accounts WHERE username='admin'").execute(&pool).await.unwrap();
+    std::fs::rename(
+        dir.path().join("custom.mfa-keys.json"),
+        dir.path().join("saved-keyring.json"),
+    )
+    .unwrap();
+    assert!(
+        !run(
+            dir.path(),
+            &[
+                "--mfa-key-file",
+                "custom.mfa-keys.json",
+                "account",
+                "permissions",
+                "--username",
+                "admin"
+            ]
+        )
+        .status
+        .success()
+    );
+    let reset = run(
+        dir.path(),
+        &[
+            "--mfa-key-file",
+            "custom.mfa-keys.json",
+            "account",
+            "reset-mfa",
+            "--username",
+            "admin",
+        ],
+    );
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let status:(bool,bool,i64)=sqlx::query_as("SELECT m.required,m.secret IS NOT NULL,a.session_generation FROM account_mfa m JOIN accounts a ON a.id=m.account_id").fetch_one(&pool).await.unwrap();
+    assert_eq!(status, (true, false, 1));
+    assert!(!dir.path().join("agent-lens.sqlite").exists());
+}
+
 #[test]
 fn serve_help_documents_loopback_port_and_session_options() {
     let dir = tempfile::tempdir().unwrap();
@@ -25,6 +119,7 @@ fn serve_help_documents_loopback_port_and_session_options() {
     assert!(root.status.success());
     let root_output = String::from_utf8(root.stdout).unwrap();
     assert!(root_output.contains("--state-database"));
+    assert!(root_output.contains("--mfa-key-file"));
     assert!(root_output.contains("AGENT_LENS_STATE_DB"));
     assert!(root_output.contains("account"));
     let result = run(dir.path(), &["serve", "--help"]);

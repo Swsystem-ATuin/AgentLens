@@ -12,17 +12,20 @@
 <label>Initial password<input type="password" name="new_password" required minlength="7" maxlength="1024" autocomplete="new-password"></label>
 <label>Type the new username to confirm<input name="confirmation" required maxlength="64" autocomplete="off"></label>
 <label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<label>Your authenticator or recovery code (if MFA enrolled)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label>
 <p>Passwords need at least 7 characters including uppercase, lowercase, a number, and a symbol. Deliver initial credentials through a separate trusted channel; no email is sent.</p><button type="submit">Create confirmed account</button></form>
 {% endif %}
 {% if let Some(row) = account %}
-<h2>Account: {{ row.username }}</h2><p><code>{{ row.id }}</code> · {{ row.role }} · enabled: {{ row.enabled }}</p>
+<h2>Account: {{ row.username }}</h2><p><code>{{ row.id }}</code> · {{ row.role }} · enabled: {{ row.enabled }} · MFA enrolled: {{ row.mfa_enrolled }} · MFA required: {{ row.mfa_required }}</p>
 <form method="post" action="/admin/actions" class="account-options">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="target" value="{{ row.id }}"><input type="hidden" name="expected" value="{{ row.version() }}">
-<label>Operation<select name="operation"><option value="enable">Enable account</option><option value="disable">Disable account and revoke all credentials</option><option value="set_role">Set role</option><option value="reset_password">Reset password and revoke all credentials</option><option value="revoke_sessions">Revoke all browser sessions and tokens</option><option value="grant_source">Add direct source grant</option><option value="revoke_source">Remove direct source grant</option><option value="revoke_token">Revoke one token</option></select></label>
+<label>Operation<select name="operation"><option value="enable">Enable account</option><option value="disable">Disable account and revoke all credentials</option><option value="set_role">Set role</option><option value="reset_password">Reset password and revoke all credentials</option><option value="revoke_sessions">Revoke all browser sessions and tokens</option><option value="grant_source">Add direct source grant</option><option value="revoke_source">Remove direct source grant</option><option value="revoke_token">Revoke one token</option><option value="require_mfa">Require MFA enrollment</option><option value="release_mfa">Remove MFA requirement (does not disable enrolled MFA)</option><option value="reset_mfa">Reset MFA for recovery (preserves requirement)</option></select></label>
 <label>Value: role, stable source ID, or public token ID (only for the matching operation)<input name="value" maxlength="128" autocomplete="off"></label>
 <label>Replacement password (password reset only)<input type="password" name="new_password" maxlength="1024" autocomplete="new-password"></label>
 <label>Type {{ row.username }} to confirm this account<input name="confirmation" required maxlength="64" autocomplete="off"></label>
 <label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<label>Your authenticator or recovery code (if MFA enrolled)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label>
+<p>MFA policy changes and resets revoke the target's sessions and tokens. Required but unenrolled users can only set up MFA or sign out. Resetting MFA never removes its requirement.</p>
 <p>Role values: admin, viewer, auditor, operator. Source IDs are available on Source health. A password reset replaces the credential immediately; communicate it separately through a trusted channel. No reset link or notification is sent.</p>
 <button type="submit">Apply confirmed account operation</button></form>
 <h3>Source grant origins</h3><table><thead><tr><th>Source</th><th>Origin</th><th>Team</th></tr></thead><tbody>{% for grant in grants %}<tr><td><code>{{ grant.source_key }}</code></td><td>{{ grant.origin }}</td><td>{% if let Some(id) = grant.team_id %}<a href="/admin/teams/{{ id }}">{{ id }}</a>{% else %}Direct{% endif %}</td></tr>{% endfor %}</tbody></table>
@@ -33,7 +36,7 @@
 <h2>Create team</h2><form method="post" action="/admin/actions" class="account-options">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="operation" value="create_team">
 <label>Team name<input name="target" required maxlength="80" autocomplete="off"></label><label>Type the new team name to confirm<input name="confirmation" required maxlength="80" autocomplete="off"></label>
-<label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label><button type="submit">Create confirmed team</button></form>
+<label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label><label>Your authenticator or recovery code (if MFA enrolled)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label><button type="submit">Create confirmed team</button></form>
 {% endif %}
 {% if let Some(row) = team %}
 <h2>Team: {{ row.name }}</h2><p><code>{{ row.id }}</code></p>
@@ -42,6 +45,7 @@
 <label>Operation<select name="operation"><option value="rename_team">Rename team</option><option value="delete_team">Delete team and all its grants/memberships</option><option value="add_member">Add member</option><option value="remove_member">Remove member</option><option value="grant_team_source">Add team source grant</option><option value="revoke_team_source">Remove team source grant</option></select></label>
 <label>Value: replacement name, member username, or stable source ID (only for the matching operation)<input name="value" maxlength="128" autocomplete="off"></label>
 <label>Type {{ row.name }} to confirm this team<input name="confirmation" required maxlength="80" autocomplete="off"></label><label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<label>Your authenticator or recovery code (if MFA enrolled)<input name="mfa_code" autocomplete="one-time-code" maxlength="32"></label>
 <p>Teams grant sources, not roles. Removal preserves independent direct and other-team grants. Team deletion is immediate.</p><button type="submit">Apply confirmed team operation</button></form>
 <h3>Members</h3><ul>{% for member in members %}<li>{{ member }}</li>{% endfor %}</ul><h3>Sources</h3><ul>{% for source in sources %}<li><code>{{ source }}</code></li>{% endfor %}</ul>
 {% endif %}
