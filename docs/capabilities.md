@@ -12,11 +12,11 @@ The shared policy in `src/authorization.rs` maps live account roles to typed cap
 | AuditSelfRead | Own | Own | Own | Own | Session inventory and security history |
 | SourceRefresh | No | No | No | No | Reserved for a future authenticated refresh surface |
 | AnnotationsWrite | No | No | No | No | Reserved for future annotations |
-| AccountsAdminister | No | No | No | No | Reserved for browser administration |
-| AuditRead | No | No | No | No | Reserved for installation-wide audit review |
+| AccountsAdminister | Yes | No | No | No | Confirmed, CSRF-protected account and team administration |
+| AuditRead | Yes | No | No | No | Bounded installation security and administration history |
 | TokensManage | Own | Own | Own | Own | Personal access token creation, listing, and revocation |
 
-Reserved capabilities have no HTTP routes or browser grants. Local administrator CLI commands continue to use filesystem access to the state database as their recovery boundary. Capability names establish the vocabulary for later roadmap work without enabling that work.
+Source refresh and annotation capabilities remain reserved without HTTP grants. [Browser administration](browser-administration.md) uses recent password confirmation, CSRF, transactional current-capability/session checks, and atomic audit facts. Local CLI commands retain their filesystem recovery boundary. Identity-free local mode cannot administer accounts or review their audit history.
 
 ## Source and account scope
 
@@ -26,4 +26,4 @@ The capability set supports intersection with an explicit credential ceiling. [P
 
 ## Verification and deployment
 
-Run `bash scripts/check.sh`. The normal test suite verifies the complete four-role matrix, every credential-ceiling intersection, unsupported methods, unknown and reserved routes, metrics Basic authorization, and source-isolation query/render/export regressions. Role, team membership, and grant changes take effect on the next request. Schema v6 migrates the account role vocabulary and teams automatically; no source refresh or index rebuild is required. Restart the web service after deploying the new binary.
+Run `bash scripts/check.sh`. The suite verifies all four roles, credential ceilings, unsupported methods, unknown/reserved routes, metrics Basic authorization, browser administration, and source isolation. Role, team membership, and grant changes take effect on the next request. Schema v7 adds administrative audit facts while preserving existing roles and teams; no source refresh or index rebuild is required. Restart after deploying.

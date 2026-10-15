@@ -8,6 +8,7 @@
 <p><a href="/account/sessions">Review sessions and security history</a></p>
 <p><a href="/account/tokens">Manage personal access tokens</a></p>
 <p><a href="/account/access">Explain my effective access</a></p>
+{% if can_administer %}<p><a href="/admin/accounts">Administer accounts and teams</a> · <a href="/admin/audit">Review installation security history</a></p>{% endif %}
 <h2>Profile</h2>
 {% if profile_saved %}<p class="success">Profile saved.</p>{% endif %}
 {% if profile_failed %}<p class="error">{{ profile_error }}</p>{% endif %}

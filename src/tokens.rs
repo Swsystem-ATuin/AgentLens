@@ -17,11 +17,15 @@ impl Default for AttemptBudget {
 
 impl AttemptBudget {
     pub(crate) fn accept(&self) -> bool {
+        self.accept_limit(600)
+    }
+
+    pub(crate) fn accept_limit(&self, limit: u32) -> bool {
         let mut window = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if window.0.elapsed().as_secs() >= 60 {
             *window = (Instant::now(), 0);
         }
-        if window.1 >= 600 {
+        if window.1 >= limit {
             return false;
         }
         window.1 += 1;

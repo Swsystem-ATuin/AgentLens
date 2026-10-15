@@ -64,6 +64,8 @@ impl Capabilities {
                 Capability::OperationsRead,
                 Capability::AllSourcesRead,
                 Capability::TokensManage,
+                Capability::AccountsAdminister,
+                Capability::AuditRead,
             ],
             AccountRole::Viewer => &[
                 Capability::ContentRead,
@@ -111,6 +113,8 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     let read = *method == Method::GET || *method == Method::HEAD;
     if read {
         match path {
+            "/admin/accounts" | "/admin/teams" => return Some(Capability::AccountsAdminister),
+            "/admin/audit" => return Some(Capability::AuditRead),
             "/account/tokens" => return Some(Capability::TokensManage),
             "/" => return Some(Capability::AccountSelfManage),
             "/sessions" | "/assets/live-reader.js" => return Some(Capability::ContentRead),
@@ -127,6 +131,7 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
         }
     } else if *method == Method::POST {
         match path {
+            "/admin/actions" => return Some(Capability::AccountsAdminister),
             "/account/tokens" => return Some(Capability::TokensManage),
             "/account/password"
             | "/account/preferences"
@@ -140,6 +145,8 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     }
     let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
     match parts.as_slice() {
+        ["admin", "accounts", id] if read && !id.is_empty() => Some(Capability::AccountsAdminister),
+        ["admin", "teams", id] if read && !id.is_empty() => Some(Capability::AccountsAdminister),
         ["account", "tokens", id] if !id.is_empty() && *method == Method::POST => {
             Some(Capability::TokensManage)
         }
@@ -205,7 +212,13 @@ mod tests {
                     && capability == Capability::ContentRead)
                     || (matches!(role, AccountRole::Admin | AccountRole::Operator)
                         && capability == Capability::OperationsRead)
-                    || (role == AccountRole::Admin && capability == Capability::AllSourcesRead);
+                    || (role == AccountRole::Admin
+                        && matches!(
+                            capability,
+                            Capability::AllSourcesRead
+                                | Capability::AccountsAdminister
+                                | Capability::AuditRead
+                        ));
                 assert_eq!(
                     account.permits(capability),
                     expected,

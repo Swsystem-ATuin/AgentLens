@@ -116,6 +116,9 @@ pub(super) async fn create(
     {
         return Err(WebError::forbidden());
     }
+    if !state.auth.accept_password_attempt() {
+        return Ok(crate::auth::password_rate_limited());
+    }
     let confirmed = state
         .auth
         .authenticate(&user.username, &form.current_password)

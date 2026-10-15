@@ -94,7 +94,7 @@ pub(crate) struct GrantOrigin {
     pub(crate) team_id: Option<String>,
 }
 
-fn name(value: &str) -> Result<&str> {
+pub(crate) fn name(value: &str) -> Result<&str> {
     ensure!(
         !value.chars().any(char::is_control),
         "team name must not contain control characters"
@@ -292,7 +292,7 @@ pub(crate) async fn grant_origins(
         .bind(account_id).bind(account_id).bind(limit.unwrap_or(-1)).bind(offset).fetch_all(pool).await.context("explain effective source access")
 }
 
-async fn event(
+pub(crate) async fn event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     account_id: Option<&str>,
     team_id: &str,

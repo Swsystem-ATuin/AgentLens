@@ -1,6 +1,6 @@
 # Personal access tokens
 
-Signed-in users manage personal access tokens at `/account/tokens`. Creating a token requires the current password and a session-bound CSRF token. Revocation is an account-scoped, CSRF-protected POST. Local loopback mode has no token-owning identity and redirects management to the Account page.
+Signed-in users manage personal access tokens at `/account/tokens`. Creating a token requires the current password and a session-bound CSRF token. Password confirmation shares the [process-wide password-attempt budget](browser-administration.md). Revocation is an account-scoped, CSRF-protected POST. Administrators can inspect metadata and revoke another account's tokens through the audited browser surface, never reveal their secrets. Local mode has no token-owning identity and redirects management to Account.
 
 ## Automation endpoints and scopes
 
@@ -49,6 +49,6 @@ Authorized tokens are limited to 60 requests per UTC calendar minute, with the b
 
 ## Deployment and verification
 
-Back up the stopped persistent state database before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v5 through [schema v6](teams-and-roles.md), preserving tokens and retained audit history. Restart the web service; no source refresh or index rebuild is required. Direct and team source grants are rechecked for tokens just as for browser sessions. On the development host, restart `agent-lens.service` whenever the debug executable is replaced.
+Back up the stopped persistent state database before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v6 through [schema v7](browser-administration.md), preserving tokens and retained history. Restart the web service; no source refresh or index rebuild is required. Direct and team grants are rechecked for tokens just as for browser sessions. On the development host, restart `agent-lens.service` whenever the debug executable is replaced.
 
 Run `bash scripts/check.sh`. Synthetic tests cover storage without bearer values, one-time reveal, unknown digest versions, scope/role denial, source isolation, cookie precedence, duplicate headers, CSRF, password confirmation, escaped descriptions, account isolation, expiry, revocation, disable/re-enable, stale confirmation, rate and creation limits, retention, bounded pagination, audit events, and v4 migration. Tests use temporary databases and synthetic credentials.

@@ -38,7 +38,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','6');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','7');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -101,6 +101,7 @@ pub struct AuthState {
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
     token_attempts: crate::tokens::AttemptBudget,
+    password_attempts: crate::tokens::AttemptBudget,
     #[cfg(test)]
     test_digest: Option<[u8; 32]>,
 }
@@ -367,7 +368,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 6,
+                schema_version <= 7,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -401,6 +402,15 @@ impl StateStore {
             .execute(&pool)
             .await
             .context("migrate team access policy")?;
+        sqlx::raw_sql(crate::admin::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate browser administration audit")?;
+        sqlx::query("DELETE FROM admin_events WHERE occurred_at<unixepoch()-?")
+            .bind(SECURITY_RETENTION_DAYS * 86_400)
+            .execute(&pool)
+            .await
+            .context("expire administrative audit history")?;
         sqlx::raw_sql(crate::tokens::SCHEMA)
             .execute(&pool)
             .await
@@ -411,7 +421,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='6' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='7' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -443,6 +453,7 @@ impl StateStore {
                 dummy_hash,
                 absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
                 token_attempts: crate::tokens::AttemptBudget::default(),
+                password_attempts: crate::tokens::AttemptBudget::default(),
                 #[cfg(test)]
                 test_digest: None,
             },
@@ -1061,6 +1072,9 @@ pub async fn revoke_sessions(state: &StateStore, username: &str) -> Result<()> {
 }
 
 impl AuthState {
+    pub(crate) fn accept_password_attempt(&self) -> bool {
+        self.password_attempts.accept_limit(60)
+    }
     pub(crate) async fn token_account(
         &self,
         account_id: &str,
@@ -1476,6 +1490,9 @@ pub async fn require_auth(
             if request.uri().path() == "/metrics"
                 && let Some((username, password)) = basic_credentials(&request)
             {
+                if !auth.accept_password_attempt() {
+                    return password_rate_limited();
+                }
                 match auth.authenticate(&username, &password).await {
                     Ok(Some((user, _))) => {
                         if !user
@@ -1526,6 +1543,15 @@ fn token_unauthenticated() -> Response {
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"Agent Lens API\"")],
         JsonError("authentication_required"),
+    )
+        .into_response()
+}
+
+pub(crate) fn password_rate_limited() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, "60")],
+        "Authentication attempt limit reached. Try again later.",
     )
         .into_response()
 }
@@ -1625,7 +1651,7 @@ fn basic_credentials(request: &Request) -> Option<(String, String)> {
     Some((username.to_owned(), password.to_owned()))
 }
 
-fn validate_username(username: &str) -> Result<&str> {
+pub(crate) fn validate_username(username: &str) -> Result<&str> {
     ensure!(
         (1..=64).contains(&username.len()),
         "username must contain 1 to 64 characters"
@@ -1649,7 +1675,7 @@ pub(crate) fn validate_source_key(source_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_role(role: &str) -> Result<AccountRole> {
+pub(crate) fn parse_role(role: &str) -> Result<AccountRole> {
     match role {
         "admin" => Ok(AccountRole::Admin),
         "viewer" => Ok(AccountRole::Viewer),
@@ -1694,7 +1720,7 @@ async fn insert_security_event_pool(
     transaction.commit().await.context("commit security event")
 }
 
-async fn revoke_inventory_in_transaction(
+pub(crate) async fn revoke_inventory_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     account_id: &str,
 ) -> Result<()> {
@@ -1836,7 +1862,7 @@ fn read_password(path: &Path) -> Result<String> {
     Ok(password)
 }
 
-fn validate_password(password: &str) -> std::result::Result<(), PasswordPolicyError> {
+pub(crate) fn validate_password(password: &str) -> std::result::Result<(), PasswordPolicyError> {
     if password.chars().count() < MIN_PASSWORD_CHARS {
         return Err(PasswordPolicyError::TooShort);
     }
@@ -1870,7 +1896,7 @@ fn password_hasher() -> Result<Argon2<'static>> {
     Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
-fn hash_password(password: &str) -> Result<String> {
+pub(crate) fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     password_hasher()?
         .hash_password(password.as_bytes(), &salt)
@@ -1958,6 +1984,7 @@ pub fn test_state(credentials: Credentials) -> AuthState {
         dummy_hash: String::new(),
         absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
         token_attempts: crate::tokens::AttemptBudget::default(),
+        password_attempts: crate::tokens::AttemptBudget::default(),
         test_digest: Some(credentials.digest),
     }
 }
@@ -2339,7 +2366,7 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','6'", "'schema_version','4'")
+            .replace("'schema_version','7'", "'schema_version','4'")
             .replace(",'auditor','operator'", "")
             .replace("    team_id TEXT,\n", "")
             .replace(",'token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked'", "");
@@ -2368,7 +2395,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2401,7 +2428,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

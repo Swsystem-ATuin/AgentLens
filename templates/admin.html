@@ -1,0 +1,53 @@
+{% extends "base.html" %}{% block title %}Administration · Agent Lens{% endblock %}{% block content %}
+<h1>Administration</h1>
+<nav aria-label="Administration"><a href="/admin/accounts">Accounts</a> · <a href="/admin/teams">Teams</a> · <a href="/admin/audit">Security and administration history</a> · <a href="/account">My account</a></nav>
+<p>Changes require your current password and a typed confirmation of the exact target name. Reload a target after any change. The last enabled administrator cannot be disabled or demoted. Local CLI recovery remains available.</p>
+{% if section == "accounts" %}
+<h2>Accounts</h2><table><thead><tr><th>Username</th><th>Role</th><th>Enabled</th></tr></thead><tbody>{% for row in accounts %}<tr><td><a href="/admin/accounts/{{ row.id }}">{{ row.username }}</a></td><td>{{ row.role }}</td><td>{{ row.enabled }}</td></tr>{% endfor %}</tbody></table>
+<h2>Create account</h2>
+<form method="post" action="/admin/actions" class="account-options">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="operation" value="create_account">
+<label>New username<input name="target" required maxlength="64" autocomplete="off"></label>
+<label>Role<select name="value"><option value="viewer">Viewer</option><option value="auditor">Auditor</option><option value="operator">Operator</option><option value="admin">Administrator</option></select></label>
+<label>Initial password<input type="password" name="new_password" required minlength="7" maxlength="1024" autocomplete="new-password"></label>
+<label>Type the new username to confirm<input name="confirmation" required maxlength="64" autocomplete="off"></label>
+<label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<p>Passwords need at least 7 characters including uppercase, lowercase, a number, and a symbol. Deliver initial credentials through a separate trusted channel; no email is sent.</p><button type="submit">Create confirmed account</button></form>
+{% endif %}
+{% if let Some(row) = account %}
+<h2>Account: {{ row.username }}</h2><p><code>{{ row.id }}</code> · {{ row.role }} · enabled: {{ row.enabled }}</p>
+<form method="post" action="/admin/actions" class="account-options">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="target" value="{{ row.id }}"><input type="hidden" name="expected" value="{{ row.version() }}">
+<label>Operation<select name="operation"><option value="enable">Enable account</option><option value="disable">Disable account and revoke all credentials</option><option value="set_role">Set role</option><option value="reset_password">Reset password and revoke all credentials</option><option value="revoke_sessions">Revoke all browser sessions and tokens</option><option value="grant_source">Add direct source grant</option><option value="revoke_source">Remove direct source grant</option><option value="revoke_token">Revoke one token</option></select></label>
+<label>Value: role, stable source ID, or public token ID (only for the matching operation)<input name="value" maxlength="128" autocomplete="off"></label>
+<label>Replacement password (password reset only)<input type="password" name="new_password" maxlength="1024" autocomplete="new-password"></label>
+<label>Type {{ row.username }} to confirm this account<input name="confirmation" required maxlength="64" autocomplete="off"></label>
+<label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<p>Role values: admin, viewer, auditor, operator. Source IDs are available on Source health. A password reset replaces the credential immediately; communicate it separately through a trusted channel. No reset link or notification is sent.</p>
+<button type="submit">Apply confirmed account operation</button></form>
+<h3>Source grant origins</h3><table><thead><tr><th>Source</th><th>Origin</th><th>Team</th></tr></thead><tbody>{% for grant in grants %}<tr><td><code>{{ grant.source_key }}</code></td><td>{{ grant.origin }}</td><td>{% if let Some(id) = grant.team_id %}<a href="/admin/teams/{{ id }}">{{ id }}</a>{% else %}Direct{% endif %}</td></tr>{% endfor %}</tbody></table>
+<h3>Personal access token oversight</h3><p>Only metadata is shown. Bearer values and digests are never available here.</p><table><thead><tr><th>Public ID</th><th>Description</th><th>Scope</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th></tr></thead><tbody>{% for token in tokens %}<tr><td><code>{{ token.id }}</code></td><td>{{ token.description }}</td><td>{{ token.scope }}</td><td>{{ token.created_at }}</td><td>{{ token.expires_at }}</td><td>{% if let Some(value) = token.last_used_at %}{{ value }}{% else %}Never{% endif %}</td><td>{{ token.status }}</td></tr>{% endfor %}</tbody></table>
+{% endif %}
+{% if section == "teams" %}
+<h2>Teams</h2><ul>{% for row in teams %}<li><a href="/admin/teams/{{ row.id }}">{{ row.name }}</a> <code>{{ row.id }}</code></li>{% endfor %}</ul>
+<h2>Create team</h2><form method="post" action="/admin/actions" class="account-options">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="operation" value="create_team">
+<label>Team name<input name="target" required maxlength="80" autocomplete="off"></label><label>Type the new team name to confirm<input name="confirmation" required maxlength="80" autocomplete="off"></label>
+<label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label><button type="submit">Create confirmed team</button></form>
+{% endif %}
+{% if let Some(row) = team %}
+<h2>Team: {{ row.name }}</h2><p><code>{{ row.id }}</code></p>
+<form method="post" action="/admin/actions" class="account-options">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="target" value="{{ row.id }}">
+<label>Operation<select name="operation"><option value="rename_team">Rename team</option><option value="delete_team">Delete team and all its grants/memberships</option><option value="add_member">Add member</option><option value="remove_member">Remove member</option><option value="grant_team_source">Add team source grant</option><option value="revoke_team_source">Remove team source grant</option></select></label>
+<label>Value: replacement name, member username, or stable source ID (only for the matching operation)<input name="value" maxlength="128" autocomplete="off"></label>
+<label>Type {{ row.name }} to confirm this team<input name="confirmation" required maxlength="80" autocomplete="off"></label><label>Your current password<input type="password" name="current_password" required maxlength="1024" autocomplete="current-password"></label>
+<p>Teams grant sources, not roles. Removal preserves independent direct and other-team grants. Team deletion is immediate.</p><button type="submit">Apply confirmed team operation</button></form>
+<h3>Members</h3><ul>{% for member in members %}<li>{{ member }}</li>{% endfor %}</ul><h3>Sources</h3><ul>{% for source in sources %}<li><code>{{ source }}</code></li>{% endfor %}</ul>
+{% endif %}
+{% if section == "audit" %}
+<h2>Security and administration history</h2><p>Retained for 180 days. Browser changes include actor, stable target IDs, subject, and allowlisted before/after facts. Ordinary security events may have no actor or before/after facts. Passwords, session-store identifiers, token secrets/digests, and transcript content are excluded.</p>
+<table><thead><tr><th>Time</th><th>Actor ID</th><th>Account ID</th><th>Team ID</th><th>Operation</th><th>Subject</th><th>Before</th><th>After</th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.occurred_at }}</td><td>{{ event.actor }}</td><td>{{ event.account }}</td><td>{{ event.team }}</td><td>{{ event.operation }}</td><td>{{ event.subject }}</td><td>{{ event.before_value }}</td><td>{{ event.after_value }}</td></tr>{% endfor %}</tbody></table>
+{% endif %}
+<nav class="pagination" aria-label="Administration pages">{% if let Some(href) = pagination.previous_href %}<a href="{{ href }}">← Previous</a>{% endif %}<span>Page {{ pagination.page }}</span>{% if let Some(href) = pagination.next_href %}<a href="{{ href }}">Next →</a>{% endif %}</nav>
+{% endblock %}

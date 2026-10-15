@@ -7,7 +7,7 @@ Agent Lens authorizes application accounts independently of the operating-system
 - `auditor` accounts can read scoped reports, not transcripts or their child routes; report metadata is not a PII-masking guarantee.
 - `operator` accounts have viewer content/report access plus installation-wide health and metrics, but no unrestricted source access or account administration.
 
-The first account must be `admin`; later accounts default to `viewer`. `account create --role admin|viewer|auditor|operator` selects a role explicitly. Pre-permission accounts migrate to `admin`, preserving visibility. There is no browser administration surface: role, team, and grant changes require local CLI access. The signed-in `/account/access` page explains one's own capabilities and grant origins. See [teams and roles](teams-and-roles.md) for exact capabilities, metadata disclosure, additive union semantics, and commands.
+The first account must be `admin`; later accounts default to `viewer`. `account create --role admin|viewer|auditor|operator` selects a role explicitly. Pre-permission accounts migrate to `admin`, preserving visibility. Administrators manage roles, teams, and grants through the local CLI or [audited browser administration](browser-administration.md). The signed-in `/account/access` page explains one's own capabilities and grant origins. See [teams and roles](teams-and-roles.md) for exact capabilities, disclosure, union semantics, and commands.
 
 ## Grant workflow
 

@@ -12,6 +12,9 @@ use sqlx::SqlitePool;
 use std::path::Path as FilePath;
 use tower_http::trace::TraceLayer;
 
+mod admin_pages;
+#[cfg(test)]
+mod administration;
 mod markdown;
 mod presentation;
 pub(crate) mod queries;
@@ -133,6 +136,7 @@ struct AccountTemplate {
     source_count: usize,
     csrf_token: String,
     local_mode: bool,
+    can_administer: bool,
     password_changed: bool,
     password_failed: bool,
     password_error: String,
@@ -407,6 +411,12 @@ fn app_routes(
         )
         .route("/account", get(account))
         .route("/account/access", get(account_access))
+        .route("/admin/accounts", get(admin_pages::accounts))
+        .route("/admin/accounts/{id}", get(admin_pages::account))
+        .route("/admin/teams", get(admin_pages::teams))
+        .route("/admin/teams/{id}", get(admin_pages::team))
+        .route("/admin/audit", get(admin_pages::audit))
+        .route("/admin/actions", post(admin_pages::mutate))
         .route("/account/tokens", get(token_pages::list).post(token_pages::create))
         .route("/account/tokens/{id}", post(token_pages::revoke))
         .route("/api/sessions/{id}/live-status", get(live_status))
@@ -583,6 +593,9 @@ async fn login_submit(
         return Err(WebError::invalid_auth_request());
     }
     let return_to = crate::auth::safe_return_to(&form.return_to).to_owned();
+    if !state.auth.accept_password_attempt() {
+        return Ok(crate::auth::password_rate_limited());
+    }
     if let Some((user, generation)) = state
         .auth
         .authenticate(&form.username, &form.password)
@@ -711,6 +724,10 @@ async fn render_account(
             source_count: user.access.source_count(),
             csrf_token,
             local_mode: state.auth.is_local_mode(),
+            can_administer: !state.auth.is_local_mode()
+                && user
+                    .access
+                    .permits(crate::authorization::Capability::AccountsAdminister),
             password_changed: notices.password_changed,
             password_failed: notices.password_error.is_some(),
             password_error: notices.password_error.unwrap_or_default().to_owned(),
@@ -738,6 +755,9 @@ async fn change_password(
         .map_err(|_| WebError::authentication("verify password change request"))?
     {
         return Err(WebError::invalid_auth_request());
+    }
+    if !state.auth.accept_password_attempt() {
+        return Ok(crate::auth::password_rate_limited());
     }
     let error = if form.new_password != form.confirm_password {
         Some("New password and confirmation do not match.")
@@ -2492,7 +2512,7 @@ mod tests {
         assert_eq!(login.headers()[header::LOCATION], "/sessions");
     }
 
-    async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
+    pub(super) async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
         login_cookie_with_agent(app, username, password, None).await
     }
 
@@ -3934,8 +3954,6 @@ mod tests {
         for cookie in [&admin_cookie, &viewer_cookie] {
             for path in [
                 "/future-data",
-                "/admin/accounts",
-                "/admin/audit",
                 "/account/tokens/future/action",
                 "/refresh",
                 "/annotations",

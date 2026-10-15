@@ -1,4 +1,5 @@
 mod access;
+mod admin;
 mod auth;
 mod authorization;
 mod db;

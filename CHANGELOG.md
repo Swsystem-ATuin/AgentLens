@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Audited browser administration now provisions accounts, manages enabled state, roles, direct/team grants and membership, resets credentials, revokes sessions/tokens, and reviews bounded security history. Every mutation requires CSRF, a fresh password confirmation, exact-target confirmation, transactional actor/session checks, and atomic before/after facts in schema v7. Shared password-attempt throttling avoids automatic account lockouts and preserves local CLI recovery.
+
 - Stable-ID teams, additive direct/team source grants, auditor and operator capabilities, local team-management commands, and a bounded own-access explanation page. State schema v6 preserves existing identities, sessions, preferences, tokens, and grants, audits team changes, and prevents disabling, deleting, or demoting the last enabled administrator.
 
 - Personal access tokens now support one-time bearer reveal, digest-only persistent storage, bounded expiry, read scopes for metrics/redacted postmortems/live status, current account/source permission checks, password-confirmed and CSRF-protected creation, revocation, rate limits, bounded listing, retention, and audited schema-v5 migration.
