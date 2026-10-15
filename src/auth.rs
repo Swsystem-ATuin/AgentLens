@@ -38,7 +38,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','8');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','9');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT REFERENCES accounts(id),
     team_id TEXT,
-    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked','mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked','mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated','passkey_added','passkey_used','passkey_removed')),
     occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
@@ -98,6 +98,7 @@ CREATE TRIGGER IF NOT EXISTS security_events_no_update BEFORE UPDATE ON security
 pub struct AuthState {
     pub(crate) pool: SqlitePool,
     pub(crate) mfa_key_file: std::path::PathBuf,
+    pub(crate) passkeys: crate::passkeys::Runtime,
     local_mode: bool,
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
@@ -270,6 +271,9 @@ pub(crate) enum SecurityEvent {
     MfaRequired,
     MfaReleased,
     MfaKeyRotated,
+    PasskeyAdded,
+    PasskeyUsed,
+    PasskeyRemoved,
 }
 
 impl SecurityEvent {
@@ -307,6 +311,9 @@ impl SecurityEvent {
             Self::MfaRequired => "mfa_required",
             Self::MfaReleased => "mfa_released",
             Self::MfaKeyRotated => "mfa_key_rotated",
+            Self::PasskeyAdded => "passkey_added",
+            Self::PasskeyUsed => "passkey_used",
+            Self::PasskeyRemoved => "passkey_removed",
         }
     }
 }
@@ -401,7 +408,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 8,
+                schema_version <= 9,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -445,6 +452,10 @@ impl StateStore {
             .await
             .context("migrate MFA state")?;
         crate::mfa::prune_pending(&pool).await?;
+        sqlx::raw_sql(crate::passkeys::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate passkey public credentials")?;
         sqlx::query("DELETE FROM admin_events WHERE occurred_at<unixepoch()-?")
             .bind(SECURITY_RETENTION_DAYS * 86_400)
             .execute(&pool)
@@ -460,7 +471,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='8' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='9' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -491,6 +502,7 @@ impl StateStore {
                 mfa_key_file: key
                     .map(Path::to_owned)
                     .unwrap_or_else(|| crate::mfa::default_key_path(path)),
+                passkeys: crate::passkeys::Runtime::default(),
                 local_mode: false,
                 dummy_hash,
                 absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
@@ -527,7 +539,7 @@ async fn migrate_security_events(pool: &SqlitePool) -> Result<()> {
     .fetch_one(pool)
     .await
     .context("inspect security event vocabulary")?;
-    if schema.contains("'mfa_enabled'") {
+    if schema.contains("'passkey_added'") {
         return Ok(());
     }
     let mut transaction = pool
@@ -1518,7 +1530,13 @@ pub async fn require_auth(
     }
     if matches!(
         request.uri().path(),
-        "/login" | "/favicon.ico" | "/assets/favicon-32.png" | "/assets/agent-lens-logo.png"
+        "/login"
+            | "/login/passkey/start"
+            | "/login/passkey/finish"
+            | "/assets/passkeys.js"
+            | "/favicon.ico"
+            | "/assets/favicon-32.png"
+            | "/assets/agent-lens-logo.png"
     ) {
         return next.run(request).await;
     }
@@ -1549,6 +1567,9 @@ pub async fn require_auth(
                 && !matches!(
                     request.uri().path(),
                     "/account/mfa"
+                        | "/account/passkeys"
+                        | "/account/passkeys/register/start"
+                        | "/account/passkeys/register/finish"
                         | "/logout"
                         | "/assets/preferences.js"
                         | "/assets/preferences.css"
@@ -1879,6 +1900,9 @@ fn security_event_label(kind: &str) -> Option<&'static str> {
         "mfa_required" => "MFA enrollment required",
         "mfa_released" => "MFA enrollment requirement removed",
         "mfa_key_rotated" => "MFA encryption key rotated",
+        "passkey_added" => "Passkey added",
+        "passkey_used" => "Passkey verified",
+        "passkey_removed" => "Passkey removed",
         _ => return None,
     })
 }
@@ -2099,6 +2123,7 @@ pub fn test_state(credentials: Credentials) -> AuthState {
     AuthState {
         pool,
         mfa_key_file: std::path::PathBuf::new(),
+        passkeys: crate::passkeys::Runtime::default(),
         local_mode: false,
         dummy_hash: String::new(),
         absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
@@ -2485,7 +2510,8 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','8'", "'schema_version','4'")
+            .replace("'schema_version','9'", "'schema_version','4'")
+            .replace(",'passkey_added','passkey_used','passkey_removed'", "")
             .replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'", "")
             .replace(",'auditor','operator'", "")
             .replace("    team_id TEXT,\n", "")
@@ -2515,7 +2541,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2548,7 +2574,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

@@ -14,6 +14,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env_remove("AGENT_LENS_DATA")
         .env_remove("AGENT_LENS_BIND")
         .env_remove("AGENT_LENS_LOCAL")
+        .env_remove("AGENT_LENS_PUBLIC_URL")
         .args(args)
         .output()
         .unwrap()

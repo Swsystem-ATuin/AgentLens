@@ -243,7 +243,7 @@ pub(super) async fn mutate(
     {
         return Err(WebError::forbidden());
     }
-    if !crate::mfa::verify(&state.auth, &confirmed, &form.mfa_code)
+    if !crate::mfa::verify_in_session(&state.auth, &confirmed, &form.mfa_code, &session)
         .await
         .map_err(|_| WebError::authentication("confirm administrator factor"))?
     {

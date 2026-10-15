@@ -82,6 +82,16 @@ pub(super) async fn mutate(
         .map_err(|_| WebError::authentication("resolve MFA management session"))?
         .ok_or_else(WebError::forbidden)?;
     if form.action == "begin" {
+        if mfa::status(&state.auth, &confirmed.id)
+            .await
+            .map_err(|_| WebError::authentication("check existing factors"))?
+            .enrolled
+            && !mfa::verify_in_session(&state.auth, &confirmed, &form.mfa_code, &session)
+                .await
+                .map_err(|_| WebError::authentication("confirm existing factor"))?
+        {
+            return Err(WebError::forbidden());
+        }
         let enrollment = mfa::begin(&state.auth, &confirmed, &inventory)
             .await
             .map_err(|_| WebError::invalid_auth_request())?;

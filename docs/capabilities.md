@@ -26,4 +26,4 @@ The capability set supports intersection with an explicit credential ceiling. [P
 
 ## Verification and deployment
 
-Run `bash scripts/check.sh`. The suite verifies all four roles, credential ceilings, unsupported methods, unknown/reserved routes, metrics authorization, administration, MFA enrollment gates, and source isolation. Role, team, grant, and MFA changes take effect on the next request. [Schema v8](totp-mfa.md) preserves existing roles, teams, and audits while adding optional/required MFA. No source refresh or index rebuild is required; restart after deploying.
+Run `bash scripts/check.sh`. The suite verifies all four roles, credential ceilings, unsupported methods, unknown/reserved routes, metrics authorization, administration, TOTP/passkey enrollment gates, and source isolation. Role, team, grant, and MFA changes take effect on the next request. [Schema v9](passkey-second-factors.md) preserves existing roles, teams, audits, and TOTP. No source refresh or index rebuild is required; restart after deploying.

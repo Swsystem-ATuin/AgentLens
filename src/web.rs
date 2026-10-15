@@ -19,6 +19,9 @@ mod markdown;
 mod mfa_pages;
 #[cfg(test)]
 mod mfa_regression;
+mod passkey_pages;
+#[cfg(test)]
+mod passkey_regression;
 mod presentation;
 pub(crate) mod queries;
 #[cfg(test)]
@@ -126,6 +129,7 @@ struct LoginTemplate {
     csrf_token: String,
     return_to: String,
     failed: bool,
+    passkeys_enabled: bool,
 }
 
 #[derive(Template)]
@@ -410,6 +414,15 @@ fn app_routes(
     };
     Router::new()
         .route("/login", get(login).post(login_submit))
+        .route("/login/passkey/start",post(passkey_pages::login_start))
+        .route("/login/passkey/finish",post(passkey_pages::login_finish))
+        .route("/account/passkeys",get(passkey_pages::page))
+        .route("/account/passkeys/register/start",post(passkey_pages::register_start))
+        .route("/account/passkeys/register/finish",post(passkey_pages::register_finish))
+        .route("/account/passkeys/auth/start",post(passkey_pages::auth_start))
+        .route("/account/passkeys/auth/finish",post(passkey_pages::auth_finish))
+        .route("/account/passkeys/delete",post(passkey_pages::delete))
+        .route("/assets/passkeys.js",get(passkey_pages::script))
         .route(
             "/",
             get(home),
@@ -576,6 +589,7 @@ async fn login(
             csrf_token,
             return_to,
             failed: query.error.is_some(),
+            passkeys_enabled: state.auth.passkeys.enabled(),
         }
         .render()
         .map_err(|error| WebError::template("render login", error))?,
@@ -788,7 +802,7 @@ async fn change_password(
             return Err(WebError::forbidden());
         }
     }
-    if !crate::mfa::verify(&state.auth, &user, &form.mfa_code)
+    if !crate::mfa::verify_in_session(&state.auth, &user, &form.mfa_code, &session)
         .await
         .map_err(|_| WebError::authentication("confirm password change factor"))?
     {
@@ -2479,7 +2493,14 @@ impl IntoResponse for WebError {
             status = self.status.as_u16(),
             "request failed"
         );
-        (self.status, self.public_message).into_response()
+        let mut response = (self.status, self.public_message).into_response();
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("60"),
+            );
+        }
+        response
     }
 }
 

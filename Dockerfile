@@ -4,6 +4,11 @@ FROM rust:1.90-bookworm AS builder
 
 WORKDIR /build
 
+# Resolve distro security updates rather than pinning OpenSSL patch packages.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
@@ -17,7 +22,10 @@ FROM debian:bookworm-slim AS runtime
 LABEL org.opencontainers.image.source="https://git.s4w.uk/infrastructure/agent-lens.git"
 LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
 
-RUN groupadd --gid 10001 agent-lens \
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 agent-lens \
     && useradd --uid 10001 --gid agent-lens \
         --home-dir /var/lib/agent-lens --no-create-home \
         --shell /usr/sbin/nologin agent-lens \

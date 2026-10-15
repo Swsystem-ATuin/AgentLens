@@ -141,13 +141,13 @@ impl Account {
 }
 
 pub(crate) async fn accounts(auth: &AuthState, offset: i64, limit: i64) -> Result<Vec<Account>> {
-    sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts ORDER BY username COLLATE NOCASE,id LIMIT ? OFFSET ?")
+    sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,(EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=accounts.id)) AS mfa_enrolled FROM accounts ORDER BY username COLLATE NOCASE,id LIMIT ? OFFSET ?")
         .bind(limit).bind(offset).fetch_all(&auth.pool).await.context("list administrative accounts")
 }
 
 pub(crate) async fn account(auth: &AuthState, id: &str) -> Result<Option<Account>> {
     sqlx::query_as(
-        "SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts WHERE id=?",
+        "SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,(EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=accounts.id)) AS mfa_enrolled FROM accounts WHERE id=?",
     )
     .bind(id)
     .fetch_optional(&auth.pool)
@@ -228,7 +228,7 @@ pub(crate) async fn execute(
         Capabilities::for_role(role).permits(Capability::AccountsAdminister),
         "administrator capability no longer available"
     );
-    let mfa_required:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND required=1 AND secret IS NULL)").bind(&actor.id).fetch_one(&mut *tx).await.context("recheck administrator MFA enrollment gate")?;
+    let mfa_required:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND required=1 AND secret IS NULL AND NOT EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=account_mfa.account_id))").bind(&actor.id).fetch_one(&mut *tx).await.context("recheck administrator MFA enrollment gate")?;
     ensure!(
         !mfa_required,
         "administrator must complete required MFA enrollment"
@@ -284,7 +284,7 @@ pub(crate) async fn execute(
     } else if command.operation.team() {
         team_change(&mut tx, &command, &mut facts).await?
     } else {
-        let target: Account=sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) AS mfa_enrolled FROM accounts WHERE id=?")
+        let target: Account=sqlx::query_as("SELECT id,username,role,enabled,session_generation AS generation,COALESCE((SELECT required FROM account_mfa WHERE account_id=accounts.id),0) AS mfa_required,(EXISTS(SELECT 1 FROM account_mfa WHERE account_id=accounts.id AND secret IS NOT NULL) OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=accounts.id)) AS mfa_enrolled FROM accounts WHERE id=?")
             .bind(&command.target).fetch_optional(&mut *tx).await.context("resolve administrative target")?.context("target account not found")?;
         ensure!(
             command.confirmation == target.username,

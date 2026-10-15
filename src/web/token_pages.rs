@@ -141,7 +141,7 @@ pub(super) async fn create(
         )
             .into_response());
     };
-    if !crate::mfa::verify(&state.auth, &confirmed_user, &form.mfa_code)
+    if !crate::mfa::verify_in_session(&state.auth, &confirmed_user, &form.mfa_code, &session)
         .await
         .map_err(|_| WebError::authentication("confirm token creation factor"))?
     {

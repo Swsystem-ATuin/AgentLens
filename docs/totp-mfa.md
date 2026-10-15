@@ -2,6 +2,8 @@
 
 MFA is **opt in by default for every role**. Signed-in users enroll at `/account/mfa`; administrators can require enrollment, remove that requirement, or reset an account's MFA through `/admin/accounts/ACCOUNT_ID`. There is no role-wide automatic enforcement, remembered-device exception, public reset link, or notification delivery. Explicit loopback local mode remains development-only and cannot manage MFA.
 
+[Opt-in passkeys](passkey-second-factors.md) are also available as password-first second factors once the public HTTPS URL is configured. Either enrolled method satisfies the same MFA requirement, and recovery codes are shared. Administrator/CLI reset and disabling all optional MFA remove both TOTP and passkeys; removing a requirement alone does not remove either factor.
+
 ## Enrollment and sign-in
 
 Open Account → Manage two-factor authentication. Confirm your password and start setup. Import the displayed provisioning URI directly into a trusted authenticator, or enter its Base32 secret manually with SHA-1, six digits, and a 30-second period. No third-party QR service is used. Confirm a current authenticator code and your password to activate enrollment. Setup expires after ten minutes and belongs to the initiating browser inventory/session and credential generation; another session cannot finish it. Replacing pending setup invalidates its earlier secret. Unconfirmed expired ciphertext is removed at startup.
@@ -55,6 +57,6 @@ Rotation takes the state writer lock, durably publishes a new owner-only keyring
 
 ## Upgrade and verification
 
-Back up stopped state before upgrading. Schema v8 adds MFA tables and expands fixed security/admin audit vocabularies while preserving accounts, teams, grants, sessions, preferences, tokens, and team audit provenance. Existing users remain unenrolled and optional. No index rebuild or source refresh is needed. Deploy and restart the service; on this host, restart and verify `agent-lens.service` whenever `target/debug/agent-lens` is replaced.
+Back up stopped state before upgrading. Schema v8 introduced MFA; current builds migrate through [v9 passkeys](passkey-second-factors.md), preserving encrypted TOTP, recovery digests, accounts, teams, grants, sessions, and tokens. Existing unenrolled users remain optional. No rebuild or refresh is needed. Restart after deploying; on this host, restart and verify `agent-lens.service` whenever the debug binary is replaced.
 
 Run `bash scripts/check.sh`. Synthetic tests cover known TOTP vectors, drift/replay and concurrent recovery use, encryption binding and malformed envelopes, owner-only keys, pending expiry and session/generation isolation, mandatory enrollment gates, browser login and fresh-factor management, code secrecy in rendered HTML/audits, token/Basic boundaries, optional disable, required reset, persisted verification budgets, legacy audit migration, key rotation with failure recovery, missing-key CLI recovery, and no disposable-index writes by account commands.

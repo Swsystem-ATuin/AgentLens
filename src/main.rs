@@ -9,6 +9,7 @@ mod identity;
 mod ingest;
 mod metrics;
 mod mfa;
+mod passkeys;
 mod postmortem;
 mod preferences;
 mod projects;
@@ -79,6 +80,9 @@ enum Command {
         /// Mark session cookies Secure; required behind an HTTPS reverse proxy.
         #[arg(long, env = "AGENT_LENS_SECURE_COOKIES")]
         secure_cookies: bool,
+        /// Exact public HTTPS origin required before enabling passkey second factors.
+        #[arg(long, env = "AGENT_LENS_PUBLIC_URL")]
+        public_url: Option<String>,
     },
 }
 
@@ -427,12 +431,20 @@ async fn main() -> Result<()> {
             local,
             projects_file,
             secure_cookies,
+            public_url,
         } => {
             let projects = projects::ProjectConfig::load(projects_file.as_deref())?;
             if local {
                 web::validate_local_bind(&bind)?;
             }
             let mut state = open_state(&cli.state_database, cli.mfa_key_file.as_deref()).await?;
+            if public_url.is_some() {
+                anyhow::ensure!(
+                    secure_cookies && !local,
+                    "passkeys require authenticated mode and Secure cookies"
+                );
+            }
+            state.auth.passkeys = passkeys::Runtime::configured(public_url.as_deref())?;
             if local {
                 state.enable_local_mode();
             } else {

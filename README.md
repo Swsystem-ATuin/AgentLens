@@ -27,6 +27,7 @@ Source-specific behavior is isolated behind [source adapters](docs/source-adapte
 - Provides individually authenticated [application accounts](docs/application-authentication.md) with Argon2id password hashes, server-side sessions, login/logout, inactivity and absolute expiry, and immediate disable/reset/revocation enforcement. Accounts and sessions use a persistent SQLite state file separate from the disposable index; local administrator commands retain initial provisioning and recovery.
 - Provides [audited browser administration](docs/browser-administration.md) at `/admin/accounts` for accounts, teams, grants, credential resets, session/token revocation, and security review. Changes require a fresh password and exact-target confirmation, preserve last-admin safeguards, and commit with before/after audit facts. Shared password throttling leaves CLI recovery available without automatic lockouts.
 - Supports opt-in [TOTP two-factor authentication](docs/totp-mfa.md), one-use recovery codes, and administrator-required enrollment/reset controls. MFA secrets are encrypted with an owner-only, separately backed-up keyring; replay protection, verification throttling, key rotation, and local recovery preserve the authentication boundary.
+- Supports opt-in [passkey second factors](docs/passkey-second-factors.md) alongside TOTP. Passwords remain required; configure an exact public HTTPS URL and Secure cookies before enabling WebAuthn. Named devices, shared recovery, replay/counter checks, and administrator resets retain the MFA boundary.
 - Lists and serves authenticated [Codex-generated images](docs/generated-images.md) retained under each copied `.codex/generated_images/<native-session-id>/` directory, with compact lazy thumbnail cards for direct transcript links, unlinked desktop-generated media, and the session gallery. Files remain read directly from the immutable copied home, are source-grant scoped, and are never copied into SQLite.
 - Enforces [source-scoped access permissions](docs/access-permissions.md): administrators see all sources; viewers, report-only auditors, and operational operators use the union of direct and team grants. [Teams and roles](docs/teams-and-roles.md) define exact capabilities and last-administrator safeguards. Authorization scopes queries before pagination and aggregation.
 - Downloads deterministic, authenticated [redacted postmortems](docs/redacted-postmortems.md) from each visible session as Markdown or JSON. Exports contain aggregate outcomes, usage, model/tool observations, and bounded evidence-gap reason codes while excluding transcript bodies, paths, credentials, and other sensitive source fields.
@@ -46,6 +47,7 @@ Transcript setup blocks are labeled and collapsed even after a session resumes, 
 ## Requirements
 
 - A recent stable Rust toolchain
+- OpenSSL development headers and `pkg-config` for native builds, plus the matching OpenSSL runtime (included in the container image)
 - Copied Codex, Gemini CLI, and/or Hermes Agent homes beneath `data/{hostname}/{os_user}/`, or one copied agent home
 
 Fixture data and generated SQLite indexes are intentionally excluded from Git.

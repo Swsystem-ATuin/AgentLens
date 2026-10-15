@@ -51,6 +51,6 @@ Authorized tokens are limited to 60 requests per UTC calendar minute, with the b
 
 ## Deployment and verification
 
-Back up stopped state and its MFA keyring before upgrading. Schema v5 introduced tokens; the current binary migrates v1–v7 through [schema v8](totp-mfa.md), preserving tokens and retained history. Restart; no source refresh or index rebuild is required. Direct and team grants are rechecked for tokens as for browser sessions. On this host, restart `agent-lens.service` whenever the debug executable is replaced.
+Back up stopped state and its MFA keyring before upgrading. Schema v5 introduced tokens; current builds migrate v1–v8 through [schema v9](passkey-second-factors.md), preserving tokens and retained history. Passkey-protected token creation requires a fresh factor proof, TOTP, or recovery code; passkey changes invalidate old tokens like other MFA changes. Restart; no source refresh or index rebuild is required. On this host, restart `agent-lens.service` whenever the debug executable is replaced.
 
 Run `bash scripts/check.sh`. Synthetic tests cover storage without bearer values, one-time reveal, unknown digest versions, scope/role denial, source isolation, cookie precedence, duplicate headers, CSRF, password confirmation, escaped descriptions, account isolation, expiry, revocation, disable/re-enable, stale confirmation, rate and creation limits, retention, bounded pagination, audit events, and v4 migration. Tests use temporary databases and synthetic credentials.

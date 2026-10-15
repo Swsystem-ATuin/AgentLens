@@ -6,6 +6,8 @@ Signed-in administrators can open `/admin/accounts` from Account. Viewers, audit
 
 [TOTP MFA](totp-mfa.md) is optional by default. Account details show enrollment and requirement state and offer require-enrollment, release-requirement, and MFA reset controls. These are audited account mutations, require the administrator's own current password and fresh factor when enrolled, and revoke the target's existing credentials. Removing the requirement does not disable an enrolled authenticator; reset preserves the requirement.
 
+[Passkey second factors](passkey-second-factors.md) count as enrolled MFA too. Reset removes all TOTP/passkey credentials and recovery codes, preserving the requirement. An enrolled administrator may confirm a sensitive action using a fresh session-bound passkey proof instead of TOTP or a recovery code.
+
 - `/admin/accounts` lists accounts and provisions a new account with an explicit role and policy-compliant initial password.
 - `/admin/accounts/ACCOUNT_ID` shows the target's enabled state, role, direct/team grant origins, and token metadata. Select enable/disable, role change, password reset, all-session revocation, direct source grant/revocation, or individual token revocation. The value field supplies only the selected operation's role, stable source ID, or public token ID.
 - `/admin/teams` creates and lists teams. `/admin/teams/TEAM_ID` supports rename/delete, membership changes, and team source grants, and shows bounded member/source lists. Teams still grant sources, not capabilities; independent grants survive removal.
@@ -44,6 +46,6 @@ This is a process-wide backstop, not distributed brute-force protection. Other c
 
 ## Migration and verification
 
-Back up stopped persistent state and its MFA keyring before upgrading. The current binary migrates schemas v1–v7 to [v8 MFA](totp-mfa.md), preserving existing state and audit facts. No source refresh or index rebuild is required. Restart after deploying; on this host, always restart `agent-lens.service` after replacing `target/debug/agent-lens` and verify it is active.
+Back up stopped persistent state and its MFA keyring before upgrading. The current binary migrates v1–v8 through [v9 passkeys](passkey-second-factors.md), preserving state and audit facts. No source refresh or index rebuild is required. Restart after deploying; on this host, always restart `agent-lens.service` after replacing the debug binary and verify it is active.
 
 Run `bash scripts/check.sh`. Synthetic tests cover browser account/team operations, CSRF, per-operation password confirmation, exact-target and stale-state checks, non-admin/token/local-mode denial, stale actor/session enforcement inside the writer transaction, concurrent updates, last-administrator safeguards, rollback on audit failure, append-only facts, secret-free/escaped HTML, pagination, credential invalidation, and shared throttling without account lockout. No private fixtures are read.

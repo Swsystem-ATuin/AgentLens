@@ -42,10 +42,11 @@ pub(crate) struct Status {
     pub(crate) required: bool,
     pub(crate) enrolled: bool,
     pub(crate) recovery_count: i64,
+    pub(crate) totp_enrolled: bool,
 }
 
 pub(crate) async fn status(auth: &AuthState, id: &str) -> Result<Status> {
-    Ok(sqlx::query_as("SELECT required,secret IS NOT NULL AS enrolled,(SELECT count(*) FROM mfa_recovery_codes WHERE account_id=?) AS recovery_count FROM account_mfa WHERE account_id=?")
+    Ok(sqlx::query_as("SELECT required,(secret IS NOT NULL OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=account_mfa.account_id)) AS enrolled,secret IS NOT NULL AS totp_enrolled,(SELECT count(*) FROM mfa_recovery_codes WHERE account_id=?) AS recovery_count FROM account_mfa WHERE account_id=?")
         .bind(id).bind(id).fetch_optional(&auth.pool).await.context("load MFA status")?.unwrap_or_default())
 }
 
@@ -321,7 +322,7 @@ pub(crate) async fn begin(
     })
 }
 
-async fn budget(tx: &mut Transaction<'_, Sqlite>, id: &str, now: i64) -> Result<bool> {
+pub(crate) async fn budget(tx: &mut Transaction<'_, Sqlite>, id: &str, now: i64) -> Result<bool> {
     let accepted=sqlx::query("UPDATE account_mfa SET attempt_count=CASE WHEN attempt_window<=?-300 THEN 1 ELSE attempt_count+1 END,attempt_window=CASE WHEN attempt_window<=?-300 THEN ? ELSE attempt_window END WHERE account_id=? AND (attempt_window<=?-300 OR attempt_count<10)")
         .bind(now).bind(now).bind(now).bind(id).bind(now).execute(&mut **tx).await.context("apply MFA verification budget")?;
     Ok(accepted.rows_affected() == 1)
@@ -368,7 +369,7 @@ fn recovery_digest(id: &str, code: &str) -> [u8; 32] {
         format!("{id}:{code}").as_bytes(),
     )
 }
-async fn recovery(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<Vec<String>> {
+pub(crate) async fn recovery(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<Vec<String>> {
     sqlx::query("DELETE FROM mfa_recovery_codes WHERE account_id=?")
         .bind(id)
         .execute(&mut **tx)
@@ -404,9 +405,6 @@ async fn consume(
     .fetch_optional(&mut **tx)
     .await
     .context("load enrolled MFA secret")?;
-    let Some((value, last)) = value else {
-        return Ok(false);
-    };
     if !budget(tx, id, now).await? {
         return Ok(false);
     }
@@ -422,6 +420,9 @@ async fn consume(
             return Ok(true);
         }
     }
+    let Some((value, last)) = value else {
+        return Ok(false);
+    };
     let ring = key_file(&auth.mfa_key_file)?;
     if let Some(step) = matched_step(open(&ring, id, "totp", &value)?, code, now, last)? {
         sqlx::query("UPDATE account_mfa SET last_step=? WHERE account_id=?")
@@ -438,20 +439,46 @@ async fn consume(
 
 /// Password verification occurs first. Consume a factor only for the same live generation.
 pub(crate) async fn verify(auth: &AuthState, user: &CurrentUser, code: &str) -> Result<bool> {
+    verify_bound(auth, user, code, None).await
+}
+pub(crate) async fn verify_in_session(
+    auth: &AuthState,
+    user: &CurrentUser,
+    code: &str,
+    session: &tower_sessions::Session,
+) -> Result<bool> {
+    let inventory = auth::current_inventory_id(session).await?;
+    let binding = inventory.as_ref().map(|id| format!("i:{id}"));
+    verify_bound(auth, user, code, binding.as_deref()).await
+}
+async fn verify_bound(
+    auth: &AuthState,
+    user: &CurrentUser,
+    code: &str,
+    binding: Option<&str>,
+) -> Result<bool> {
     let mut tx = auth.pool.begin().await.context("begin MFA verification")?;
     let locked=sqlx::query("UPDATE accounts SET session_generation=session_generation WHERE id=? AND enabled=1 AND session_generation=?")
         .bind(&user.id).bind(user.credential_generation).execute(&mut *tx).await.context("recheck MFA account")?;
     if locked.rows_affected() != 1 {
         return Ok(false);
     }
+    if let Some(inventory) = binding.and_then(|value| value.strip_prefix("i:")) {
+        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_sessions WHERE id=? AND account_id=? AND session_generation=? AND revoked_at IS NULL AND absolute_expires_at>unixepoch() AND last_seen_at>=unixepoch()-1800)").bind(inventory).bind(&user.id).bind(user.credential_generation).fetch_one(&mut *tx).await.context("recheck second-factor session")?;
+        if !active {
+            return Ok(false);
+        }
+    }
     let enrolled: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND secret IS NOT NULL)",
+        "SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND (secret IS NOT NULL OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=account_mfa.account_id)))",
     )
     .bind(&user.id)
     .fetch_one(&mut *tx)
     .await
     .context("check factor requirement")?;
-    let valid = if enrolled {
+    let valid = if code.starts_with("pk_") {
+        binding.is_some_and(|b| auth.passkeys.consume_proof(user, code, b))
+    } else if enrolled {
         consume(&mut tx, auth, &user.id, code, auth::unix_now()).await?
     } else {
         true
@@ -478,7 +505,13 @@ pub(crate) async fn manage(
         !disable || !required,
         "required MFA cannot be disabled by the account"
     );
-    if !consume(&mut tx, auth, &user.id, code, auth::unix_now()).await? {
+    let valid = if code.starts_with("pk_") {
+        auth.passkeys
+            .consume_proof(user, code, &format!("i:{inventory}"))
+    } else {
+        consume(&mut tx, auth, &user.id, code, auth::unix_now()).await?
+    };
+    if !valid {
         tx.commit()
             .await
             .context("commit unsuccessful MFA management")?;
@@ -513,6 +546,11 @@ pub(crate) async fn invalidate(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Re
     Ok(generation)
 }
 pub(crate) async fn reset_in_transaction(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM account_passkeys WHERE account_id=?")
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .context("reset enrolled passkey second factors")?;
     sqlx::query("UPDATE account_mfa SET secret=NULL,last_step=-1,pending_secret=NULL,pending_session=NULL,pending_generation=NULL,pending_expires_at=NULL,attempt_count=0 WHERE account_id=?").bind(id).execute(&mut **tx).await.context("reset MFA enrollment without removing requirement")?;
     sqlx::query("DELETE FROM mfa_recovery_codes WHERE account_id=?")
         .bind(id)
