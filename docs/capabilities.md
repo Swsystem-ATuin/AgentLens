@@ -14,7 +14,7 @@ The shared policy in `src/authorization.rs` maps live account roles to typed cap
 | AnnotationsWrite | No | No | Reserved for future annotations |
 | AccountsAdminister | No | No | Reserved for browser administration |
 | AuditRead | No | No | Reserved for installation-wide audit review |
-| TokensManage | No | No | Reserved for personal access token management |
+| TokensManage | Own account | Own account | Personal access token creation, listing, and revocation |
 
 Reserved capabilities have no HTTP routes or browser grants. Local administrator CLI commands continue to use filesystem access to the state database as their recovery boundary. Capability names establish the vocabulary for later roadmap work without enabling that work.
 
@@ -22,7 +22,7 @@ Reserved capabilities have no HTTP routes or browser grants. Local administrator
 
 Capabilities authorize actions; source grants limit the records those actions can see. Parameterized query predicates use `AllSourcesRead` for installation-wide visibility and otherwise apply stable source grants before filtering, counts, aggregates, and pagination. A scope without content or report access supplies neither an unrestricted predicate nor source grants. Session and child-resource lookups retain `404` for ungranted identifiers. Self-service handlers derive the account ID from the authenticated session and retain CSRF validation for mutations.
 
-The capability set supports intersection with an explicit credential ceiling. Future personal access tokens must use the live account's set intersected with token scopes, retain account disablement and current source-grant enforcement, and explicitly classify token endpoints. Tokens cannot add a capability absent from the account. Bearer authentication and token endpoints are not introduced by this change; they are M5.3.
+The capability set supports intersection with an explicit credential ceiling. [Personal access tokens](personal-access-tokens.md) use the live account's set intersected with token scopes, retain account disablement and current source-grant enforcement, and use a separate allowlist of machine-readable read endpoints. Tokens cannot add a capability absent from the account or invoke browser self-service routes.
 
 ## Verification and deployment
 

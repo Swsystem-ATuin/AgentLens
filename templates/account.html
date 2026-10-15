@@ -6,6 +6,7 @@
 <p>Signed in as <strong>{{ username }}</strong>.</p>
 <dl><dt>Role</dt><dd>{{ role }}</dd><dt>Granted sources</dt><dd>{% if role == "admin" %}All sources{% else %}{{ source_count }}{% endif %}</dd></dl>
 <p><a href="/account/sessions">Review sessions and security history</a></p>
+<p><a href="/account/tokens">Manage personal access tokens</a></p>
 <h2>Profile</h2>
 {% if profile_saved %}<p class="success">Profile saved.</p>{% endif %}
 {% if profile_failed %}<p class="error">{{ profile_error }}</p>{% endif %}

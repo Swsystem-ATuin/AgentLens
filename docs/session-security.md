@@ -28,6 +28,6 @@ Security history uses the account's 25/50/100 page-size preference and is retain
 
 ## Upgrade and verification
 
-Opening the state database migrates schema versions 1–3 to version 4. Back up the stopped state database first, then restart the service; no agent-index rebuild or source refresh is required.
+Schema version 4 introduced session inventory and security events. The current binary migrates earlier schemas through that change and [schema v5 for personal access tokens](personal-access-tokens.md), preserving retained audit history. Back up the stopped state database first, then restart the service; no agent-index rebuild or source refresh is required.
 
 Run `bash scripts/check.sh`. Synthetic tests cover v1-to-v4 migration, legacy-session adoption, identifier rotation, inactivity and absolute expiry, immediate payload deletion, current-session preservation, individual and bulk revocation, CSRF, account isolation, escaped profile output, client-header sanitization, bounded pagination, append-only/allowlisted events, known and unknown failed sign-ins, and 30/180-day retention. Fixtures contain no private account or request data.

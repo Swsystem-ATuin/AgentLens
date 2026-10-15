@@ -11,6 +11,7 @@ mod preferences;
 mod projects;
 mod search;
 mod sources;
+mod tokens;
 mod turns;
 mod usage;
 mod web;

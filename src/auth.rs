@@ -38,7 +38,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','4');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','5');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_account_sessions_account_activity ON account_sess
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT REFERENCES accounts(id),
-    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked')),
     occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
@@ -99,6 +99,7 @@ pub struct AuthState {
     local_mode: bool,
     dummy_hash: String,
     absolute_lifetime_seconds: i64,
+    token_attempts: crate::tokens::AttemptBudget,
     #[cfg(test)]
     test_digest: Option<[u8; 32]>,
 }
@@ -112,6 +113,7 @@ pub struct StateStore {
 #[derive(Clone)]
 pub struct CurrentUser {
     pub id: String,
+    pub(crate) credential_generation: i64,
     pub username: String,
     pub display_name: Option<String>,
     pub password_changed_at: String,
@@ -143,6 +145,9 @@ impl AccountRole {
 }
 
 impl AccessScope {
+    pub(crate) fn constrain(&mut self, ceiling: &[crate::authorization::Capability]) {
+        self.capabilities = self.capabilities.constrained(ceiling);
+    }
     pub(crate) fn permits(&self, capability: crate::authorization::Capability) -> bool {
         self.capabilities.permits(capability)
     }
@@ -222,7 +227,7 @@ pub enum ChangePasswordResult {
 }
 
 #[derive(Clone, Copy)]
-enum SecurityEvent {
+pub(crate) enum SecurityEvent {
     LoginSucceeded,
     LoginFailed,
     PasswordChanged,
@@ -236,6 +241,8 @@ enum SecurityEvent {
     SourceGranted,
     SourceRevoked,
     ProfileChanged,
+    TokenCreated,
+    TokenRevoked,
 }
 
 impl SecurityEvent {
@@ -254,6 +261,8 @@ impl SecurityEvent {
             Self::SourceGranted => "source_granted",
             Self::SourceRevoked => "source_revoked",
             Self::ProfileChanged => "profile_changed",
+            Self::TokenCreated => "token_created",
+            Self::TokenRevoked => "token_revoked",
         }
     }
 }
@@ -338,7 +347,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 4,
+                schema_version <= 5,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -366,7 +375,18 @@ impl StateStore {
                 .await
                 .context("add application account display names")?;
         }
-        sqlx::query("UPDATE app_state_metadata SET value='4' WHERE key='schema_version'")
+        migrate_token_events(&pool).await?;
+        sqlx::raw_sql(crate::tokens::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate token storage")?;
+        let mut transaction = pool.begin().await.context("begin token retention")?;
+        crate::tokens::prune(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .context("commit token retention")?;
+        sqlx::query("UPDATE app_state_metadata SET value='5' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -397,6 +417,7 @@ impl StateStore {
                 local_mode: false,
                 dummy_hash,
                 absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
+                token_attempts: crate::tokens::AttemptBudget::default(),
                 #[cfg(test)]
                 test_digest: None,
             },
@@ -415,6 +436,34 @@ impl StateStore {
         );
         Ok(())
     }
+}
+
+async fn migrate_token_events(pool: &SqlitePool) -> Result<()> {
+    let schema: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='security_events'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("inspect security event vocabulary")?;
+    if schema.contains("'token_created'") {
+        return Ok(());
+    }
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("begin security event migration")?;
+    sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; ALTER TABLE security_events RENAME TO security_events_v4;")
+        .execute(&mut *transaction).await.context("prepare security event migration")?;
+    sqlx::raw_sql(STATE_SCHEMA)
+        .execute(&mut *transaction)
+        .await
+        .context("create updated security event vocabulary")?;
+    sqlx::raw_sql("INSERT INTO security_events(id,account_id,event_type,occurred_at) SELECT id,account_id,event_type,occurred_at FROM security_events_v4; DROP TABLE security_events_v4;")
+        .execute(&mut *transaction).await.context("preserve security event history")?;
+    transaction
+        .commit()
+        .await
+        .context("commit security event migration")
 }
 
 pub async fn create_account(
@@ -982,6 +1031,18 @@ pub async fn revoke_sessions(state: &StateStore, username: &str) -> Result<()> {
 }
 
 impl AuthState {
+    pub(crate) async fn token_account(
+        &self,
+        account_id: &str,
+        generation: i64,
+    ) -> Result<Option<CurrentUser>> {
+        let account: Option<AccountRow> = sqlx::query_as("SELECT id,username,password_hash,enabled,role,session_generation,display_name,password_changed_at FROM accounts WHERE id=? AND enabled=1 AND session_generation=?")
+            .bind(account_id).bind(generation).fetch_optional(&self.pool).await.context("load token account")?;
+        match account {
+            Some(account) => Ok(Some(self.current_account(account).await?)),
+            None => Ok(None),
+        }
+    }
     pub fn is_local_mode(&self) -> bool {
         self.local_mode
     }
@@ -1110,6 +1171,7 @@ impl AuthState {
         let preferences = load_preferences(&self.pool, &account.id).await?;
         Ok(CurrentUser {
             id: account.id,
+            credential_generation: account.session_generation,
             username: account.username,
             display_name: account.display_name,
             password_changed_at: account.password_changed_at,
@@ -1291,6 +1353,7 @@ pub async fn require_auth(
     if auth.local_mode {
         request.extensions_mut().insert(CurrentUser {
             id: "local".into(),
+            credential_generation: 0,
             username: "Local developer".into(),
             display_name: None,
             password_changed_at: "Unavailable".into(),
@@ -1298,6 +1361,57 @@ pub async fn require_auth(
             preferences: crate::preferences::UserPreferences::default(),
         });
         return next.run(request).await;
+    }
+    let has_bearer = request
+        .headers()
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .any(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.split_whitespace().next())
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+        });
+    if has_bearer || request.uri().path().starts_with("/api/") {
+        if !auth.token_attempts.accept() {
+            return token_rate_limited();
+        }
+        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+        let bearer = values
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+            .map(|(_, bearer)| bearer);
+        let Some(bearer) = bearer.filter(|_| values.next().is_none()) else {
+            return token_unauthenticated();
+        };
+        let Some(required) =
+            crate::authorization::token_required_capability(request.method(), request.uri().path())
+        else {
+            return (StatusCode::FORBIDDEN, JsonError("access_denied")).into_response();
+        };
+        match crate::tokens::authenticate(&auth, bearer, required).await {
+            Ok(crate::tokens::Authentication::Authorized(user)) => {
+                request.headers_mut().remove(header::AUTHORIZATION);
+                request.extensions_mut().insert(*user);
+                return next.run(request).await;
+            }
+            Ok(crate::tokens::Authentication::Invalid) => return token_unauthenticated(),
+            Ok(crate::tokens::Authentication::Denied) => {
+                return (StatusCode::FORBIDDEN, JsonError("access_denied")).into_response();
+            }
+            Ok(crate::tokens::Authentication::RateLimited) => return token_rate_limited(),
+            Err(_) => {
+                tracing::error!(error_kind = "authentication", "token authentication failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    JsonError("internal_error"),
+                )
+                    .into_response();
+            }
+        }
     }
     if matches!(
         request.uri().path(),
@@ -1322,6 +1436,7 @@ pub async fn require_auth(
                 request.headers_mut().remove(header::AUTHORIZATION);
                 request.extensions_mut().insert(CurrentUser {
                     id: "test-account".into(),
+                    credential_generation: 0,
                     username: "synthetic".into(),
                     display_name: None,
                     password_changed_at: "Unavailable".into(),
@@ -1370,8 +1485,52 @@ pub async fn require_auth(
     }
 }
 
+struct JsonError(&'static str);
+
+impl IntoResponse for JsonError {
+    fn into_response(self) -> Response {
+        axum::Json(serde_json::json!({"error": self.0})).into_response()
+    }
+}
+
+fn token_unauthenticated() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer realm=\"Agent Lens API\"")],
+        JsonError("authentication_required"),
+    )
+        .into_response()
+}
+
+fn token_rate_limited() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, "60")],
+        JsonError("rate_limited"),
+    )
+        .into_response()
+}
+
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let api = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
+    if api && (response.status().is_client_error() || response.status().is_server_error()) {
+        let code = match response.status() {
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::FORBIDDEN => "access_denied",
+            StatusCode::UNAUTHORIZED => "authentication_required",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            status if status.is_client_error() => "invalid_request",
+            _ => "internal_error",
+        };
+        *response.body_mut() =
+            axum::body::Body::from(serde_json::json!({"error": code}).to_string());
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1470,7 +1629,7 @@ fn parse_role(role: &str) -> Result<AccountRole> {
     }
 }
 
-async fn insert_security_event(
+pub(crate) async fn insert_security_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     account_id: Option<&str>,
     event: SecurityEvent,
@@ -1537,6 +1696,8 @@ fn security_event_label(kind: &str) -> Option<&'static str> {
         "source_granted" => "Source access granted",
         "source_revoked" => "Source access revoked",
         "profile_changed" => "Profile changed",
+        "token_created" => "Personal access token created",
+        "token_revoked" => "Personal access token revoked",
         _ => return None,
     })
 }
@@ -1758,6 +1919,7 @@ pub fn test_state(credentials: Credentials) -> AuthState {
         local_mode: false,
         dummy_hash: String::new(),
         absolute_lifetime_seconds: ABSOLUTE_HOURS * 60 * 60,
+        token_attempts: crate::tokens::AttemptBudget::default(),
         test_digest: Some(credentials.digest),
     }
 }
@@ -2127,6 +2289,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v4_security_events_migrate_without_losing_history_or_append_only_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let old_schema = STATE_SCHEMA
+            .replace("'schema_version','5'", "'schema_version','4'")
+            .replace(",'token_created','token_revoked'", "");
+        sqlx::raw_sql(&old_schema).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO security_events(id,event_type,occurred_at) VALUES(42,'login_failed',unixepoch())")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        let state = StateStore::open(&path).await.unwrap();
+        let kind: String = sqlx::query_scalar("SELECT event_type FROM security_events WHERE id=42")
+            .fetch_one(&state.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(kind, "login_failed");
+        sqlx::query("INSERT INTO security_events(event_type) VALUES('token_created')")
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE security_events SET event_type='token_revoked' WHERE id=42")
+                .execute(&state.auth.pool)
+                .await
+                .is_err()
+        );
+        let version: String =
+            sqlx::query_scalar("SELECT value FROM app_state_metadata WHERE key='schema_version'")
+                .fetch_one(&state.auth.pool)
+                .await
+                .unwrap();
+        assert_eq!(version, "5");
+        state.auth.pool.close().await;
+        StateStore::open(&path).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn pre_permission_accounts_migrate_to_administrators() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-state.sqlite");
@@ -2154,7 +2361,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

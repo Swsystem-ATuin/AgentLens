@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block title %}Personal access tokens · Agent Lens{% endblock %}{% block content %}
+<h1>Personal access tokens</h1>
+<p><a href="/account">← Account</a></p>
+{% if let Some(value) = error %}<p class="error">{{ value }}</p>{% endif %}
+{% if let Some(value) = new_token %}<section aria-label="New token"><h2>Save your new token</h2><p>This value is shown only in this response. Store it securely; it cannot be retrieved later.</p><pre>{{ value }}</pre></section>{% endif %}
+<h2>Create token</h2>
+<form class="account-options" method="post" action="/account/tokens">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Description<input name="description" required maxlength="80"></label>
+<label>Read scope<select name="scope"><option value="reports:read">Redacted postmortem reports</option><option value="content:read">Session live status</option>{% if metrics_allowed %}<option value="metrics:read">Prometheus metrics</option>{% endif %}</select></label>
+<label>Expires in days<input type="number" name="days" value="30" min="1" max="90" required></label>
+<label>Current password<input type="password" name="current_password" autocomplete="current-password" maxlength="1024" required></label>
+<button type="submit">Create token</button>
+</form>
+<p class="muted">Each token has one read scope and follows your current source access. Choose the shortest useful lifetime. Password changes and account-wide session revocation also invalidate existing tokens.</p>
+<h2>Your tokens</h2>
+{% if tokens.is_empty() %}<p>No tokens on this page.</p>{% else %}<table><thead><tr><th>Identifier / description</th><th>Scope</th><th>Created / expires</th><th>Last used</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for token in tokens %}<tr><td><code>{{ token.id }}</code><br>{{ token.description }}</td><td>{{ token.scope }}</td><td><time data-user-time>{{ token.created_at }}</time><br><time data-user-time>{{ token.expires_at }}</time></td><td>{% if let Some(value) = token.last_used_at %}<time data-user-time>{{ value }}</time>{% else %}Never{% endif %}</td><td>{{ token.status }}</td><td>{% if token.status == "active" %}<form method="post" action="/account/tokens/{{ token.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Revoke</button></form>{% else %}—{% endif %}</td></tr>{% endfor %}</tbody></table>{% endif %}
+<nav class="pagination" aria-label="Token pages">{% if let Some(href) = pagination.previous_href %}<a href="{{ href }}">← Previous</a>{% endif %}<span>Page {{ pagination.page }}</span>{% if let Some(href) = pagination.next_href %}<a href="{{ href }}">Next →</a>{% endif %}</nav>
+{% endblock %}

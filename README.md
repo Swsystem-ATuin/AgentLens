@@ -194,6 +194,8 @@ Open <http://127.0.0.1:3001/sessions>. Run future `refresh --data /data` command
 
 ## Development
 
+Signed-in users can create and revoke [scoped personal access tokens](docs/personal-access-tokens.md) from the Account area for metrics, redacted report exports, and live-status JSON. Each token has one read scope and a 1–90-day expiry; its bearer value is revealed only when created.
+
 Browser and metrics access follow the [typed capability matrix](docs/capabilities.md), with source grants applied before queries and pagination. Unknown routes and unsupported methods fail closed for all authenticated roles.
 
 Planned features and architecture follow-ups are tracked only in [ROADMAP.md](ROADMAP.md), informed by the [comparison of codex_viewer, codex-dash, and codex-blackbox](docs/feature-comparison.md). The roadmap includes a dependency-ordered M5 account-management plan covering preferences, session/security history, scoped tokens, capability-based authorization, browser administration, stronger identity options, and conditional notifications. Update the roadmap as work is completed or requirements change.

@@ -47,6 +47,7 @@ impl Capabilities {
                 Capability::AuditSelfRead,
                 Capability::OperationsRead,
                 Capability::AllSourcesRead,
+                Capability::TokensManage,
             ]
         } else {
             &[
@@ -54,6 +55,7 @@ impl Capabilities {
                 Capability::ReportsRead,
                 Capability::AccountSelfManage,
                 Capability::AuditSelfRead,
+                Capability::TokensManage,
             ]
         };
         Self(u16::MAX)
@@ -80,6 +82,7 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     let read = *method == Method::GET || *method == Method::HEAD;
     if read {
         match path {
+            "/account/tokens" => return Some(Capability::TokensManage),
             "/" | "/sessions" | "/assets/live-reader.js" => return Some(Capability::ContentRead),
             "/usage" | "/diagnostics" => return Some(Capability::ReportsRead),
             "/health" | "/metrics" => return Some(Capability::OperationsRead),
@@ -91,6 +94,7 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
         }
     } else if *method == Method::POST {
         match path {
+            "/account/tokens" => return Some(Capability::TokensManage),
             "/account/password"
             | "/account/preferences"
             | "/account/profile"
@@ -103,6 +107,9 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     }
     let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
     match parts.as_slice() {
+        ["account", "tokens", id] if !id.is_empty() && *method == Method::POST => {
+            Some(Capability::TokensManage)
+        }
         ["account", "sessions", id] if !id.is_empty() && *method == Method::POST => {
             Some(Capability::AccountSelfManage)
         }
@@ -125,6 +132,22 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
     }
 }
 
+/// Only machine-readable read endpoints accept personal access tokens.
+pub(crate) fn token_required_capability(method: &Method, path: &str) -> Option<Capability> {
+    if *method != Method::GET && *method != Method::HEAD {
+        return None;
+    }
+    if path == "/metrics" {
+        return Some(Capability::OperationsRead);
+    }
+    let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    match parts.as_slice() {
+        ["api", "sessions", id, "postmortem"] if !id.is_empty() => Some(Capability::ReportsRead),
+        ["api", "sessions", id, "live-status"] if !id.is_empty() => Some(Capability::ContentRead),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +163,7 @@ mod tests {
                         | Capability::ReportsRead
                         | Capability::AccountSelfManage
                         | Capability::AuditSelfRead
+                        | Capability::TokensManage
                 ) || (admin
                     && matches!(
                         capability,

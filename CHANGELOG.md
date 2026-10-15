@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Personal access tokens now support one-time bearer reveal, digest-only persistent storage, bounded expiry, read scopes for metrics/redacted postmortems/live status, current account/source permission checks, password-confirmed and CSRF-protected creation, revocation, rate limits, bounded listing, retention, and audited schema-v5 migration.
+
 - A shared typed capability policy now governs browser and metrics authentication, source-wide access, and self-service account/security routes. Unknown routes and unsupported methods fail closed for every role; tested credential ceilings prepare least-privilege token scopes without enabling future administrative features.
 
 - Signed-in accounts now have a bounded session inventory and append-only security history, with individual or all-other-session revocation, current/active/expired/revoked states, allowlisted client summaries, optional display names, password age, schema-v4 migration, and explicit 30-day session/180-day event retention. Network addresses remain uncollected without a trusted-proxy design.

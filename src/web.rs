@@ -17,6 +17,7 @@ mod presentation;
 pub(crate) mod queries;
 #[cfg(test)]
 mod regression;
+mod token_pages;
 
 #[cfg(test)]
 use presentation::present_timeline;
@@ -405,6 +406,10 @@ fn app_routes(
             get(|| async { axum::response::Redirect::temporary("/sessions") }),
         )
         .route("/account", get(account))
+        .route("/account/tokens", get(token_pages::list).post(token_pages::create))
+        .route("/account/tokens/{id}", post(token_pages::revoke))
+        .route("/api/sessions/{id}/live-status", get(live_status))
+        .route("/api/sessions/{id}/postmortem", get(api_postmortem))
         .route("/account/password", post(change_password))
         .route("/account/preferences", post(change_preferences))
         .route("/account/profile", post(change_profile))
@@ -1941,6 +1946,14 @@ async fn turn_history(
         .render()
         .map_err(|error| WebError::template("render turn history", error))?,
     ))
+}
+
+async fn api_postmortem(
+    State(state): State<AppState>,
+    Extension(user): Extension<crate::auth::CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    postmortem(State(state), Extension(user), Path((id, "json".into()))).await
 }
 
 async fn postmortem(
@@ -3546,6 +3559,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_management_checks_csrf_password_isolation_and_one_time_reveal() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, header},
+        };
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "Synthetic1-password").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let state = crate::auth::StateStore::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "alice", &password_file, None)
+            .await
+            .unwrap();
+        crate::auth::create_account(&state, "bob", &password_file, None)
+            .await
+            .unwrap();
+        let pool = crate::db::open(&dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let app = session_router(pool, state.clone());
+        let cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
+        let bob_cookie = login_cookie(&app, "bob", "Synthetic1-password").await;
+        async fn body(response: Response) -> String {
+            String::from_utf8(
+                to_bytes(response.into_body(), 256 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+        }
+        async fn get_page(app: &Router, cookie: &str, path: &str) -> Response {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+        async fn post_form(app: &Router, cookie: &str, path: &str, fields: String) -> Response {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from(fields))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+        let page = body(get_page(&app, &cookie, "/account/tokens").await).await;
+        let csrf = page
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let fields = format!(
+            "csrf_token={csrf}&current_password=Synthetic1-password&description=%3Cscript%3ESynthetic%3C%2Fscript%3E&scope=reports%3Aread&days=30"
+        );
+        assert_eq!(
+            post_form(
+                &app,
+                &cookie,
+                "/account/tokens",
+                fields.replace(csrf, "wrong")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_form(
+                &app,
+                &cookie,
+                "/account/tokens",
+                fields.replace("days=30", "days=91")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_form(
+                &app,
+                &cookie,
+                "/account/tokens",
+                fields.replace("Synthetic1-password", "wrong")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let response = post_form(&app, &cookie, "/account/tokens", fields).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let reveal = body(response).await;
+        let bearer = reveal
+            .split("<pre>")
+            .nth(1)
+            .unwrap()
+            .split("</pre>")
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(bearer.starts_with("al_pat_"));
+        assert!(reveal.contains("&#60;script&#62;Synthetic&#60;/script&#62;"));
+        assert!(!reveal.contains("<script>Synthetic</script>"));
+        let listing = body(get_page(&app, &cookie, "/account/tokens").await).await;
+        assert!(!listing.contains(&bearer));
+        assert!(!listing.contains("al_pat_"));
+        let bob_page = body(get_page(&app, &bob_cookie, "/account/tokens").await).await;
+        assert!(!bob_page.contains("Synthetic"));
+        assert!(!bob_page.contains("value=\"metrics:read\""));
+        let bob_csrf = bob_page
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert_eq!(post_form(&app,&bob_cookie,"/account/tokens",format!("csrf_token={bob_csrf}&current_password=Synthetic1-password&description=Synthetic&scope=metrics%3Aread&days=30")).await.status(),StatusCode::FORBIDDEN);
+        let id = &bearer[7..23];
+        assert_eq!(
+            post_form(
+                &app,
+                &bob_cookie,
+                &format!("/account/tokens/{id}"),
+                format!("csrf_token={bob_csrf}")
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_form(
+                &app,
+                &cookie,
+                &format!("/account/tokens/{id}"),
+                "csrf_token=wrong".into()
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_form(
+                &app,
+                &cookie,
+                &format!("/account/tokens/{id}"),
+                format!("csrf_token={csrf}")
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/unknown/postmortem")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        assert!(!body(revoked).await.contains(&bearer));
+        let alice = state
+            .auth
+            .authenticate("alice", "Synthetic1-password")
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        crate::auth::update_preferences(
+            &state.auth,
+            &alice.id,
+            &crate::preferences::UserPreferences {
+                page_size: 25,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for index in 0..30 {
+            sqlx::query("INSERT INTO personal_access_tokens(id,account_id,description,scope,digest,account_generation,created_at,expires_at) VALUES(?,?,'Bounded synthetic token','reports:read',zeroblob(32),0,unixepoch()+?,unixepoch()+3600)")
+                .bind(format!("bounded-{index:02}")).bind(&alice.id).bind(index+10).execute(&state.auth.pool).await.unwrap();
+        }
+        let bounded = body(get_page(&app, &cookie, "/account/tokens").await).await;
+        assert_eq!(bounded.matches("Bounded synthetic token").count(), 25);
+        assert!(bounded.contains("/account/tokens?page=2"));
+        let second = body(get_page(&app, &cookie, "/account/tokens?page=2").await).await;
+        assert_eq!(second.matches("Bounded synthetic token").count(), 5);
+    }
+
+    #[tokio::test]
     async fn source_permissions_scope_every_data_surface_and_update_immediately() {
         use axum::{
             body::{Body, to_bytes},
@@ -3626,7 +3854,7 @@ mod tests {
                 "/future-data",
                 "/admin/accounts",
                 "/admin/audit",
-                "/account/tokens",
+                "/account/tokens/future/action",
                 "/refresh",
                 "/annotations",
             ] {
@@ -3659,6 +3887,7 @@ mod tests {
                 get(&app, cookie, "/account/sessions").await.0,
                 StatusCode::OK
             );
+            assert_eq!(get(&app, cookie, "/account/tokens").await.0, StatusCode::OK);
         }
 
         let (status, empty_viewer) = get(&app, &viewer_cookie, "/sessions").await;
@@ -3671,6 +3900,174 @@ mod tests {
         crate::auth::grant_source(&state, "viewer", &source_a)
             .await
             .unwrap();
+
+        let viewer_user = state
+            .auth
+            .authenticate("viewer", "Synthetic1-password")
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let admin_user = state
+            .auth
+            .authenticate("admin", "Synthetic1-password")
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let report_token = crate::tokens::create(
+            &state.auth,
+            &viewer_user,
+            "Synthetic reports",
+            "reports:read",
+            1,
+        )
+        .await
+        .unwrap();
+        let status_token = crate::tokens::create(
+            &state.auth,
+            &viewer_user,
+            "Synthetic status",
+            "content:read",
+            1,
+        )
+        .await
+        .unwrap();
+        let metrics_token = crate::tokens::create(
+            &state.auth,
+            &admin_user,
+            "Synthetic metrics",
+            "metrics:read",
+            1,
+        )
+        .await
+        .unwrap();
+        async fn bearer_request(
+            app: &Router,
+            token: &str,
+            cookie: &str,
+            path: &str,
+        ) -> (StatusCode, String) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let status = response.status();
+            let body = String::from_utf8(
+                to_bytes(response.into_body(), 256 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(
+                !body.contains(token),
+                "bearer material must not appear in responses"
+            );
+            (status, body)
+        }
+        let (status, report) = bearer_request(
+            &app,
+            &report_token,
+            &admin_cookie,
+            "/api/sessions/ses_allowed/postmortem",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(serde_json::from_str::<serde_json::Value>(&report).is_ok());
+        assert!(!report.contains("allowed searchable phrase"));
+        for path in [
+            "/api/sessions/ses_denied/postmortem",
+            "/api/sessions/unknown/postmortem",
+        ] {
+            let (status, error) = bearer_request(&app, &report_token, &admin_cookie, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&error).unwrap()["error"],
+                "not_found"
+            );
+        }
+        assert_eq!(
+            bearer_request(
+                &app,
+                &status_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/live-status"
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            bearer_request(
+                &app,
+                &status_token,
+                &admin_cookie,
+                "/api/sessions/ses_denied/live-status"
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            bearer_request(&app, &metrics_token, &viewer_cookie, "/metrics")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        for path in [
+            "/metrics",
+            "/api/sessions/ses_allowed/live-status",
+            "/account/tokens",
+            "/sessions/ses_allowed",
+        ] {
+            assert_eq!(
+                bearer_request(&app, &report_token, &admin_cookie, path)
+                    .await
+                    .0,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            get(&app, &admin_cookie, "/api/sessions/ses_allowed/postmortem")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            bearer_request(
+                &app,
+                "invalid",
+                &admin_cookie,
+                "/api/sessions/ses_allowed/postmortem"
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/ses_allowed/postmortem")
+                    .header(header::AUTHORIZATION, format!("Bearer {report_token}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {report_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::UNAUTHORIZED);
 
         let (status, admin_sessions) = get(&app, &admin_cookie, "/sessions").await;
         assert_eq!(status, StatusCode::OK);
@@ -3762,6 +4159,28 @@ mod tests {
         crate::auth::revoke_source(&state, "viewer", &source_a)
             .await
             .unwrap();
+        assert_eq!(
+            bearer_request(
+                &app,
+                &report_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/postmortem"
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            bearer_request(
+                &app,
+                &status_token,
+                &admin_cookie,
+                "/api/sessions/ses_allowed/live-status"
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(
             get(&app, &viewer_cookie, "/sessions/ses_allowed").await.0,
             StatusCode::NOT_FOUND
