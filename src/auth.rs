@@ -1145,6 +1145,30 @@ pub async fn revoke_sessions(state: &StateStore, username: &str) -> Result<()> {
 }
 
 impl AuthState {
+    // Candidate resolution only: the final MFA/session commit must recheck this link and generation.
+    #[allow(dead_code, reason = "OIDC browser bridge is not activated yet")]
+    pub(crate) async fn oidc_account(
+        &self,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<Option<(CurrentUser, String)>> {
+        #[derive(sqlx::FromRow)]
+        struct LinkedAccount {
+            #[sqlx(flatten)]
+            account: AccountRow,
+            link_id: String,
+        }
+        let linked: Option<LinkedAccount> = sqlx::query_as("SELECT a.id,a.username,a.password_hash,a.enabled,a.role,a.session_generation,a.display_name,a.password_changed_at,l.id AS link_id FROM account_oidc_links l JOIN accounts a ON a.id=l.account_id WHERE l.issuer=? COLLATE BINARY AND l.subject=? COLLATE BINARY AND a.enabled=1")
+            .bind(issuer).bind(subject).fetch_optional(&self.pool).await.context("resolve provisioned OIDC identity")?;
+        match linked {
+            Some(linked) => Ok(Some((
+                self.current_account(linked.account).await?,
+                linked.link_id,
+            ))),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn accept_password_attempt(&self) -> bool {
         self.password_attempts.accept_limit(60)
     }

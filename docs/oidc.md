@@ -261,15 +261,54 @@ Run `cargo test oidc::protocol` in an environment allowing loopback test sockets
 the full `bash scripts/check.sh`. This increment changes no state schema and needs
 no refresh or index rebuild; restart after replacing the executable.
 
+## Internal browser/session bridge (not activated)
+
+The internal browser bridge binds the protocol engine to an anonymous server-side
+session. No production OIDC routes, login button, or enable flag are registered yet.
+Starting requires the existing session CSRF token and exactly one `Origin` header
+matching the configured HTTPS origin. Missing, duplicate, null, cross-origin, or
+malformed origins fail closed; forwarded host headers and user-supplied bindings
+are not trusted. Authenticated account switching and unauthenticated local mode
+are rejected. The engine and browser configuration must agree on issuer, client ID,
+and callback URL.
+
+A random opaque binding is saved through the normal session store before returning
+the authorization URL. Starting again in that anonymous session replaces its pending
+protocol transaction. The callback removes and saves the binding before the token
+request; the protocol engine independently enforces one-use state under its mutex.
+A subsequent request can resume using the server-issued session cookie, while another
+browser cannot consume the original transaction. Stale parallel session data cannot
+replay an already-consumed protocol transaction. Process restart loses protocol
+transactions, so an old browser binding alone is insufficient to resume sign-in.
+
+After cryptographic verification, resolution requires the exact provisioned
+issuer/subject link and a currently enabled local account. The candidate contains
+the link ID, current credential generation, local role/source grants/preferences,
+and verified identity/logout hint. Provider email/role/team claims never grant
+permissions or provision an account. Link removal, account disablement, and local
+permission changes while the provider flow is pending are respected. Diagnostics
+do not echo provider identity values.
+
+This returns only an in-memory **candidate**, not an authenticated session: it does
+not set an account/MFA proof or create session inventory. Provider access tokens,
+ID tokens, and subject identity are not saved into browser transaction payloads.
+Final local MFA/enrollment handling, fresh link/generation checks, rotated session
+establishment, and logout/revocation must still be implemented before activation.
+The candidate must not be treated as an authorization decision or logged/serialized.
+
+Run `cargo test browser_` for session-bound signed-provider regressions, or the full
+`bash scripts/check.sh`. There is no schema change, migration, or index rebuild.
+
 ## Remaining sign-in implementation
 
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
 exact issuer matching, provider capabilities, and registered callback/logout URLs.
 Discovery, key loading, and protected secret loading are implemented for explicit
-preflight only; they must still be wired into runtime activation. Browser integration must bind the engine to a server-owned
-session, require CSRF/origin checks for initiating login, avoid logging callback
-codes/state, and resolve only the administrator-provisioned issuer/subject link.
+preflight only; they must still be wired into runtime activation. The internal browser
+bridge implements server-owned session binding, CSRF/origin initiation checks, and
+provisioned identity resolution, but production HTTP routing/rendering and safe
+callback error handling/logging are not registered yet.
 Current enabled state, identity link, credential generation, local permissions, and
 MFA must be rechecked before establishing a rotated local session. Provider MFA/role
 claims must not silently bypass local requirements. Local session revocation/lifetime,

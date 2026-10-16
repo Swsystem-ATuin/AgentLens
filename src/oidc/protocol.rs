@@ -85,6 +85,18 @@ fn binding_key(binding: &str) -> Result<[u8; 32]> {
 }
 
 impl Protocol {
+    pub(super) fn matches_configuration(&self, config: &Configuration) -> bool {
+        self.issuer == config.issuer
+            && self.client_id == config.client_id
+            && self.client.redirect_uri().is_some_and(|redirect| {
+                redirect.as_str()
+                    == format!(
+                        "{}/login/oidc/callback",
+                        config.public_url.trim_end_matches('/')
+                    )
+            })
+    }
+
     /// Runtime activation must fetch both documents over bounded verified HTTPS and load
     /// any confidential secret from owner-only storage before constructing this engine.
     pub(super) fn from_documents(

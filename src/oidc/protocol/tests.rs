@@ -19,6 +19,313 @@ const CLIENT_ID: &str = "synthetic-client";
 const ACCESS: &str = "synthetic-access-token-PrivateMarker";
 const SUBJECT: &str = "synthetic-subject-PrivateMarker";
 
+async fn browser_fixture() -> (tempfile::TempDir, crate::auth::StateStore, String) {
+    use crate::{auth, oidc::links};
+    let dir = tempfile::tempdir().unwrap();
+    let state = auth::StateStore::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let password = dir.path().join("password");
+    let subject = dir.path().join("subject");
+    std::fs::write(&password, "Synthetic1-password").unwrap();
+    std::fs::write(&subject, SUBJECT).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&password, &subject] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    for username in ["admin", "member"] {
+        auth::create_account(&state, username, &password, None)
+            .await
+            .unwrap();
+    }
+    let config_path = dir.path().join("oidc.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&crate::oidc::tests::configuration()).unwrap(),
+    )
+    .unwrap();
+    let link = links::link_file(&state.auth, "member", &config_path, &subject)
+        .await
+        .unwrap();
+    (dir, state, link)
+}
+
+fn browser_session(state: &crate::auth::StateStore) -> tower_sessions::Session {
+    tower_sessions::Session::new(None, std::sync::Arc::new(state.sessions.clone()), None)
+}
+
+fn browser_headers() -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("origin", "https://lens.example.test".parse().unwrap());
+    headers
+}
+
+#[tokio::test]
+async fn browser_bridge_binds_real_sessions_and_resolves_only_local_permissions_without_login() {
+    use crate::{auth, oidc::browser::BrowserFlow};
+    let (_dir, state, link) = browser_fixture().await;
+    auth::grant_source(&state, "member", &format!("src_{}", "a".repeat(64)))
+        .await
+        .unwrap();
+    let flow = BrowserFlow::new(&config(true), protocol(true)).unwrap();
+    let session = browser_session(&state);
+    let csrf = auth::csrf_token(&session).await.unwrap();
+    let args = params(
+        &flow
+            .begin(&state.auth, &session, &browser_headers(), &csrf)
+            .await
+            .unwrap(),
+    );
+    let saved_id = session.id().unwrap();
+    // A new Session object represents a subsequent request with the same server-issued cookie.
+    let resumed = tower_sessions::Session::new(
+        Some(saved_id),
+        std::sync::Arc::new(state.sessions.clone()),
+        None,
+    );
+    let provider = Provider::new(&token(&claims(&args["nonce"])));
+    let candidate = flow
+        .finish(&state.auth, &resumed, &args["state"], "code", &provider)
+        .await
+        .unwrap();
+    assert_eq!(candidate.user.username, "member");
+    assert_eq!(
+        candidate.user.access.role(),
+        "viewer",
+        "provider admin claim cannot grant local permissions"
+    );
+    assert_eq!(candidate.user.access.source_count(), 1);
+    assert_eq!(candidate.link_id, link);
+    assert_eq!(candidate.identity.subject, SUBJECT);
+    assert_eq!(candidate.identity.issuer, ISSUER);
+    assert!(candidate.user.credential_generation > 0);
+    assert!(
+        state.auth.current_user(&resumed).await.unwrap().is_none(),
+        "a candidate must never establish authentication before local MFA/session checks"
+    );
+    assert_eq!(
+        resumed.get::<bool>("auth.mfa_verified").await.unwrap(),
+        None
+    );
+    let inventory: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
+        .fetch_one(&state.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(inventory, 0);
+    let payloads: Vec<Vec<u8>> = sqlx::query_scalar("SELECT data FROM tower_sessions")
+        .fetch_all(&state.auth.pool)
+        .await
+        .unwrap();
+    for payload in payloads {
+        for sensitive in [
+            SUBJECT,
+            ACCESS,
+            candidate.identity.id_token_hint.as_str(),
+            "synthetic-code",
+        ] {
+            assert!(
+                !payload
+                    .windows(sensitive.len())
+                    .any(|window| window == sensitive.as_bytes()),
+                "browser transaction storage must not persist provider credentials or subject identity"
+            );
+        }
+    }
+    assert!(
+        flow.finish(&state.auth, &session, &args["state"], "code", &provider)
+            .await
+            .is_err(),
+        "stale parallel session state must not permit callback replay"
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn browser_bridge_rejects_csrf_origin_cross_browser_and_account_switching() {
+    use crate::{auth, oidc::browser::BrowserFlow};
+    let (_dir, state, _) = browser_fixture().await;
+    for field in ["issuer", "client", "origin"] {
+        let mut mismatched = config(true);
+        match field {
+            "issuer" => mismatched.issuer = "https://other.example.test/tenant".into(),
+            "client" => mismatched.client_id = "different-client".into(),
+            _ => mismatched.public_url = "https://other.example.test".into(),
+        }
+        assert!(
+            BrowserFlow::new(&mismatched, protocol(true)).is_err(),
+            "{field} mismatch must fail construction"
+        );
+    }
+    let flow = BrowserFlow::new(&config(true), protocol(true)).unwrap();
+    let session = browser_session(&state);
+    let csrf = auth::csrf_token(&session).await.unwrap();
+    for origin in [
+        None,
+        Some("null"),
+        Some("http://lens.example.test"),
+        Some("https://other.example.test"),
+        Some("https://lens.example.test/"),
+    ] {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(origin) = origin {
+            headers.insert("origin", origin.parse().unwrap());
+        }
+        assert!(
+            flow.begin(&state.auth, &session, &headers, &csrf)
+                .await
+                .is_err()
+        );
+    }
+    let mut duplicate = browser_headers();
+    duplicate.append("origin", "https://lens.example.test".parse().unwrap());
+    assert!(
+        flow.begin(&state.auth, &session, &duplicate, &csrf)
+            .await
+            .is_err()
+    );
+    assert!(
+        flow.begin(&state.auth, &session, &browser_headers(), "wrong-csrf")
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .get::<String>("oidc.browser_binding")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let args = params(
+        &flow
+            .begin(&state.auth, &session, &browser_headers(), &csrf)
+            .await
+            .unwrap(),
+    );
+    let other = browser_session(&state);
+    let provider = Provider::new(&token(&claims(&args["nonce"])));
+    assert!(
+        flow.finish(&state.auth, &other, &args["state"], "code", &provider)
+            .await
+            .is_err()
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(
+        flow.finish(&state.auth, &session, &args["state"], "code", &provider)
+            .await
+            .is_ok(),
+        "another browser must not consume the legitimate transaction"
+    );
+    let (user, generation) = state
+        .auth
+        .authenticate("member", "Synthetic1-password")
+        .await
+        .unwrap()
+        .unwrap();
+    auth::establish_session(&state.auth, &session, &user, generation, None)
+        .await
+        .unwrap();
+    assert!(
+        flow.begin(&state.auth, &session, &browser_headers(), &csrf)
+            .await
+            .is_err()
+    );
+    let mut local = state.clone();
+    local.enable_local_mode();
+    assert!(
+        flow.begin(
+            &local.auth,
+            &other,
+            &browser_headers(),
+            &auth::csrf_token(&other).await.unwrap()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn browser_callback_rechecks_links_enabled_state_permissions_and_generation() {
+    use crate::{
+        auth,
+        oidc::{browser::BrowserFlow, links},
+    };
+    for mutation in [
+        "unlink",
+        "disable",
+        "permissions",
+        "different-subject",
+        "issuer-case",
+    ] {
+        let (_dir, state, link) = browser_fixture().await;
+        let flow = BrowserFlow::new(&config(true), protocol(true)).unwrap();
+        let session = browser_session(&state);
+        let csrf = auth::csrf_token(&session).await.unwrap();
+        let args = params(
+            &flow
+                .begin(&state.auth, &session, &browser_headers(), &csrf)
+                .await
+                .unwrap(),
+        );
+        match mutation {
+            "unlink" => links::unlink(&state.auth, "member", &link).await.unwrap(),
+            "disable" => auth::set_enabled(&state, "member", false).await.unwrap(),
+            "permissions" => {
+                auth::set_role(&state, "member", auth::AccountRole::Auditor)
+                    .await
+                    .unwrap();
+                auth::grant_source(&state, "member", &format!("src_{}", "b".repeat(64)))
+                    .await
+                    .unwrap();
+                auth::revoke_sessions(&state, "member").await.unwrap();
+            }
+            "issuer-case" => {
+                sqlx::query("UPDATE account_oidc_links SET issuer=? WHERE id=?")
+                    .bind("https://IDENTITY.example.test/tenant")
+                    .bind(&link)
+                    .execute(&state.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let mut payload = claims(&args["nonce"]);
+        if mutation == "different-subject" {
+            payload["sub"] = json!(SUBJECT.to_ascii_lowercase());
+        }
+        let provider = Provider::new(&token(&payload));
+        let candidate = flow
+            .finish(&state.auth, &session, &args["state"], "code", &provider)
+            .await;
+        if mutation == "permissions" {
+            let candidate = candidate.unwrap();
+            assert_eq!(candidate.user.access.role(), "auditor");
+            assert_eq!(candidate.user.access.source_count(), 1);
+            let generation: i64 = sqlx::query_scalar(
+                "SELECT session_generation FROM accounts WHERE username='member'",
+            )
+            .fetch_one(&state.auth.pool)
+            .await
+            .unwrap();
+            assert_eq!(candidate.user.credential_generation, generation);
+        } else {
+            assert!(
+                candidate.is_err(),
+                "{mutation} must not resolve a local identity"
+            );
+        }
+        assert!(state.auth.current_user(&session).await.unwrap().is_none());
+        assert!(
+            flow.finish(&state.auth, &session, &args["state"], "code", &provider)
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn preparation_fetches_pinned_metadata_and_keys_without_credentials() {
     use crate::oidc::{

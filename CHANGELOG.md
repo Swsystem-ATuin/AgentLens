@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Gated internal OIDC browser/session bridge with CSRF and exact-origin initiation checks, persisted opaque browser binding, one-use callback handling, and exact provisioned identity resolution using current local account permissions. Signed-provider regressions cover resumed/cross-browser sessions, replay and account/link changes; no authenticated session, provider credentials, or MFA proof is persisted, and production routes remain disabled pending MFA/session/logout completion.
+
 - Opt-in OIDC declared-deployment preflight (`oidc-check --prepare --deployment`) requires an explicit matching HTTPS public origin, Secure-cookie declaration, current read-only state, and an enabled local administrator password record before credentials/network access. Does not certify proxy/MFA readiness, mutate state, or enable federated sign-in.
 
 - Explicit OIDC `oidc-check --prepare` preflight loads bounded owner-only client-secret files and verified discovery/signing keys, constructs the internal protocol engine, and fails closed without writing state or enabling sign-in. Includes synthetic HTTPS and credential/privacy regressions; deployment/session/MFA/logout integration remains pending.

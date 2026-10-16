@@ -4,6 +4,14 @@ use serde::Deserialize;
 use std::path::Path;
 use webauthn_rs::prelude::Url;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "browser bridge is gated pending local MFA/session/logout integration"
+    )
+)]
+mod browser;
 mod deployment;
 mod discovery;
 pub(crate) mod links;
