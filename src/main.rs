@@ -56,6 +56,15 @@ enum Command {
         /// Load protected credentials and verified provider signing keys; does not enable sign-in.
         #[arg(long, conflicts_with = "discover")]
         prepare: bool,
+        /// Check declared deployment settings and existing local administrator credentials.
+        #[arg(long, requires_all = ["prepare", "public_url", "secure_cookies"])]
+        deployment: bool,
+        /// Declared HTTPS origin for the intended deployment.
+        #[arg(long, requires = "deployment")]
+        public_url: Option<String>,
+        /// Confirm the intended deployment will use Secure session cookies.
+        #[arg(long, requires = "deployment")]
+        secure_cookies: bool,
     },
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
@@ -489,7 +498,23 @@ async fn main() -> Result<()> {
             config,
             discover,
             prepare,
+            deployment,
+            public_url,
+            secure_cookies,
         } => {
+            if deployment {
+                oidc::prepare_deployment_file(
+                    &config,
+                    public_url.as_deref(),
+                    secure_cookies,
+                    &cli.state_database,
+                )
+                .await?;
+                println!(
+                    "OIDC declared deployment prerequisites and protocol preparation successful; sign-in remains unavailable pending browser/session/logout integration"
+                );
+                return Ok(());
+            }
             if prepare {
                 oidc::prepare_file(&config).await?;
                 println!(

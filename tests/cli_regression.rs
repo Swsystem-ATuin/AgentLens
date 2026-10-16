@@ -41,6 +41,42 @@ fn oidc_preflight_is_offline_does_not_open_databases_and_rejects_incomplete_conf
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(String::from_utf8_lossy(&result.stdout).contains("sign-in remains unavailable"));
+    let deployment = run(
+        dir.path(),
+        &[
+            "oidc-check",
+            "--config",
+            "oidc.json",
+            "--prepare",
+            "--deployment",
+            "--public-url",
+            "https://lens.example.test",
+            "--secure-cookies",
+        ],
+    );
+    assert!(!deployment.status.success());
+    assert!(
+        String::from_utf8_lossy(&deployment.stderr)
+            .contains("open existing OIDC deployment state read-only"),
+        "deployment prerequisites must fail before secret loading or network requests"
+    );
+    for extra in [
+        vec!["--deployment"],
+        vec!["--public-url", "https://lens.example.test"],
+        vec![
+            "--prepare",
+            "--deployment",
+            "--public-url",
+            "https://lens.example.test",
+        ],
+    ] {
+        let mut args = vec!["oidc-check", "--config", "oidc.json"];
+        args.extend(extra);
+        assert!(
+            !run(dir.path(), &args).status.success(),
+            "deployment declarations must be explicit and complete"
+        );
+    }
     let prepared = run(
         dir.path(),
         &["oidc-check", "--config", "oidc.json", "--prepare"],

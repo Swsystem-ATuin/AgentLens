@@ -86,6 +86,35 @@ Success is **not** deployment readiness or authentication activation. This comma
 does not verify running Secure cookies, a usable local administrator, client
 registration, token/logout endpoint behavior, or browser/MFA/session integration.
 
+To also check declared deployment prerequisites against existing persistent state:
+
+```sh
+cargo run -- --state-database /var/lib/agent-lens/agent-lens-state.sqlite oidc-check \
+  --config oidc.json --prepare --deployment \
+  --public-url https://lens.example.test --secure-cookies
+```
+
+`--deployment` requires `--prepare`, `--public-url`, and `--secure-cookies`; these
+declarations are explicit flags, not inferred from environment variables or proxy
+headers. The deployment public URL must be an HTTPS origin matching the configured
+OIDC public origin (equivalent default ports and a final slash are accepted). Future
+runtime integration must use the same gate and reject unauthenticated local mode.
+
+Before loading secrets or making network requests, this mode opens the existing
+state database read-only, requires schema v10, and requires an enabled local
+administrator with a structurally valid Argon2id password credential. It does not
+create or migrate state, revoke credentials, write audit events, or open the index.
+Missing, unsupported, or malformed state fails closed. Migrate older state using
+the normal account/service workflow with a backup first; this increment itself
+requires no migration or rebuild. Preparation then uses the same loaded configuration
+to fetch and validate discovery and keys, without re-reading a potentially changed file.
+
+This is a **declared-prerequisites preflight**, not a live deployment certification:
+it cannot prove password knowledge, MFA possession/keyring availability, actual
+reverse-proxy TLS/cookie behavior, or client/logout registration. Test local password
+and MFA recovery access manually before any future activation. No sign-in is enabled,
+and runtime must recheck current account/deployment state rather than trust this result.
+
 Every field is required; unknown fields and unsupported policy values are rejected.
 Use `{"method":"none"}` only for a provider registration supporting public clients.
 Secret values are not accepted inline. The secret path must be absolute; preflight

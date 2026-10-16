@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::path::Path;
 use webauthn_rs::prelude::Url;
 
+mod deployment;
 mod discovery;
 pub(crate) mod links;
 mod preparation;
@@ -24,6 +25,17 @@ pub(crate) async fn discover_file(path: &Path) -> Result<()> {
 
 pub(crate) async fn prepare_file(path: &Path) -> Result<()> {
     let config = load_file(path)?;
+    preparation::prepare(&config).await.map(|_| ())
+}
+
+pub(crate) async fn prepare_deployment_file(
+    path: &Path,
+    public_url: Option<&str>,
+    secure_cookies: bool,
+    state_database: &Path,
+) -> Result<()> {
+    let config = load_file(path)?;
+    deployment::check(&config, public_url, secure_cookies, false, state_database).await?;
     preparation::prepare(&config).await.map(|_| ())
 }
 
@@ -124,7 +136,7 @@ fn validate(config: &Configuration) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn configuration() -> serde_json::Value {
+    pub(super) fn configuration() -> serde_json::Value {
         serde_json::json!({
             "issuer": "https://identity.example.test/tenant",
             "public_url": "https://lens.example.test",

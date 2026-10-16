@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Opt-in OIDC declared-deployment preflight (`oidc-check --prepare --deployment`) requires an explicit matching HTTPS public origin, Secure-cookie declaration, current read-only state, and an enabled local administrator password record before credentials/network access. Does not certify proxy/MFA readiness, mutate state, or enable federated sign-in.
+
 - Explicit OIDC `oidc-check --prepare` preflight loads bounded owner-only client-secret files and verified discovery/signing keys, constructs the internal protocol engine, and fails closed without writing state or enabling sign-in. Includes synthetic HTTPS and credential/privacy regressions; deployment/session/MFA/logout integration remains pending.
 
 - Internal OIDC authorization-code engine using maintained `openidconnect`, with S256 PKCE, 256-bit state/nonce, browser-bound bounded one-use transactions, RS256 signature/issuer/audience/authorized-party/nonce/time/hash validation, RSA key-size limits, bounded HTTPS token transport, and signed synthetic-provider regressions. Not wired into browser authentication: runtime activation, local identity/MFA/session integration, and logout/revocation remain required before enabling sign-in.
