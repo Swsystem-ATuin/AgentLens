@@ -1,5 +1,8 @@
 # Personal access tokens
 
+For the complete automation contract, response fields, errors, and examples, see the
+dedicated [API reference](api.md). This document covers token provisioning and lifecycle.
+
 Signed-in users manage personal access tokens at `/account/tokens`. Creating a token requires the current password and a session-bound CSRF token. Password confirmation shares the [process-wide password-attempt budget](browser-administration.md). Revocation is an account-scoped, CSRF-protected POST. Administrators can inspect metadata and revoke another account's tokens through the audited browser surface, never reveal their secrets. Local mode has no token-owning identity and redirects management to Account.
 
 ## Automation endpoints and scopes

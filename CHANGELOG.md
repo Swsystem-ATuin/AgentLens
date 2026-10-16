@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Dedicated automation API reference covering every supported bearer endpoint, complete JSON response shapes, scopes and source authorization, rate limits, error envelopes, privacy, compatibility, and credential-safe curl examples; linked from the README and related feature documentation.
+
 - Explicit OIDC discovery preflight (`oidc-check --discover`) with exact issuer pinning, required code/S256/client-authentication/logout capabilities, bounded verified HTTPS without redirects or ambient proxies, sanitized diagnostics, and real synthetic-TLS transport regressions. Offline validation remains the default and federated sign-in remains unavailable; containers now include CA certificates for outbound TLS.
 
 - Offline OIDC configuration preflight with required issuer/client/public URL and explicit linking, local-permission, logout, and break-glass policies. Rejects incomplete/unsafe configuration without contacting providers or reading secrets; federated sign-in remains unavailable.

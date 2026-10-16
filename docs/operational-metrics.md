@@ -1,8 +1,8 @@
 # Operational metrics
 
-Agent Lens exposes a Prometheus text-format endpoint at `/metrics`. It requires an administrator in the default server mode; explicit loopback-only `serve --local` mode serves it without an account. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
+Agent Lens exposes a Prometheus text-format endpoint at `/metrics`. It requires an admin or operator in the default server mode; explicit loopback-only `serve --local` mode serves it without an account. See the dedicated [API reference](api.md#get-metrics) for bearer scopes, authentication, errors, limits, and examples. It follows the official [Prometheus exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/): UTF-8, newline-terminated samples, `HELP`/`TYPE` descriptors, and the response content type `text/plain; version=0.0.4; charset=utf-8`.
 
-The endpoint requires an administrator account and accepts either its current browser session or HTTP Basic credentials. Other browser routes use server-side session authentication. Valid viewer credentials receive `403`. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check, avoid putting the password in shell history:
+The endpoint accepts a scoped personal access token, a current admin/operator browser session, or individual admin/operator HTTP Basic credentials. Enrolled or required MFA accounts cannot use password-only Basic authentication; use a `metrics:read` token. Other browser routes use server-side session authentication. Valid viewer/auditor credentials receive `403`. Metrics authentication does not refresh sources, contact agents, or read raw homes. For a manual check without MFA, avoid putting the password in shell history:
 
 ```bash
 curl --user alice http://127.0.0.1:3001/metrics

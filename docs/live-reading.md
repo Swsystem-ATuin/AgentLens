@@ -1,5 +1,9 @@
 # Opt-in live reading
 
+For the bearer-authenticated live-status endpoint and JSON field reference, see the
+dedicated [API reference](api.md#get-apisessionsstable_idlive-status). This document
+describes browser live-reading behavior.
+
 Session pages offer a disabled-by-default **Live updates** checkbox. Enabling it stores only the opt-in flag in browser `sessionStorage`, scoped by the stable session ID. No request is made while it is disabled. The setting follows the same session across transcript filters and sections for the lifetime of that browser tab.
 
 Live reading observes the disposable SQLite index; it does not read raw rollouts, run `refresh`, contact an agent process, open SSH, or claim that copied work is active. Publish or copy sources using the [snapshot contract](refresh.md#snapshot-publication-contract), then run `cargo run -- refresh --data ...` separately. Readers see the new projection only after that transaction commits.

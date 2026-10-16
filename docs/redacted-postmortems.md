@@ -1,5 +1,9 @@
 # Redacted postmortem exports
 
+For bearer-authenticated automation and the full JSON response contract, see the
+dedicated [API reference](api.md#get-apisessionsstable_idpostmortem). The download
+routes below are the browser-session surface.
+
 Each visible session page links to authenticated JSON and Markdown downloads:
 
 ```text
