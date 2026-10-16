@@ -367,6 +367,19 @@ pub(crate) fn factor_proof(
     auth.passkeys
         .insert(user, &format!("i:{inventory}"), State::Proof, 90)
 }
+
+/// Only a verified OIDC-candidate-bound assertion can mint this short-lived completion proof.
+#[allow(dead_code, reason = "OIDC browser routing remains gated")]
+pub(crate) async fn finish_oidc_authentication(
+    auth: &AuthState,
+    ticket: &str,
+    binding: &str,
+    response: PublicKeyCredential,
+) -> Result<String> {
+    ensure!(binding.starts_with("o:"), "invalid OIDC passkey binding");
+    let user = finish_authentication(auth, ticket, binding, response, true).await?;
+    auth.passkeys.insert(&user, binding, State::Proof, 90)
+}
 pub(crate) async fn delete(
     auth: &AuthState,
     user: &CurrentUser,

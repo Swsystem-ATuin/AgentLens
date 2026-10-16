@@ -8,6 +8,8 @@ use crate::{
 };
 use tower_sessions::Session;
 
+mod passkeys;
+
 async fn candidate(state: &auth::StateStore) -> (Session, Candidate, String) {
     let flow = BrowserFlow::new(&config(true), protocol(true)).unwrap();
     let session = browser_session(state);

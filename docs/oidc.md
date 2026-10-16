@@ -305,9 +305,9 @@ The completion transaction rechecks the enabled local account, exact identity/li
 and credential generation under the SQLite writer lock, refreshes local permissions,
 and uses the existing local MFA verifier. Enrolled TOTP requires a fresh one-use step
 or recovery code, with the existing persistent attempt budget and recovery/audit policy.
-Passkey-only accounts fail closed without a valid bound proof; the OIDC passkey
-challenge/browser path is not connected yet. Existing password-first passkey login
-and management are unchanged, and OIDC activation remains blocked on that integration.
+Passkey-only accounts fail closed without a valid bound proof. The gated passkey
+challenge/completion path below verifies that proof; production browser routing is
+still unconnected. Existing password-first passkey login and management are unchanged.
 
 Factor consumption and pending session inventory are committed together. The pending
 inventory has an intentionally invalid browser ID and cannot authorize a session,
@@ -326,10 +326,43 @@ and account-wide revocation continue to apply. The verified identity/logout hint
 in memory for future logout integration, not in the browser session payload.
 
 This code is still gated: no production OIDC route or enable flag is registered.
-Production routing, secure pending-candidate handling, passkey completion, RP-initiated
+Production routing, secure pending-candidate handling, RP-initiated
 and back-channel logout remain required before activation. Run `cargo test oidc_completion`
 for signed-provider, local-factor, rotation, enrollment-middleware, audit-failure,
 and deterministic revocation-during-rotation regressions.
+
+### Gated password-first passkey completion
+
+An OIDC candidate can start a passkey challenge only in its original browser session,
+within its five-minute lifetime, after CSRF/exact-origin checks. Passkeys must already
+be explicitly configured for the same HTTPS origin as OIDC. The candidate's local
+account password is verified first using the normal shared password-attempt budget;
+wrong passwords record a fixed failed-login event and cannot start WebAuthn. A fresh
+link/account/generation check also precedes the challenge. OIDC does not turn passkeys
+into passwordless authentication: they remain a second factor.
+
+Each candidate has a separate random in-memory `o:` binding, not a request parameter
+or the browser ID alone. The existing WebAuthn verifier requires user verification,
+the configured origin and challenge, a valid signature from a currently enrolled key,
+and current account/credential generation and signature-counter state. The assertion
+ticket is one-use and subject to existing challenge lifetime/capacity and MFA-attempt
+limits. An assertion cannot move to another candidate, even in the same browser, or
+to ordinary password/passkey or account-management challenges.
+
+Only a verified OIDC-bound assertion can mint a 90-second in-memory factor proof for
+that candidate/account/generation. Completion consumes that proof through the same
+local MFA transaction and fresh identity/session-binding gates as TOTP/recovery,
+then explicitly rotates the session. Neither proof nor assertion is persisted into
+the session payload. Failure or expiry requires restarting the candidate; provider
+claims still cannot stand in for the local factor. Runtime restart loses pending
+challenges and proofs.
+
+`cargo test oidc_passkey` exercises signed synthetic-provider flow with real software-
+authenticator signatures, password rejection, user-verification policy, same-browser
+candidate isolation, CSRF/origin/configuration/expiry checks, assertion tampering,
+unlink/disable/revocation, and successful MFA-verified rotated sessions. No schema
+change, migration, or index rebuild is needed. Production OIDC routes remain disabled
+pending browser/pending-candidate and logout integration.
 
 Run `cargo test browser_` for session-bound signed-provider regressions, or the full
 `bash scripts/check.sh`. There is no schema change, migration, or index rebuild.
@@ -345,8 +378,8 @@ bridge implements server-owned session binding, CSRF/origin initiation checks, a
 provisioned identity resolution, but production HTTP routing/rendering and safe
 callback error handling/logging are not registered yet.
 The gated completion implements fresh enabled/link/generation/local-permission checks,
-TOTP/recovery verification, and rotated session establishment, but the OIDC passkey
-challenge path and production pending-candidate handling remain unconnected. Provider
+TOTP/recovery and password-first passkey verification, and rotated session establishment,
+but production routing and pending-candidate handling remain unconnected. Provider
 MFA/role claims must not silently bypass local requirements. RP-initiated logout,
 signed replay-protected back-channel logout, and end-to-end
 browser/provider regressions are still required. Configuration

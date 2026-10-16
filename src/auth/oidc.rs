@@ -7,6 +7,7 @@ pub(crate) struct Identity<'a> {
     pub(crate) link_id: &'a str,
     pub(crate) issuer: &'a str,
     pub(crate) subject: &'a str,
+    pub(crate) factor_binding: &'a str,
 }
 
 pub(crate) async fn complete(
@@ -20,10 +21,6 @@ pub(crate) async fn complete(
     ensure!(
         state.current_user(session).await?.is_none(),
         "OIDC requires an anonymous session"
-    );
-    let proof_binding = format!(
-        "s:{}",
-        session.id().context("OIDC browser session unavailable")?
     );
     let mut tx = state
         .pool
@@ -42,8 +39,14 @@ pub(crate) async fn complete(
         .oidc_account(identity.issuer, identity.subject)
         .await?
         .context("OIDC local identity unavailable")?;
-    if !crate::mfa::verify_in_transaction(&mut tx, state, &user, factor, Some(&proof_binding))
-        .await?
+    if !crate::mfa::verify_in_transaction(
+        &mut tx,
+        state,
+        &user,
+        factor,
+        Some(identity.factor_binding),
+    )
+    .await?
     {
         // Invalid-factor budgets and fixed MFA audit facts must survive rejection.
         tx.commit()
