@@ -369,6 +369,50 @@ Run `cargo test browser_` for session-bound signed-provider regressions, or the 
 
 ## Remaining sign-in implementation
 
+### Gated RP-initiated logout
+
+The internal RP-initiated logout bridge requires the same-origin/CSRF-protected local
+request and retains the completed sign-in context bound to its exact local session
+inventory and credential generation. It revokes the current local session and clears
+its cookie payload **before** preparing any provider handoff. A stale,
+foreign-session, wrong-issuer, or wrong-client context cannot preserve local login
+or cause another identity's provider logout. Other local sessions remain unchanged.
+Local logout does not depend on the provider being reachable, accepting the request,
+or returning a callback; signing out locally is not proof of provider sign-out.
+
+The discovered, validated HTTPS `end_session_endpoint` is pinned into the protocol
+engine. The prepared HTML form uses POST, not a redirect URL containing credentials.
+Its hidden fields are the previously verified `id_token_hint`, configured `client_id`,
+fixed `post_logout_redirect_uri`, and independent 256-bit state. Values are HTML-escaped;
+the response sets `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and a CSP
+allowing form submission only to the discovered provider origin, with no scripts,
+base URL, or framing. The user explicitly continues provider sign-out or returns
+to local sign-in. Future route/access-log configuration must not capture the sensitive
+form body or logout hints. The context/request deliberately have no Debug/serialization
+implementation, and the hint is not written into browser session payloads.
+
+Register the exact planned return URL, `<public_url>/login/oidc/logout/callback`, at
+the provider before any future activation. It is derived only from the configured
+public origin, never from query parameters, forwarded headers, or a requested return
+destination. The logout callback route is not registered yet.
+
+After local revocation, the bridge explicitly rotates to a fresh anonymous session
+and saves only a random logout binding. In-memory state is independently browser-bound,
+one-use, constant-time checked, and expires after five minutes. The global pending
+ceiling is 1024; expired entries are pruned on start. Wrong state consumes that
+browser's transaction; another browser cannot consume the legitimate one. Restart
+loses pending logout transactions without restoring local login. Callback handling
+never authenticates, revokes another session, or logs out a later local login.
+
+Run `cargo test oidc_logout` for signed-provider/session integration regressions and
+`cargo test oidc::logout` for state limits, expiry/restart, configuration/hint rejection,
+and rendered-form escaping. No schema change, migration, or rebuild is required.
+Production routing, secure logout-context lifecycle/restart fallback, provider/browser
+deployment validation, and signed replay-protected back-channel logout still block
+OIDC activation.
+
+### Remaining activation gates
+
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
 exact issuer matching, provider capabilities, and registered callback/logout URLs.
@@ -380,8 +424,9 @@ callback error handling/logging are not registered yet.
 The gated completion implements fresh enabled/link/generation/local-permission checks,
 TOTP/recovery and password-first passkey verification, and rotated session establishment,
 but production routing and pending-candidate handling remain unconnected. Provider
-MFA/role claims must not silently bypass local requirements. RP-initiated logout,
-signed replay-protected back-channel logout, and end-to-end
+MFA/role claims must not silently bypass local requirements. RP-initiated logout is
+implemented internally but needs production routing and secure context retention.
+Signed replay-protected back-channel logout and end-to-end
 browser/provider regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 

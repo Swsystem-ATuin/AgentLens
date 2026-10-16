@@ -8,6 +8,7 @@ use crate::{
 };
 use tower_sessions::Session;
 
+mod logout;
 mod passkeys;
 
 async fn candidate(state: &auth::StateStore) -> (Session, Candidate, String) {

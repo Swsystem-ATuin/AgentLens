@@ -37,12 +37,14 @@ pub(super) struct Protocol {
     client: Client,
     issuer: String,
     client_id: String,
+    end_session_endpoint: String,
     pending: Mutex<HashMap<[u8; 32], Pending>>,
 }
 
 // Deliberately no Debug/Serialize: callers must not log or persist callback credentials.
 pub(super) struct VerifiedIdentity {
     pub(super) issuer: String,
+    pub(super) client_id: String,
     pub(super) subject: String,
     pub(super) id_token_hint: String,
 }
@@ -85,6 +87,9 @@ fn binding_key(binding: &str) -> Result<[u8; 32]> {
 }
 
 impl Protocol {
+    pub(super) fn logout_endpoint(&self) -> &str {
+        &self.end_session_endpoint
+    }
     pub(super) fn matches_configuration(&self, config: &Configuration) -> bool {
         self.issuer == config.issuer
             && self.client_id == config.client_id
@@ -111,6 +116,12 @@ impl Protocol {
             "OIDC provider document exceeds size limit"
         );
         super::discovery::validate_metadata(discovery, config)?;
+        #[derive(serde::Deserialize)]
+        struct LogoutMetadata {
+            end_session_endpoint: String,
+        }
+        let logout: LogoutMetadata = serde_json::from_slice(discovery)
+            .map_err(|_| anyhow::anyhow!("invalid OIDC logout metadata"))?;
         match (&config.client_authentication, &secret) {
             (ClientAuthentication::None, None) => {}
             (ClientAuthentication::ClientSecretBasic { .. }, Some(secret)) => ensure!(
@@ -166,6 +177,7 @@ impl Protocol {
             client,
             issuer: config.issuer.clone(),
             client_id: config.client_id.clone(),
+            end_session_endpoint: logout.end_session_endpoint,
             pending: Mutex::new(HashMap::new()),
         })
     }
@@ -293,6 +305,7 @@ impl Protocol {
             .to_owned();
         Ok(VerifiedIdentity {
             issuer: self.issuer.clone(),
+            client_id: self.client_id.clone(),
             subject: claims.subject().as_str().to_owned(),
             id_token_hint,
         })

@@ -15,6 +15,14 @@ mod browser;
 mod deployment;
 mod discovery;
 pub(crate) mod links;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "RP logout is gated pending browser routing and back-channel logout"
+    )
+)]
+mod logout;
 mod preparation;
 // Kept unreachable from production sign-in until session/MFA/logout integration is complete.
 #[cfg_attr(

@@ -15,10 +15,12 @@ use tower_sessions::Session;
 use webauthn_rs::prelude::{PublicKeyCredential, RequestChallengeResponse, Url};
 
 const BINDING: &str = "oidc.browser_binding";
+const LOGOUT_BINDING: &str = "oidc.logout_binding";
 
 pub(super) struct BrowserFlow {
     protocol: Protocol,
     origin: String,
+    logout: super::logout::Logout,
 }
 
 // Deliberately neither Debug nor serializable. This is NOT an authenticated user/session.
@@ -41,6 +43,7 @@ pub(super) struct Completion {
     pub(super) user: CurrentUser,
     pub(super) enrollment_required: bool,
     pub(super) identity: VerifiedIdentity,
+    inventory_id: String,
 }
 
 async fn request(origin: &str, session: &Session, headers: &HeaderMap, csrf: &str) -> Result<()> {
@@ -170,11 +173,20 @@ impl Candidate {
                 .and_then(|value| value.to_str().ok()),
         )
         .await?;
-        Ok(result.map(|(user, enrollment_required)| Completion {
-            user,
-            enrollment_required,
-            identity: self.identity,
-        }))
+        match result {
+            Some((user, enrollment_required)) => {
+                let inventory_id = auth::current_inventory_id(session).await?.ok_or_else(|| {
+                    anyhow::anyhow!("OIDC completed session inventory unavailable")
+                })?;
+                Ok(Some(Completion {
+                    user,
+                    enrollment_required,
+                    identity: self.identity,
+                    inventory_id,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -189,7 +201,52 @@ impl BrowserFlow {
             .map_err(|_| anyhow::anyhow!("invalid OIDC browser origin"))?
             .origin()
             .ascii_serialization();
-        Ok(Self { protocol, origin })
+        let logout = super::logout::Logout::new(config, protocol.logout_endpoint())?;
+        Ok(Self {
+            protocol,
+            origin,
+            logout,
+        })
+    }
+
+    pub(super) async fn logout(
+        &self,
+        auth: &AuthState,
+        session: &Session,
+        headers: &HeaderMap,
+        csrf: &str,
+        completion: Completion,
+    ) -> Result<super::logout::LogoutRequest> {
+        request(&self.origin, session, headers, csrf).await?;
+        ensure!(
+            !auth.is_local_mode(),
+            "OIDC requires authenticated deployment mode"
+        );
+        let current = auth.current_user(session).await?;
+        let inventory = auth::current_inventory_id(session).await?;
+        // Provider failure, cancellation, or a missing/stale context must never preserve local login.
+        auth::end_session(auth, session).await?;
+        ensure!(
+            current.is_some_and(|user| user.id == completion.user.id
+                && user.credential_generation == completion.user.credential_generation)
+                && inventory.as_deref() == Some(completion.inventory_id.as_str()),
+            "OIDC logout context unavailable; local session ended"
+        );
+        session.cycle_id().await?;
+        let binding = auth::random_token();
+        session.insert(LOGOUT_BINDING, &binding).await?;
+        session.save().await?;
+        self.logout.begin(&binding, completion.identity)
+    }
+
+    pub(super) async fn finish_logout(&self, session: &Session, state: &str) -> Result<()> {
+        let binding = session
+            .remove::<String>(LOGOUT_BINDING)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("OIDC logout browser transaction unavailable"))?;
+        session.save().await?;
+        // This callback never establishes or revokes any account session.
+        self.logout.finish(&binding, state)
     }
 
     async fn anonymous(auth: &AuthState, session: &Session) -> Result<()> {
