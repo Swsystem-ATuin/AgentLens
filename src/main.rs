@@ -46,10 +46,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate a proposed OIDC configuration without enabling sign-in or contacting a provider.
+    /// Validate OIDC configuration without enabling sign-in; optionally check provider discovery.
     OidcCheck {
         #[arg(long)]
         config: PathBuf,
+        /// Contact the configured HTTPS issuer and validate its discovery metadata.
+        #[arg(long)]
+        discover: bool,
     },
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
@@ -432,7 +435,14 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::OidcCheck { config } => {
+        Command::OidcCheck { config, discover } => {
+            if discover {
+                oidc::discover_file(&config).await?;
+                println!(
+                    "OIDC discovery metadata compatible; sign-in remains unavailable pending protocol implementation"
+                );
+                return Ok(());
+            }
             oidc::check_file(&config)?;
             println!(
                 "OIDC configuration valid; sign-in remains unavailable pending protocol implementation"

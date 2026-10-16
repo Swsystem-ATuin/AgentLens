@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Explicit OIDC discovery preflight (`oidc-check --discover`) with exact issuer pinning, required code/S256/client-authentication/logout capabilities, bounded verified HTTPS without redirects or ambient proxies, sanitized diagnostics, and real synthetic-TLS transport regressions. Offline validation remains the default and federated sign-in remains unavailable; containers now include CA certificates for outbound TLS.
+
 - Offline OIDC configuration preflight with required issuer/client/public URL and explicit linking, local-permission, logout, and break-glass policies. Rejects incomplete/unsafe configuration without contacting providers or reading secrets; federated sign-in remains unavailable.
 
 - Opt-in WebAuthn passkeys as password-first second factors, disabled until an exact public HTTPS URL and Secure cookies are configured. Adds named device enrollment/removal, required-MFA and shared recovery integration, bounded server-only challenges, single-use action proofs, current credential/session checks, committed counter protection, schema-v9 migration, signed software-authenticator regressions, and OpenSSL container dependencies.

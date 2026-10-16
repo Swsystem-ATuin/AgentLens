@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.source="https://git.s4w.uk/infrastructure/agent-l
 LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends libssl3 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 agent-lens \
     && useradd --uid 10001 --gid agent-lens \

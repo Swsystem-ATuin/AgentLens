@@ -47,6 +47,16 @@ fn oidc_preflight_is_offline_does_not_open_databases_and_rejects_incomplete_conf
             .status
             .success()
     );
+    let invalid_online = run(
+        dir.path(),
+        &["oidc-check", "--config", "oidc.json", "--discover"],
+    );
+    assert!(!invalid_online.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_online.stderr)
+            .contains("invalid OIDC configuration structure"),
+        "discovery must validate local configuration before contacting a provider"
+    );
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
         1,

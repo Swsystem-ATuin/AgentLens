@@ -1,8 +1,15 @@
-//! Offline configuration preflight. This module does not enable federated authentication.
+//! OIDC configuration and optional provider discovery; neither enables authentication.
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 use webauthn_rs::prelude::Url;
+
+mod discovery;
+
+pub(crate) async fn discover_file(path: &Path) -> Result<()> {
+    let config = load_file(path)?;
+    discovery::discover(&config).await
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,11 +50,16 @@ enum Logout {
 }
 
 pub(crate) fn check_file(path: &Path) -> Result<()> {
+    load_file(path).map(|_| ())
+}
+
+fn load_file(path: &Path) -> Result<Configuration> {
     let bytes = std::fs::read(path).context("read OIDC configuration")?;
     // Never include supplied values or serde errors (which can echo secrets) in diagnostics.
     let config: Configuration = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid OIDC configuration structure; see docs/oidc.md"))?;
-    validate(&config)
+    validate(&config)?;
+    Ok(config)
 }
 
 fn https_url(value: &str, origin_only: bool) -> Result<()> {
