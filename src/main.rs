@@ -486,13 +486,13 @@ async fn main() -> Result<()> {
             if discover {
                 oidc::discover_file(&config).await?;
                 println!(
-                    "OIDC discovery metadata compatible; sign-in remains unavailable pending protocol implementation"
+                    "OIDC discovery metadata compatible; sign-in remains unavailable pending browser/session/logout integration"
                 );
                 return Ok(());
             }
             oidc::check_file(&config)?;
             println!(
-                "OIDC configuration valid; sign-in remains unavailable pending protocol implementation"
+                "OIDC configuration valid; sign-in remains unavailable pending browser/session/logout integration"
             );
         }
         Command::Serve {

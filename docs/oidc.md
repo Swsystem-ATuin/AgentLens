@@ -150,15 +150,77 @@ files, audit-failure rollback, session/token revocation, disabled-account recove
 preserved MFA requirements/local passwords, index independence, and v9 migration.
 Run `bash scripts/check.sh`. Links do not yet provide a browser login path.
 
+## Internal protocol engine (not activated)
+
+An internal authorization-code engine is implemented using
+[`openidconnect` 4.0.1](https://docs.rs/openidconnect/4.0.1/openidconnect/).
+It is deliberately unreachable from production browser authentication. There is no
+new route, login button, enable flag, or CLI login command in this increment. Existing
+configuration/discovery checks still do not execute a login or validate a client secret.
+
+The engine accepts bounded discovery/JWKS documents and a caller-loaded confidential
+client secret when configured. It rechecks configuration, issuer pinning, discovery
+capabilities, and client-authentication/secret consistency. It retains at most 32
+understood public keys before selecting RS256 signing keys with 2048–8192-bit RSA
+moduli. It never loads signing keys from URLs embedded in a token. Unsupported keys
+are ignored; no suitable key, ambiguous signing keys, or an unknown signing key fails
+closed. Runtime activation must still fetch the documents over verified HTTPS and
+read any client secret from protected storage; constructing the engine is not a
+substitute for those checks.
+
+Authorization requests use only `openid` scope, code response type, query response
+mode, S256 PKCE, and independently random 256-bit state and nonce. The fixed planned
+callback is the configured public origin plus `/login/oidc/callback`; that browser
+route is not registered yet. No user-supplied redirect or forwarded host is used.
+
+Transactions live only in process memory, with one outstanding transaction per opaque
+server-owned browser binding, a five-minute lifetime, and a 1024-transaction global
+ceiling. Starting again replaces that browser's transaction; expired entries are
+pruned on start. A callback removes its matching browser transaction under a mutex
+before any token request, checks state in constant time, and consumes the transaction
+even on failure. Concurrent/replayed callbacks cannot exchange twice. A different
+browser binding cannot consume or complete it, and a restart invalidates pending
+transactions. State and codes are length-bounded and rejected if malformed.
+
+The token request uses the original redirect and PKCE verifier, with public-client
+authentication or client-secret Basic as configured. The HTTP adapter requires TLS
+1.2+, system trust, no redirects or ambient proxies, five-second connection and
+ten-second total timeouts, HTTP 200 JSON, and a 256 KiB response ceiling (including
+unknown-length streams). Requests are bounded to 32 KiB. Provider error bodies and
+underlying library/network diagnostics are replaced with fixed error messages.
+
+Verification requires an RS256 signature from the prepared keys, exact issuer,
+exactly one audience equal to the client ID, matching `azp` if present, the original
+nonce, and unexpired `exp`. The signed `iat` may be at most 60 seconds future-dated
+and at most ten minutes old. An `at_hash`, when present, must match the returned
+access token. Subject validation retains the exact printable ASCII identity policy.
+Email, role, team, and arbitrary extra claims do not authorize anything. The result
+contains only verified issuer/subject plus an ID-token logout hint; it has no automatic
+Debug/serialization implementation and must not be logged. Access/refresh tokens are
+not persisted or used to fetch user information.
+
+Independent synthetic RSA signatures cover successful public/confidential exchange,
+PKCE/redirect parameters, signature/key/algorithm substitution, issuer/audience/azp,
+nonce/time/subject/hash rejection, one-use state/binding/expiry/concurrency/restart,
+provider errors, transaction/key/document bounds, and verified bounded TLS transport.
+Run `cargo test oidc::protocol` in an environment allowing loopback test sockets, or
+the full `bash scripts/check.sh`. This increment changes no state schema and needs
+no refresh or index rebuild; restart after replacing the executable.
+
 ## Remaining sign-in implementation
 
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
 exact issuer matching, provider capabilities, and registered callback/logout URLs.
 The discovery gate is implemented for explicit preflight only; it must still be wired
-into runtime activation. Protocol work must cover authorization code with PKCE, state/nonce and ID-token
-validation, bounded single-use transactions, local session revocation/lifetime,
-RP-initiated logout and signed replay-protected back-channel logout. Configuration
+into runtime activation. Browser integration must bind the engine to a server-owned
+session, require CSRF/origin checks for initiating login, avoid logging callback
+codes/state, and resolve only the administrator-provisioned issuer/subject link.
+Current enabled state, identity link, credential generation, local permissions, and
+MFA must be rechecked before establishing a rotated local session. Provider MFA/role
+claims must not silently bypass local requirements. Local session revocation/lifetime,
+RP-initiated logout, signed replay-protected back-channel logout, and end-to-end
+browser/provider regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 
 Standards: [Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html),

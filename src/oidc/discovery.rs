@@ -39,7 +39,7 @@ fn present_list<'de, D: serde::Deserializer<'de>>(
     Vec::<String>::deserialize(deserializer).map(Some)
 }
 
-fn client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+pub(super) fn client_builder(timeout: Duration) -> reqwest::ClientBuilder {
     Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -114,7 +114,7 @@ fn contains(values: &[String], value: &str) -> bool {
     values.iter().any(|entry| entry == value)
 }
 
-fn validate_metadata(bytes: &[u8], config: &Configuration) -> Result<()> {
+pub(super) fn validate_metadata(bytes: &[u8], config: &Configuration) -> Result<()> {
     let metadata: Metadata = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("invalid OIDC discovery metadata structure"))?;
     ensure!(
@@ -189,4 +189,4 @@ fn validate_metadata(bytes: &[u8], config: &Configuration) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

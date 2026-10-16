@@ -225,7 +225,7 @@ fn certificate() -> &'static (PKey<Private>, X509) {
 }
 
 // Real TLS transport with a synthetic trust root, never a production certificate bypass.
-fn server(
+pub(in crate::oidc) fn server(
     reply: impl FnOnce(&str) -> Vec<u8> + Send + 'static,
     timeout: Duration,
     trust: bool,
@@ -285,7 +285,7 @@ fn server_stream(
     (config, client, task)
 }
 
-fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+pub(in crate::oidc) fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
     let mut reply = format!("HTTP/1.1 {status}\r\nConnection: close\r\n{headers}\r\n").into_bytes();
     reply.extend_from_slice(body);
     reply

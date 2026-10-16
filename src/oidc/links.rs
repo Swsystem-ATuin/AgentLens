@@ -24,7 +24,7 @@ pub(crate) struct Link {
     pub(crate) created_at: String,
 }
 
-fn validate_identity(issuer: &str, subject: &str) -> Result<()> {
+pub(super) fn validate_identity(issuer: &str, subject: &str) -> Result<()> {
     ensure!(
         issuer.len() <= 4096 && issuer.trim() == issuer && !issuer.chars().any(char::is_control),
         "OIDC issuer must be bounded and contain no surrounding whitespace or control characters"

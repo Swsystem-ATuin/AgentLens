@@ -6,6 +6,15 @@ use webauthn_rs::prelude::Url;
 
 mod discovery;
 pub(crate) mod links;
+// Kept unreachable from production sign-in until session/MFA/logout integration is complete.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "OIDC protocol engine is gated pending browser/session/logout integration"
+    )
+)]
+mod protocol;
 
 pub(crate) async fn discover_file(path: &Path) -> Result<()> {
     let config = load_file(path)?;
