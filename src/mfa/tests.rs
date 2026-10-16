@@ -414,7 +414,7 @@ async fn v7_migration_preserves_team_provenance_audit_facts_and_credentials() {
             .fetch_one(&state.auth.pool)
             .await
             .unwrap();
-    let old_events=event_sql.replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'","").replace(",'passkey_added','passkey_used','passkey_removed'","");
+    let old_events=event_sql.replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'","").replace(",'passkey_added','passkey_used','passkey_removed'","").replace(",'oidc_linked','oidc_unlinked'", "");
     assert!(!old_events.contains("'mfa_enabled'"));
     let old_admin = admin_sql.replace(",'require_mfa','release_mfa','reset_mfa'", "");
     assert!(!old_admin.contains("'require_mfa'"));
@@ -469,7 +469,7 @@ async fn v7_migration_preserves_team_provenance_audit_facts_and_credentials() {
         .fetch_one(&state.auth.pool)
         .await
         .unwrap(),
-        "9"
+        "10"
     );
     let (user, _session, inventory) = identity(&state, "member").await;
     begin(&state.auth, &user, &inventory).await.unwrap();

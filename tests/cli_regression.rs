@@ -65,6 +65,163 @@ fn oidc_preflight_is_offline_does_not_open_databases_and_rejects_incomplete_conf
 }
 
 #[tokio::test]
+async fn oidc_cli_links_exact_subjects_without_disclosure_or_touching_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let password = dir.path().join("password");
+    let subject = dir.path().join("subject");
+    let marker = "Synthetic-Subject-'PrivateMarker";
+    std::fs::write(&password, "Synthetic1-password").unwrap();
+    std::fs::write(&subject, format!("{marker}\r\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in [&password, &subject] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    std::fs::write(
+        dir.path().join("oidc.json"),
+        r#"{
+        "issuer":"https://identity.example.test/tenant",
+        "public_url":"https://lens.example.test",
+        "client_id":"synthetic-client",
+        "client_authentication":{"method":"none"},
+        "account_linking":"administrator_provisioned_issuer_subject",
+        "permissions":"local_only",
+        "logout":"rp_initiated_and_back_channel_required",
+        "local_break_glass":true
+    }"#,
+    )
+    .unwrap();
+    let index_path = dir.path().join("agent-lens.sqlite");
+    std::fs::write(&index_path, b"Synthetic index must remain untouched").unwrap();
+    for username in ["admin", "member"] {
+        assert!(
+            run(
+                dir.path(),
+                &[
+                    "account",
+                    "create",
+                    "--username",
+                    username,
+                    "--password-file",
+                    "password"
+                ]
+            )
+            .status
+            .success()
+        );
+    }
+    let linked = run(
+        dir.path(),
+        &[
+            "account",
+            "link-oidc",
+            "--username",
+            "member",
+            "--config",
+            "oidc.json",
+            "--subject-file",
+            "subject",
+        ],
+    );
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&linked.stdout).contains(marker));
+    assert!(String::from_utf8_lossy(&linked.stdout).contains("sign-in remains unavailable"));
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        dir.path().join("agent-lens-state.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let (id, stored): (String, String) =
+        sqlx::query_as("SELECT id,subject FROM account_oidc_links")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, marker,
+        "subject must not be normalized or interpreted as SQL"
+    );
+    let listed = run(
+        dir.path(),
+        &["account", "list-oidc", "--username", "member"],
+    );
+    assert!(listed.status.success());
+    let output = String::from_utf8_lossy(&listed.stdout);
+    assert!(output.contains(&id));
+    assert!(output.contains("https://identity.example.test/tenant"));
+    assert!(!output.contains(marker));
+    let duplicate = run(
+        dir.path(),
+        &[
+            "account",
+            "link-oidc",
+            "--username",
+            "admin",
+            "--config",
+            "oidc.json",
+            "--subject-file",
+            "subject",
+        ],
+    );
+    assert!(!duplicate.status.success());
+    assert!(!String::from_utf8_lossy(&duplicate.stderr).contains(marker));
+    assert!(
+        !run(
+            dir.path(),
+            &[
+                "account",
+                "unlink-oidc",
+                "--username",
+                "admin",
+                "--link-id",
+                &id
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "account",
+                "unlink-oidc",
+                "--username",
+                "member",
+                "--link-id",
+                &id
+            ]
+        )
+        .status
+        .success()
+    );
+    let generation: i64 =
+        sqlx::query_scalar("SELECT session_generation FROM accounts WHERE username='member'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        generation, 2,
+        "each successful identity change revokes account credentials"
+    );
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM account_oidc_links")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, 0);
+    assert_eq!(
+        std::fs::read(&index_path).unwrap(),
+        b"Synthetic index must remain untouched"
+    );
+}
+
+#[tokio::test]
 async fn mfa_cli_rotates_custom_keys_and_recovers_missing_keys_without_touching_index() {
     let dir = tempfile::tempdir().unwrap();
     let password = dir.path().join("password");

@@ -5,6 +5,7 @@ use std::path::Path;
 use webauthn_rs::prelude::Url;
 
 mod discovery;
+pub(crate) mod links;
 
 pub(crate) async fn discover_file(path: &Path) -> Result<()> {
     let config = load_file(path)?;

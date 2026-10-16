@@ -51,7 +51,7 @@ require current access to the session's source, from direct or team grants (admi
 have all-source access). An auditor can read reports but not live status. Role or
 grant removal takes effect on the next authorization check. Disabled accounts,
 expired/revoked tokens, and credentials invalidated by password/reset, MFA changes,
-or account-wide session revocation cannot authenticate; re-enabling an account does
+OIDC identity link/unlink, or account-wide session revocation cannot authenticate; re-enabling an account does
 not restore invalidated tokens. Requests already authorized can complete.
 
 Required-but-unenrolled MFA accounts cannot use tokens. A valid token is otherwise a

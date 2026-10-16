@@ -356,7 +356,9 @@ async fn v8_migration_preserves_encrypted_totp_recovery_and_audit_history() {
             .fetch_one(&state.auth.pool)
             .await
             .unwrap();
-    let legacy = schema.replace(",'passkey_added','passkey_used','passkey_removed'", "");
+    let legacy = schema
+        .replace(",'passkey_added','passkey_used','passkey_removed'", "")
+        .replace(",'oidc_linked','oidc_unlinked'", "");
     assert!(!legacy.contains("'passkey_added'"));
     let mut tx = state.auth.pool.begin().await.unwrap();
     sqlx::raw_sql("DROP TRIGGER security_events_no_update; DROP INDEX idx_security_events_account_time; DROP INDEX idx_security_events_time; ALTER TABLE security_events RENAME TO saved_events;").execute(&mut *tx).await.unwrap();

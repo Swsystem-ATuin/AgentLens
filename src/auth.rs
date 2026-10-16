@@ -38,7 +38,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','9');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','10');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT REFERENCES accounts(id),
     team_id TEXT,
-    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked','mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated','passkey_added','passkey_used','passkey_removed')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('login_succeeded','login_failed','password_changed','password_reset','session_revoked','sessions_revoked','account_created','account_enabled','account_disabled','role_changed','source_granted','source_revoked','profile_changed','token_created','token_revoked','team_created','team_renamed','team_deleted','team_member_added','team_member_removed','team_source_granted','team_source_revoked','mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated','passkey_added','passkey_used','passkey_removed','oidc_linked','oidc_unlinked')),
     occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_account_time ON security_events(account_id,occurred_at DESC,id DESC);
@@ -274,6 +274,8 @@ pub(crate) enum SecurityEvent {
     PasskeyAdded,
     PasskeyUsed,
     PasskeyRemoved,
+    OidcLinked,
+    OidcUnlinked,
 }
 
 impl SecurityEvent {
@@ -314,6 +316,8 @@ impl SecurityEvent {
             Self::PasskeyAdded => "passkey_added",
             Self::PasskeyUsed => "passkey_used",
             Self::PasskeyRemoved => "passkey_removed",
+            Self::OidcLinked => "oidc_linked",
+            Self::OidcUnlinked => "oidc_unlinked",
         }
     }
 }
@@ -408,7 +412,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 9,
+                schema_version <= 10,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -456,6 +460,10 @@ impl StateStore {
             .execute(&pool)
             .await
             .context("migrate passkey public credentials")?;
+        sqlx::raw_sql(crate::oidc::links::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate persistent OIDC identity links")?;
         sqlx::query("DELETE FROM admin_events WHERE occurred_at<unixepoch()-?")
             .bind(SECURITY_RETENTION_DAYS * 86_400)
             .execute(&pool)
@@ -471,7 +479,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='9' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='10' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -539,7 +547,7 @@ async fn migrate_security_events(pool: &SqlitePool) -> Result<()> {
     .fetch_one(pool)
     .await
     .context("inspect security event vocabulary")?;
-    if schema.contains("'passkey_added'") {
+    if schema.contains("'oidc_linked'") && schema.contains("'oidc_unlinked'") {
         return Ok(());
     }
     let mut transaction = pool
@@ -1191,7 +1199,7 @@ impl AuthState {
         Ok(Some((self.current_account(account).await?, generation)))
     }
 
-    async fn current_user(&self, session: &Session) -> Result<Option<CurrentUser>> {
+    pub(crate) async fn current_user(&self, session: &Session) -> Result<Option<CurrentUser>> {
         let Some(account_id) = session.get::<String>(ACCOUNT_ID).await? else {
             return Ok(None);
         };
@@ -1903,6 +1911,8 @@ fn security_event_label(kind: &str) -> Option<&'static str> {
         "passkey_added" => "Passkey added",
         "passkey_used" => "Passkey verified",
         "passkey_removed" => "Passkey removed",
+        "oidc_linked" => "OIDC identity linked by local administrator",
+        "oidc_unlinked" => "OIDC identity unlinked by local administrator",
         _ => return None,
     })
 }
@@ -2510,7 +2520,8 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','9'", "'schema_version','4'")
+            .replace("'schema_version','10'", "'schema_version','4'")
+            .replace(",'oidc_linked','oidc_unlinked'", "")
             .replace(",'passkey_added','passkey_used','passkey_removed'", "")
             .replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'", "")
             .replace(",'auditor','operator'", "")
@@ -2541,7 +2552,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "9");
+        assert_eq!(version, "10");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2574,7 +2585,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "9");
+        assert_eq!(version, "10");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

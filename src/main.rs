@@ -97,6 +97,28 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// Link an exact configured issuer/subject to an existing enabled account; does not enable OIDC.
+    LinkOidc {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        config: PathBuf,
+        /// Owner-only file containing the subject; never pass identity claims in command arguments.
+        #[arg(long)]
+        subject_file: PathBuf,
+    },
+    /// Remove one exact identity link and revoke the account's existing credentials.
+    UnlinkOidc {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        link_id: String,
+    },
+    /// List bounded OIDC link metadata without disclosing subject claims.
+    ListOidc {
+        #[arg(long)]
+        username: String,
+    },
     /// Recover lost MFA without removing an administrator's enrollment requirement.
     ResetMfa {
         #[arg(long)]
@@ -306,6 +328,31 @@ async fn main() -> Result<()> {
                 open_state(&cli.state_database, cli.mfa_key_file.as_deref()).await?
             };
             match command {
+                AccountCommand::LinkOidc {
+                    username,
+                    config,
+                    subject_file,
+                } => {
+                    let id = oidc::links::link_file(&state.auth, &username, &config, &subject_file)
+                        .await?;
+                    println!(
+                        "OIDC link: {id}; credentials revoked; federated sign-in remains unavailable"
+                    );
+                }
+                AccountCommand::UnlinkOidc { username, link_id } => {
+                    oidc::links::unlink(&state.auth, &username, &link_id).await?;
+                    println!(
+                        "OIDC identity link removed; credentials revoked; local password and MFA preserved"
+                    );
+                }
+                AccountCommand::ListOidc { username } => {
+                    for link in oidc::links::list(&state.auth, &username).await? {
+                        println!(
+                            "link: {}\nissuer: {}\ncreated: {}",
+                            link.id, link.issuer, link.created_at
+                        );
+                    }
+                }
                 AccountCommand::ResetMfa { username } => {
                     mfa::cli_reset(&state.auth, &username).await?;
                     println!("MFA reset; credentials revoked; enrollment requirement preserved");
