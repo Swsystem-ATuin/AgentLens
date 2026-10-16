@@ -411,7 +411,46 @@ Production routing, secure logout-context lifecycle/restart fallback, provider/b
 deployment validation, and signed replay-protected back-channel logout still block
 OIDC activation.
 
-### Remaining activation gates
+### Gated signed back-channel token verifier
+
+The protocol engine now verifies back-channel logout tokens using only the same
+prepared, filtered provider RSA keys as ID tokens. There is no public back-channel
+endpoint or session-revocation action yet. The bounded compact JWT must use RS256
+and explicit `typ: logout+jwt`; unknown/ambiguous key IDs fail closed. Embedded key
+URLs/keys cannot expand trust or trigger network requests. Unsupported `crit`/`b64`
+header semantics are rejected. Diagnostics are fixed and never echo token/claim values.
+
+Validation requires exact configured issuer, exactly one client audience, matching
+`azp` when present, integer `iat`/`exp`, and a nonempty bounded printable token ID.
+Issue time may be at most 60 seconds future-dated and ten minutes old; expiry must be
+in the future and within ten minutes of issue time. Either exact printable `sub`
+(1–255 bytes) or opaque printable `sid` (1–1024 bytes), or both, is required. A `nonce`
+is rejected even when null. The event must contain only the standard back-channel
+logout member with an empty object. Unknown top-level claim extensions are ignored.
+The 64 KiB token ceiling, mandatory explicit type, single audience, event restrictions,
+and short lifetime are deliberately strict compatibility policies, not a claim that
+every otherwise conforming provider is supported.
+
+After full cryptographic/claim validation, a mutex-protected in-process replay guard
+records only a domain-separated digest of issuer/client/token ID and its expiry.
+It permits one concurrent acceptance, retains active entries without eviction,
+prunes expired entries, and fails closed at 4096 entries. Rejected tokens do not
+poison the replay guard. Verified targets/digests have no Debug/serialization support.
+Run `cargo test backchannel` for independent RSA-signature, claim/algorithm/type/key
+substitution, target-bound, concurrency, replay, capacity, and expiry regressions.
+
+**This is not durable replay protection or implemented back-channel logout.** A
+restart clears this prototype guard and permits an otherwise valid token again.
+Before activation, replay recording and targeted session revocation must commit
+atomically in persistent state, so failures allow safe provider retries and restart
+cannot replay a token. Provider issuer/client/subject/session bindings must be stored
+with local session inventory, and login/logout races must fail closed. A `sid` miss
+must never be broadened to account-wide logout, and both subject/session claims must
+match when both are present. Local password sessions, unrelated providers/sessions,
+and local permissions must remain separate. No schema change, migration, or rebuild
+is introduced by this verifier-only increment.
+
+### Remaining production activation work
 
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
@@ -426,7 +465,8 @@ TOTP/recovery and password-first passkey verification, and rotated session estab
 but production routing and pending-candidate handling remain unconnected. Provider
 MFA/role claims must not silently bypass local requirements. RP-initiated logout is
 implemented internally but needs production routing and secure context retention.
-Signed replay-protected back-channel logout and end-to-end
+The internal signed back-channel token verifier still needs durable replay recording,
+provider/session binding, targeted revocation, production routing, and end-to-end
 browser/provider regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 

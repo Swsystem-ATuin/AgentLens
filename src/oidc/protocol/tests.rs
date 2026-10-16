@@ -19,6 +19,7 @@ const CLIENT_ID: &str = "synthetic-client";
 const ACCESS: &str = "synthetic-access-token-PrivateMarker";
 const SUBJECT: &str = "synthetic-subject-PrivateMarker";
 
+mod backchannel;
 mod completion;
 
 async fn browser_fixture() -> (tempfile::TempDir, crate::auth::StateStore, String) {

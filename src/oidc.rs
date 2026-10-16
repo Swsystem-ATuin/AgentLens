@@ -8,6 +8,14 @@ use webauthn_rs::prelude::Url;
     not(test),
     expect(
         dead_code,
+        reason = "back-channel verifier is gated pending durable replay and targeted revocation"
+    )
+)]
+mod backchannel;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
         reason = "browser bridge is gated pending local MFA/session/logout integration"
     )
 )]

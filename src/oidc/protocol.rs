@@ -38,6 +38,7 @@ pub(super) struct Protocol {
     issuer: String,
     client_id: String,
     end_session_endpoint: String,
+    backchannel: super::backchannel::Verifier,
     pending: Mutex<HashMap<[u8; 32], Pending>>,
 }
 
@@ -87,6 +88,9 @@ fn binding_key(binding: &str) -> Result<[u8; 32]> {
 }
 
 impl Protocol {
+    pub(super) fn verify_logout(&self, token: &str) -> Result<super::backchannel::VerifiedLogout> {
+        self.backchannel.verify(token)
+    }
     pub(super) fn logout_endpoint(&self) -> &str {
         &self.end_session_endpoint
     }
@@ -150,6 +154,7 @@ impl Protocol {
             !keys.is_empty(),
             "OIDC provider has no suitable RS256 signing keys"
         );
+        let backchannel = super::backchannel::Verifier::new(config, keys.clone());
         let mut client = CoreClient::new(
             ClientId::new(config.client_id.clone()),
             IssuerUrl::new(config.issuer.clone())
@@ -178,6 +183,7 @@ impl Protocol {
             issuer: config.issuer.clone(),
             client_id: config.client_id.clone(),
             end_session_endpoint: logout.end_session_endpoint,
+            backchannel,
             pending: Mutex::new(HashMap::new()),
         })
     }

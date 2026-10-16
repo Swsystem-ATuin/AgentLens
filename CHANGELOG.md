@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Gated back-channel logout-token verification using prepared RSA provider keys, explicit RS256/logout token typing, exact issuer/audience and bounded time/target/event checks, sanitized errors, and bounded concurrent in-process replay detection. Independent signatures cover substitutions, malformed claims, key ambiguity, and replay/capacity behavior. No revocation endpoint is enabled: durable replay and provider-session-specific revocation remain required.
+
 - Gated OIDC RP-initiated logout revokes the exact local session before provider handoff, prepares an escaped form POST with no-store/referrer/CSP protections, pins the provider endpoint and registered return URL, and validates bounded browser-bound one-use callback state. Signed-provider regressions cover stale/foreign contexts, old cookies, callback replay, and later local sign-ins; production routing and back-channel logout remain required before activation.
 
 - Gated password-first OIDC passkey challenge/completion with same-origin/session/expiry/CSRF checks, fresh identity linking and credential checks, unique candidate-bound one-use assertions, and short-lived in-memory factor proofs consumed by local MFA/session completion. Real software-authenticator regressions cover valid signatures, tampering, candidate isolation, wrong passwords, and revocation; production OIDC remains disabled pending browser/logout integration.
