@@ -6,6 +6,7 @@ use webauthn_rs::prelude::Url;
 
 mod discovery;
 pub(crate) mod links;
+mod preparation;
 // Kept unreachable from production sign-in until session/MFA/logout integration is complete.
 #[cfg_attr(
     not(test),
@@ -19,6 +20,11 @@ mod protocol;
 pub(crate) async fn discover_file(path: &Path) -> Result<()> {
     let config = load_file(path)?;
     discovery::discover(&config).await
+}
+
+pub(crate) async fn prepare_file(path: &Path) -> Result<()> {
+    let config = load_file(path)?;
+    preparation::prepare(&config).await.map(|_| ())
 }
 
 #[derive(Deserialize)]

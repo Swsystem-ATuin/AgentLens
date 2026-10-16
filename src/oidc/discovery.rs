@@ -66,10 +66,20 @@ fn discovery_url(issuer: &str) -> String {
 }
 
 async fn fetch(client: &Client, config: &Configuration) -> Result<()> {
+    documents(client, config).await.map(|_| ())
+}
+
+pub(super) async fn documents(client: &Client, config: &Configuration) -> Result<Vec<u8>> {
+    let bytes = document(client, &discovery_url(&config.issuer)).await?;
+    validate_metadata(&bytes, config)?;
+    Ok(bytes)
+}
+
+pub(super) async fn document(client: &Client, url: &str) -> Result<Vec<u8>> {
     // Errors intentionally omit remote URLs, response bodies, and serde diagnostics.
     // No client secret, authorization, cookies, or local account data are sent.
     let mut response = client
-        .get(discovery_url(&config.issuer))
+        .get(url)
         .header(header::ACCEPT, "application/json")
         .send()
         .await
@@ -107,7 +117,7 @@ async fn fetch(client: &Client, config: &Configuration) -> Result<()> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    validate_metadata(&bytes, config)
+    Ok(bytes)
 }
 
 fn contains(values: &[String], value: &str) -> bool {

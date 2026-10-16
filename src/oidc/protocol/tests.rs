@@ -19,6 +19,62 @@ const CLIENT_ID: &str = "synthetic-client";
 const ACCESS: &str = "synthetic-access-token-PrivateMarker";
 const SUBJECT: &str = "synthetic-subject-PrivateMarker";
 
+#[tokio::test]
+async fn preparation_fetches_pinned_metadata_and_keys_without_credentials() {
+    use crate::oidc::{
+        discovery::tests::{response, server},
+        preparation::prepare_with_client,
+    };
+    use std::time::Duration;
+    for valid_keys in [true, false] {
+        let (keys_config, _, keys_server) = server(
+            move |_| {
+                response(
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    &if valid_keys {
+                        jwks(key())
+                    } else {
+                        b"{\"keys\":[]}".to_vec()
+                    },
+                )
+            },
+            Duration::from_secs(3),
+            true,
+        );
+        let keys_url = format!("{}/keys", keys_config.issuer);
+        let (mut config, client, discovery_server) = server(
+            move |issuer| {
+                let mut metadata: Value = serde_json::from_slice(&discovery()).unwrap();
+                metadata["issuer"] = json!(issuer);
+                metadata["jwks_uri"] = json!(keys_url);
+                response(
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    &serde_json::to_vec(&metadata).unwrap(),
+                )
+            },
+            Duration::from_secs(3),
+            true,
+        );
+        config.client_authentication = ClientAuthentication::None;
+        assert_eq!(
+            prepare_with_client(&config, None, &client).await.is_ok(),
+            valid_keys
+        );
+        for request in [
+            discovery_server.join().unwrap(),
+            keys_server.join().unwrap(),
+        ] {
+            let request = request.to_ascii_lowercase();
+            assert!(request.starts_with("get "));
+            assert!(!request.contains("authorization:"));
+            assert!(!request.contains("cookie:"));
+            assert!(!request.contains("private-marker"));
+        }
+    }
+}
+
 fn key() -> &'static PKey<Private> {
     static KEY: OnceLock<PKey<Private>> = OnceLock::new();
     KEY.get_or_init(|| PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap())

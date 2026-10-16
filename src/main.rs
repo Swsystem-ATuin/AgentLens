@@ -53,6 +53,9 @@ enum Command {
         /// Contact the configured HTTPS issuer and validate its discovery metadata.
         #[arg(long)]
         discover: bool,
+        /// Load protected credentials and verified provider signing keys; does not enable sign-in.
+        #[arg(long, conflicts_with = "discover")]
+        prepare: bool,
     },
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
@@ -482,7 +485,18 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::OidcCheck { config, discover } => {
+        Command::OidcCheck {
+            config,
+            discover,
+            prepare,
+        } => {
+            if prepare {
+                oidc::prepare_file(&config).await?;
+                println!(
+                    "OIDC protocol preparation successful; sign-in remains unavailable pending browser/session/logout integration"
+                );
+                return Ok(());
+            }
             if discover {
                 oidc::discover_file(&config).await?;
                 println!(

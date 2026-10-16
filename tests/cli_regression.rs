@@ -41,6 +41,30 @@ fn oidc_preflight_is_offline_does_not_open_databases_and_rejects_incomplete_conf
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(String::from_utf8_lossy(&result.stdout).contains("sign-in remains unavailable"));
+    let prepared = run(
+        dir.path(),
+        &["oidc-check", "--config", "oidc.json", "--prepare"],
+    );
+    assert!(!prepared.status.success());
+    assert!(
+        String::from_utf8_lossy(&prepared.stderr).contains("OIDC client secret requires"),
+        "preparation must reject missing credentials before making a network request"
+    );
+    assert!(!String::from_utf8_lossy(&prepared.stderr).contains("/nonexistent/secret"));
+    assert!(
+        !run(
+            dir.path(),
+            &[
+                "oidc-check",
+                "--config",
+                "oidc.json",
+                "--prepare",
+                "--discover"
+            ]
+        )
+        .status
+        .success()
+    );
     std::fs::write(&path, "{}").unwrap();
     assert!(
         !run(dir.path(), &["oidc-check", "--config", "oidc.json"])

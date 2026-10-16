@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Explicit OIDC `oidc-check --prepare` preflight loads bounded owner-only client-secret files and verified discovery/signing keys, constructs the internal protocol engine, and fails closed without writing state or enabling sign-in. Includes synthetic HTTPS and credential/privacy regressions; deployment/session/MFA/logout integration remains pending.
+
 - Internal OIDC authorization-code engine using maintained `openidconnect`, with S256 PKCE, 256-bit state/nonce, browser-bound bounded one-use transactions, RS256 signature/issuer/audience/authorized-party/nonce/time/hash validation, RSA key-size limits, bounded HTTPS token transport, and signed synthetic-provider regressions. Not wired into browser authentication: runtime activation, local identity/MFA/session integration, and logout/revocation remain required before enabling sign-in.
 
 - Persistent, exact issuer/subject OIDC identity links provisioned through local administrator CLI commands, with owner-only subject-file input, metadata-only bounded listing, account-scoped unlink/recovery, atomic session/token invalidation and fixed audit events. State schema v10 preserves existing local authentication and permissions; federated sign-in remains unavailable pending protocol/logout integration.

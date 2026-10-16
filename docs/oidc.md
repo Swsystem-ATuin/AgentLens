@@ -61,6 +61,31 @@ signatures or keys, test token/logout endpoints, confirm registration settings, 
 the client secret, or enable sign-in. The strict advertisement and endpoint policies
 may reject otherwise conforming providers; compatibility must be checked deliberately.
 
+For explicit protocol preparation, including signing keys and client credentials:
+
+```sh
+cargo run -- oidc-check --config oidc.json --prepare
+```
+
+`--prepare` and `--discover` are mutually exclusive. Preparation validates the local
+configuration and reads any configured client secret **before** contacting the
+provider. Secret files must be regular files, not symlinks, with owner-only Unix
+permissions (for example `0600`). The secret is UTF-8, 1–4096 bytes without control
+characters; one final LF or CRLF is removed, but other whitespace is preserved.
+Unsupported non-Unix file-protection checks fail closed. Errors omit secret contents
+and file paths. No credentials are sent during preparation.
+
+Preparation fetches discovery and its advertised `jwks_uri` using the same bounded,
+verified, anonymous HTTPS policy above, then constructs the internal protocol engine.
+Only use trusted administrator-supplied configuration: advertised key URLs may point
+at different hosts or private networks. Invalid or unsuitable signing keys fail closed.
+The engine is discarded on exit: no database, session, token, key cache, or configuration
+is written. No schema migration or index rebuild is needed.
+
+Success is **not** deployment readiness or authentication activation. This command
+does not verify running Secure cookies, a usable local administrator, client
+registration, token/logout endpoint behavior, or browser/MFA/session integration.
+
 Every field is required; unknown fields and unsupported policy values are rejected.
 Use `{"method":"none"}` only for a provider registration supporting public clients.
 Secret values are not accepted inline. The secret path must be absolute; preflight
@@ -164,9 +189,9 @@ capabilities, and client-authentication/secret consistency. It retains at most 3
 understood public keys before selecting RS256 signing keys with 2048–8192-bit RSA
 moduli. It never loads signing keys from URLs embedded in a token. Unsupported keys
 are ignored; no suitable key, ambiguous signing keys, or an unknown signing key fails
-closed. Runtime activation must still fetch the documents over verified HTTPS and
-read any client secret from protected storage; constructing the engine is not a
-substitute for those checks.
+closed. Explicit `--prepare` fetches the documents over verified HTTPS and reads any
+client secret from protected storage. Future runtime activation must repeat those
+checks; an earlier preflight is not a substitute.
 
 Authorization requests use only `openid` scope, code response type, query response
 mode, S256 PKCE, and independently random 256-bit state and nonce. The fixed planned
@@ -212,8 +237,8 @@ no refresh or index rebuild; restart after replacing the executable.
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
 exact issuer matching, provider capabilities, and registered callback/logout URLs.
-The discovery gate is implemented for explicit preflight only; it must still be wired
-into runtime activation. Browser integration must bind the engine to a server-owned
+Discovery, key loading, and protected secret loading are implemented for explicit
+preflight only; they must still be wired into runtime activation. Browser integration must bind the engine to a server-owned
 session, require CSRF/origin checks for initiating login, avoid logging callback
 codes/state, and resolve only the administrator-provisioned issuer/subject link.
 Current enabled state, identity link, credential generation, local permissions, and
