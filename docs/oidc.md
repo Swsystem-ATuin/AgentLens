@@ -289,12 +289,47 @@ permissions or provision an account. Link removal, account disablement, and loca
 permission changes while the provider flow is pending are respected. Diagnostics
 do not echo provider identity values.
 
-This returns only an in-memory **candidate**, not an authenticated session: it does
-not set an account/MFA proof or create session inventory. Provider access tokens,
-ID tokens, and subject identity are not saved into browser transaction payloads.
-Final local MFA/enrollment handling, fresh link/generation checks, rotated session
-establishment, and logout/revocation must still be implemented before activation.
-The candidate must not be treated as an authorization decision or logged/serialized.
+The callback returns only an in-memory **candidate**, not an authenticated session.
+Provider access tokens, ID tokens, and subject identity are not saved into browser
+transaction payloads. The candidate must not be treated as an authorization decision
+or logged/serialized.
+
+### Gated local MFA and session completion
+
+Internal completion consumes that candidate by value and allows one attempt within
+five minutes, in the same server-issued browser session, with a fresh CSRF/exact-origin
+check. Invalid factors require restarting sign-in; no reusable candidate or factor
+proof is persisted. A provider's MFA claims cannot satisfy local MFA requirements.
+
+The completion transaction rechecks the enabled local account, exact identity/link ID,
+and credential generation under the SQLite writer lock, refreshes local permissions,
+and uses the existing local MFA verifier. Enrolled TOTP requires a fresh one-use step
+or recovery code, with the existing persistent attempt budget and recovery/audit policy.
+Passkey-only accounts fail closed without a valid bound proof; the OIDC passkey
+challenge/browser path is not connected yet. Existing password-first passkey login
+and management are unchanged, and OIDC activation remains blocked on that integration.
+
+Factor consumption and pending session inventory are committed together. The pending
+inventory has an intentionally invalid browser ID and cannot authorize a session,
+including if the process stops mid-completion. The old anonymous session is cleared
+and its ID explicitly rotated. Saving its local account/generation/inventory payload
+does not authorize it until a final conditional transaction rechecks the identity and
+revocation state, binds the new browser ID, and records a fixed successful-login audit
+event. Audit/binding failures revoke the pending inventory and discard the session.
+Concurrent unlink, disablement, or revocation during rotation therefore fails closed.
+
+MFA proof is set only after verifying an enrolled local factor. Required but unenrolled
+accounts receive the existing enrollment-restricted session, not unrestricted access;
+the normal middleware redirects protected pages to `/account/mfa`, and bearer access
+remains denied. Existing session inactivity/absolute expiry, current local permissions,
+and account-wide revocation continue to apply. The verified identity/logout hint stays
+in memory for future logout integration, not in the browser session payload.
+
+This code is still gated: no production OIDC route or enable flag is registered.
+Production routing, secure pending-candidate handling, passkey completion, RP-initiated
+and back-channel logout remain required before activation. Run `cargo test oidc_completion`
+for signed-provider, local-factor, rotation, enrollment-middleware, audit-failure,
+and deterministic revocation-during-rotation regressions.
 
 Run `cargo test browser_` for session-bound signed-provider regressions, or the full
 `bash scripts/check.sh`. There is no schema change, migration, or index rebuild.
@@ -309,10 +344,11 @@ preflight only; they must still be wired into runtime activation. The internal b
 bridge implements server-owned session binding, CSRF/origin initiation checks, and
 provisioned identity resolution, but production HTTP routing/rendering and safe
 callback error handling/logging are not registered yet.
-Current enabled state, identity link, credential generation, local permissions, and
-MFA must be rechecked before establishing a rotated local session. Provider MFA/role
-claims must not silently bypass local requirements. Local session revocation/lifetime,
-RP-initiated logout, signed replay-protected back-channel logout, and end-to-end
+The gated completion implements fresh enabled/link/generation/local-permission checks,
+TOTP/recovery verification, and rotated session establishment, but the OIDC passkey
+challenge path and production pending-candidate handling remain unconnected. Provider
+MFA/role claims must not silently bypass local requirements. RP-initiated logout,
+signed replay-protected back-channel logout, and end-to-end
 browser/provider regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 

@@ -7,6 +7,7 @@ use crate::auth::{self, AuthState, CurrentUser};
 use anyhow::{Result, ensure};
 use axum::http::{HeaderMap, header};
 use openidconnect::AsyncHttpClient;
+use std::time::{Duration, Instant};
 use tower_sessions::Session;
 use webauthn_rs::prelude::Url;
 
@@ -22,6 +23,72 @@ pub(super) struct Candidate {
     pub(super) user: CurrentUser,
     pub(super) link_id: String,
     pub(super) identity: VerifiedIdentity,
+    browser_id: String,
+    origin: String,
+    pub(super) expires: Instant,
+}
+
+pub(super) struct Completion {
+    pub(super) user: CurrentUser,
+    pub(super) enrollment_required: bool,
+    pub(super) identity: VerifiedIdentity,
+}
+
+async fn request(origin: &str, session: &Session, headers: &HeaderMap, csrf: &str) -> Result<()> {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    ensure!(
+        origins.next().and_then(|value| value.to_str().ok()) == Some(origin)
+            && origins.next().is_none(),
+        "invalid OIDC login request"
+    );
+    ensure!(
+        auth::verify_csrf(session, csrf).await?,
+        "invalid OIDC login request"
+    );
+    Ok(())
+}
+
+impl Candidate {
+    // Consumed by value: one completion attempt, never a reusable authenticated capability.
+    pub(super) async fn complete(
+        self,
+        auth: &AuthState,
+        session: &Session,
+        headers: &HeaderMap,
+        csrf: &str,
+        factor: &str,
+    ) -> Result<Option<Completion>> {
+        request(&self.origin, session, headers, csrf).await?;
+        ensure!(
+            Instant::now() < self.expires
+                && session
+                    .id()
+                    .is_some_and(|id| id.to_string() == self.browser_id),
+            "OIDC completion unavailable; restart sign-in"
+        );
+        let identity = auth::oidc::Identity {
+            account_id: &self.user.id,
+            generation: self.user.credential_generation,
+            link_id: &self.link_id,
+            issuer: &self.identity.issuer,
+            subject: &self.identity.subject,
+        };
+        let result = auth::oidc::complete(
+            auth,
+            session,
+            identity,
+            factor,
+            headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await?;
+        Ok(result.map(|(user, enrollment_required)| Completion {
+            user,
+            enrollment_required,
+            identity: self.identity,
+        }))
+    }
 }
 
 impl BrowserFlow {
@@ -57,16 +124,7 @@ impl BrowserFlow {
         headers: &HeaderMap,
         csrf: &str,
     ) -> Result<String> {
-        let mut origins = headers.get_all(header::ORIGIN).iter();
-        ensure!(
-            origins.next().and_then(|value| value.to_str().ok()) == Some(self.origin.as_str())
-                && origins.next().is_none(),
-            "invalid OIDC login request"
-        );
-        ensure!(
-            auth::verify_csrf(session, csrf).await?,
-            "invalid OIDC login request"
-        );
+        request(&self.origin, session, headers, csrf).await?;
         Self::anonymous(auth, session).await?;
         // The binding is generated locally, never accepted from a form/query/provider claim.
         // Reuse within this anonymous session so starting again replaces its pending transaction.
@@ -103,6 +161,12 @@ impl BrowserFlow {
             user,
             link_id,
             identity,
+            browser_id: session
+                .id()
+                .ok_or_else(|| anyhow::anyhow!("OIDC browser session unavailable"))?
+                .to_string(),
+            origin: self.origin.clone(),
+            expires: Instant::now() + Duration::from_secs(300),
         })
     }
 }

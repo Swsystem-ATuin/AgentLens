@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Gated OIDC local TOTP/recovery and rotated-session completion, with same-browser/CSRF/origin/expiry checks, fresh link and credential-generation validation, current local permissions, enrollment-only access when MFA is required, one-use factor budgets, and fail-closed pending inventory/binding. Regressions cover real session rotation, factor replay, audit failure, and revocation during session-store writes. No OIDC routes are enabled; passkey challenge integration and logout/revocation completion remain required.
+
 - Gated internal OIDC browser/session bridge with CSRF and exact-origin initiation checks, persisted opaque browser binding, one-use callback handling, and exact provisioned identity resolution using current local account permissions. Signed-provider regressions cover resumed/cross-browser sessions, replay and account/link changes; no authenticated session, provider credentials, or MFA proof is persisted, and production routes remain disabled pending MFA/session/logout completion.
 
 - Opt-in OIDC declared-deployment preflight (`oidc-check --prepare --deployment`) requires an explicit matching HTTPS public origin, Secure-cookie declaration, current read-only state, and an enabled local administrator password record before credentials/network access. Does not certify proxy/MFA readiness, mutate state, or enable federated sign-in.

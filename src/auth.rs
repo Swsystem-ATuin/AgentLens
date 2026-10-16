@@ -24,6 +24,15 @@ use subtle::ConstantTimeEq;
 use tower_sessions::{Session, session_store::ExpiredDeletion};
 use tower_sessions_sqlx_store::SqliteStore;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "OIDC completion is gated pending logout and production routing"
+    )
+)]
+pub(crate) mod oidc;
+
 pub const INACTIVITY_MINUTES: i64 = 30;
 pub const ABSOLUTE_HOURS: i64 = 12;
 pub const MIN_PASSWORD_CHARS: usize = 7;

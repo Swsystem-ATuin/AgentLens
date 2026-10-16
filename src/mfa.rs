@@ -469,21 +469,33 @@ async fn verify_bound(
             return Ok(false);
         }
     }
+    let valid = verify_in_transaction(&mut tx, auth, user, code, binding).await?;
+    tx.commit().await.context("commit MFA verification")?;
+    Ok(valid)
+}
+
+/// Caller must hold the account writer lock and have checked its live credential generation.
+pub(crate) async fn verify_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    auth: &AuthState,
+    user: &CurrentUser,
+    code: &str,
+    binding: Option<&str>,
+) -> Result<bool> {
     let enrolled: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM account_mfa WHERE account_id=? AND (secret IS NOT NULL OR EXISTS(SELECT 1 FROM account_passkeys WHERE account_id=account_mfa.account_id)))",
     )
     .bind(&user.id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .context("check factor requirement")?;
     let valid = if code.starts_with("pk_") {
         binding.is_some_and(|b| auth.passkeys.consume_proof(user, code, b))
     } else if enrolled {
-        consume(&mut tx, auth, &user.id, code, auth::unix_now()).await?
+        consume(tx, auth, &user.id, code, auth::unix_now()).await?
     } else {
         true
     };
-    tx.commit().await.context("commit MFA verification")?;
     Ok(valid)
 }
 
