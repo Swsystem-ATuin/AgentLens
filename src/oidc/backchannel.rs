@@ -1,4 +1,4 @@
-//! Gated signed-token verification only. No durable replay ledger, revocation, or HTTP route.
+//! Gated signed-token verification; durable replay/revocation is handled by sessions.
 use super::Configuration;
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -8,13 +8,9 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Mutex,
-};
+use std::collections::BTreeMap;
 
 const MAX_TOKEN_BYTES: usize = 64 * 1024;
-const MAX_REPLAY: usize = 4096;
 const EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
 #[derive(Deserialize)]
@@ -63,13 +59,13 @@ pub(super) struct VerifiedLogout {
     pub(super) session_id: Option<String>,
     pub(super) replay_key: [u8; 32],
     pub(super) expires: i64,
+    pub(super) issued_at: i64,
 }
 
 pub(super) struct Verifier {
     issuer: String,
     client_id: String,
     keys: Vec<CoreJsonWebKey>,
-    replay: Mutex<HashMap<[u8; 32], i64>>,
 }
 
 fn opaque(value: &str, limit: usize) -> bool {
@@ -85,7 +81,6 @@ impl Verifier {
             issuer: config.issuer.clone(),
             client_id: config.client_id.clone(),
             keys,
-            replay: Mutex::new(HashMap::new()),
         }
     }
 
@@ -185,7 +180,6 @@ impl Verifier {
             digest.update(value.as_bytes());
         }
         let replay_key = *digest.finalize().as_bytes();
-        self.remember(replay_key, claims.exp, now)?;
         Ok(VerifiedLogout {
             issuer: claims.iss,
             client_id: self.client_id.clone(),
@@ -193,39 +187,7 @@ impl Verifier {
             session_id: claims.sid,
             replay_key,
             expires: claims.exp,
+            issued_at: claims.iat,
         })
-    }
-
-    fn remember(&self, replay_key: [u8; 32], expires: i64, now: i64) -> Result<()> {
-        let mut replay = self
-            .replay
-            .lock()
-            .map_err(|_| anyhow::anyhow!("replay guard unavailable"))?;
-        replay.retain(|_, expires| *expires > now);
-        ensure!(
-            !replay.contains_key(&replay_key) && replay.len() < MAX_REPLAY,
-            "replay or capacity limit"
-        );
-        replay.insert(replay_key, expires);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replay_cache_fails_closed_at_capacity_and_prunes_only_expired_entries() {
-        let config = serde_json::from_value(crate::oidc::tests::configuration()).unwrap();
-        let verifier = Verifier::new(&config, vec![]);
-        for i in 0..MAX_REPLAY {
-            let key = *blake3::hash(&i.to_le_bytes()).as_bytes();
-            verifier.remember(key, 100, 0).unwrap();
-        }
-        assert!(verifier.remember([0; 32], 100, 0).is_err());
-        let key = *blake3::hash(&0usize.to_le_bytes()).as_bytes();
-        assert!(verifier.remember(key, 100, 99).is_err());
-        verifier.remember(key, 200, 100).unwrap();
-        assert_eq!(verifier.replay.lock().unwrap().len(), 1);
     }
 }

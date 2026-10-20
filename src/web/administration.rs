@@ -725,7 +725,7 @@ async fn v6_migration_preserves_identity_sessions_tokens_teams_grants_and_prefer
         .fetch_one(&state.auth.pool)
         .await
         .unwrap(),
-        "10"
+        "11"
     );
     assert!(
         sqlx::query("PRAGMA foreign_key_check")

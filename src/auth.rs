@@ -47,7 +47,7 @@ pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 30;
 
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS app_state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','10');
+INSERT OR IGNORE INTO app_state_metadata(key,value) VALUES('schema_version','11');
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -421,7 +421,7 @@ impl StateStore {
                 .parse::<u32>()
                 .context("invalid application state schema version")?;
             ensure!(
-                schema_version <= 10,
+                schema_version <= 11,
                 "application state schema is newer than this Agent Lens binary"
             );
         }
@@ -473,6 +473,10 @@ impl StateStore {
             .execute(&pool)
             .await
             .context("migrate persistent OIDC identity links")?;
+        sqlx::raw_sql(crate::oidc::sessions::SCHEMA)
+            .execute(&pool)
+            .await
+            .context("migrate durable OIDC session/logout state")?;
         sqlx::query("DELETE FROM admin_events WHERE occurred_at<unixepoch()-?")
             .bind(SECURITY_RETENTION_DAYS * 86_400)
             .execute(&pool)
@@ -488,7 +492,7 @@ impl StateStore {
             .commit()
             .await
             .context("commit token retention")?;
-        sqlx::query("UPDATE app_state_metadata SET value='10' WHERE key='schema_version'")
+        sqlx::query("UPDATE app_state_metadata SET value='11' WHERE key='schema_version'")
             .execute(&pool)
             .await
             .context("record application state schema version")?;
@@ -2553,7 +2557,7 @@ mod tests {
             .await
             .unwrap();
         let old_schema = STATE_SCHEMA
-            .replace("'schema_version','10'", "'schema_version','4'")
+            .replace("'schema_version','11'", "'schema_version','4'")
             .replace(",'oidc_linked','oidc_unlinked'", "")
             .replace(",'passkey_added','passkey_used','passkey_removed'", "")
             .replace(",'mfa_enrollment_started','mfa_enabled','mfa_disabled','mfa_failed','mfa_recovery_used','mfa_recovery_rotated','mfa_reset','mfa_required','mfa_released','mfa_key_rotated'", "")
@@ -2585,7 +2589,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         state.auth.pool.close().await;
         StateStore::open(&path).await.unwrap();
     }
@@ -2618,7 +2622,7 @@ mod tests {
                 .fetch_one(&state.auth.pool)
                 .await
                 .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         let preferences_table: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_preferences')",
         )

@@ -8,6 +8,9 @@ pub(crate) struct Identity<'a> {
     pub(crate) issuer: &'a str,
     pub(crate) subject: &'a str,
     pub(crate) factor_binding: &'a str,
+    pub(crate) client_id: &'a str,
+    pub(crate) issued_at: i64,
+    pub(crate) session_id: Option<&'a str>,
 }
 
 pub(crate) async fn complete(
@@ -34,6 +37,7 @@ pub(crate) async fn complete(
         locked.rows_affected() == 1,
         "OIDC local identity changed; restart sign-in"
     );
+    crate::oidc::sessions::check_login(&mut tx, &identity).await?;
     // The SQLite writer prevents permission/identity mutations while local policy is resolved.
     let (user, _) = state
         .oidc_account(identity.issuer, identity.subject)
@@ -68,6 +72,7 @@ pub(crate) async fn complete(
         .bind(&inventory_id).bind(&user.id).bind(tower_id).bind(identity.generation)
         .bind(issued_at).bind(issued_at).bind(issued_at.saturating_add(state.absolute_lifetime_seconds))
         .bind(summarize_user_agent(user_agent)).execute(&mut *tx).await.context("create OIDC session inventory")?;
+    crate::oidc::sessions::bind(&mut tx, &inventory_id, &identity).await?;
     tx.commit()
         .await
         .context("commit OIDC factor and session inventory")?;

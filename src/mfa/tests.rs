@@ -469,7 +469,7 @@ async fn v7_migration_preserves_team_provenance_audit_facts_and_credentials() {
         .fetch_one(&state.auth.pool)
         .await
         .unwrap(),
-        "10"
+        "11"
     );
     let (user, _session, inventory) = identity(&state, "member").await;
     begin(&state.auth, &user, &inventory).await.unwrap();

@@ -8,6 +8,7 @@ use crate::{
 };
 use tower_sessions::Session;
 
+mod durable;
 mod logout;
 mod passkeys;
 

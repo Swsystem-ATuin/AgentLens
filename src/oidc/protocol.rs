@@ -48,6 +48,8 @@ pub(super) struct VerifiedIdentity {
     pub(super) client_id: String,
     pub(super) subject: String,
     pub(super) id_token_hint: String,
+    pub(super) issued_at: i64,
+    pub(super) session_id: Option<String>,
 }
 
 fn suitable_key(key: &CoreJsonWebKey) -> bool {
@@ -88,6 +90,14 @@ fn binding_key(binding: &str) -> Result<[u8; 32]> {
 }
 
 impl Protocol {
+    pub(super) async fn apply_logout(
+        &self,
+        auth: &crate::auth::AuthState,
+        token: &str,
+    ) -> Result<u64> {
+        let verified = self.verify_logout(token)?;
+        super::sessions::apply(auth, &verified).await
+    }
     pub(super) fn verify_logout(&self, token: &str) -> Result<super::backchannel::VerifiedLogout> {
         self.backchannel.verify(token)
     }
@@ -309,11 +319,14 @@ impl Protocol {
             .as_str()
             .context("invalid OIDC logout hint encoding")?
             .to_owned();
+        let session_id = super::sessions::session_id(&id_token_hint)?;
         Ok(VerifiedIdentity {
             issuer: self.issuer.clone(),
             client_id: self.client_id.clone(),
             subject: claims.subject().as_str().to_owned(),
             id_token_hint,
+            issued_at: claims.issue_time().timestamp(),
+            session_id,
         })
     }
 }

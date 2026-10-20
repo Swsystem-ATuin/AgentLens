@@ -53,8 +53,8 @@ async fn administrator(connection: &mut SqliteConnection) -> Result<()> {
             .await
             .map_err(|_| anyhow::anyhow!("read OIDC deployment state schema"))?;
     ensure!(
-        version.as_deref() == Some("10"),
-        "OIDC deployment check requires state schema v10; migrate using the normal account/service workflow first"
+        version.as_deref() == Some("11"),
+        "OIDC deployment check requires state schema v11; migrate using the normal account/service workflow first"
     );
     let hashes: Vec<String> = sqlx::query_scalar(
         "SELECT password_hash FROM accounts WHERE enabled=1 AND role='admin' LIMIT 1025",
@@ -128,7 +128,7 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::raw_sql("CREATE TABLE app_state_metadata(key TEXT,value TEXT); INSERT INTO app_state_metadata VALUES('schema_version','10'); CREATE TABLE accounts(enabled INTEGER, role TEXT,password_hash TEXT);").execute(&mut db).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE app_state_metadata(key TEXT,value TEXT); INSERT INTO app_state_metadata VALUES('schema_version','11'); CREATE TABLE accounts(enabled INTEGER, role TEXT,password_hash TEXT);").execute(&mut db).await.unwrap();
         let hash = crate::auth::hash_password("Synthetic1-password").unwrap();
         for (enabled, role, password, accepted) in [
             (0, "admin", hash.as_str(), false),
@@ -166,7 +166,7 @@ mod tests {
                 "preflight must not mutate persistent state"
             );
         }
-        sqlx::query("UPDATE app_state_metadata SET value='11'")
+        sqlx::query("UPDATE app_state_metadata SET value='12'")
             .execute(&mut db)
             .await
             .unwrap();

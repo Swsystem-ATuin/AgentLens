@@ -1,11 +1,11 @@
 use super::*;
 
-fn logout_claims() -> Value {
+pub(super) fn logout_claims() -> Value {
     let now = crate::auth::unix_now();
     json!({"iss":ISSUER,"aud":CLIENT_ID,"iat":now,"exp":now+300,"jti":"synthetic-private-jti",
         "sub":SUBJECT,"sid":"synthetic-private-sid","events":{"http://schemas.openid.net/event/backchannel-logout":{}}})
 }
-fn logout_token(claims: &Value) -> String {
+pub(super) fn logout_token(claims: &Value) -> String {
     signed(
         claims,
         &json!({"alg":"RS256","typ":"logout+jwt","kid":"synthetic-key"}),
@@ -14,7 +14,7 @@ fn logout_token(claims: &Value) -> String {
 }
 
 #[test]
-fn backchannel_signed_targets_are_exact_bounded_and_replay_is_one_use() {
+fn backchannel_signed_targets_are_exact_and_verification_does_not_reserve_durable_replay() {
     for removed in [None, Some("sub"), Some("sid")] {
         let engine = protocol(true);
         let mut claims = logout_claims();
@@ -44,10 +44,13 @@ fn backchannel_signed_targets_are_exact_bounded_and_replay_is_one_use() {
         );
         assert_eq!(verified.expires, claims["exp"].as_i64().unwrap());
         assert_ne!(verified.replay_key, [0; 32]);
-        assert!(engine.verify_logout(&jwt).is_err());
+        assert!(
+            engine.verify_logout(&jwt).is_ok(),
+            "signature verification must not reserve replay before durable revocation commits"
+        );
         assert!(
             protocol(true).verify_logout(&jwt).is_ok(),
-            "the in-process guard intentionally does not claim restart durability"
+            "pure signature verification must remain retryable across protocol instances"
         );
     }
 }
@@ -136,7 +139,7 @@ fn backchannel_rejects_claim_algorithm_signature_and_token_type_substitution_wit
 }
 
 #[test]
-fn backchannel_ignores_embedded_key_urls_rejects_ambiguous_keys_and_serializes_replay() {
+fn backchannel_ignores_embedded_key_urls_and_rejects_ambiguous_keys_without_mutating_replay() {
     let engine = std::sync::Arc::new(protocol(true));
     let jwt = signed(
         &logout_claims(),
@@ -153,7 +156,7 @@ fn backchannel_ignores_embedded_key_urls_rejects_ambiguous_keys_and_serializes_r
                 .map(|task| task.join().unwrap())
                 .filter(|accepted| *accepted)
                 .count(),
-            1
+            8
         );
     });
     let mut keys: Value = serde_json::from_slice(&jwks(key())).unwrap();

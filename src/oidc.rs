@@ -8,7 +8,7 @@ use webauthn_rs::prelude::Url;
     not(test),
     expect(
         dead_code,
-        reason = "back-channel verifier is gated pending durable replay and targeted revocation"
+        reason = "back-channel verifier is gated pending HTTP/runtime integration"
     )
 )]
 mod backchannel;
@@ -32,6 +32,14 @@ pub(crate) mod links;
 )]
 mod logout;
 mod preparation;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "durable OIDC logout remains gated pending HTTP/runtime integration"
+    )
+)]
+pub(crate) mod sessions;
 // Kept unreachable from production sign-in until session/MFA/logout integration is complete.
 #[cfg_attr(
     not(test),

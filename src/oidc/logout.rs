@@ -175,6 +175,8 @@ mod tests {
             client_id: config().client_id,
             subject: "synthetic-subject".into(),
             id_token_hint: "synthetic-private-hint".into(),
+            issued_at: crate::auth::unix_now(),
+            session_id: None,
         }
     }
 

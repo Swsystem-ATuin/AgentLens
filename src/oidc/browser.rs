@@ -162,6 +162,9 @@ impl Candidate {
             issuer: &self.identity.issuer,
             subject: &self.identity.subject,
             factor_binding: &self.factor_binding,
+            client_id: &self.identity.client_id,
+            issued_at: self.identity.issued_at,
+            session_id: self.identity.session_id.as_deref(),
         };
         let result = auth::oidc::complete(
             auth,

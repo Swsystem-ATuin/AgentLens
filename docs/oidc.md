@@ -101,12 +101,12 @@ OIDC public origin (equivalent default ports and a final slash are accepted). Fu
 runtime integration must use the same gate and reject unauthenticated local mode.
 
 Before loading secrets or making network requests, this mode opens the existing
-state database read-only, requires schema v10, and requires an enabled local
+state database read-only, requires schema v11, and requires an enabled local
 administrator with a structurally valid Argon2id password credential. It does not
 create or migrate state, revoke credentials, write audit events, or open the index.
 Missing, unsupported, or malformed state fails closed. Migrate older state using
-the normal account/service workflow with a backup first; this increment itself
-requires no migration or rebuild. Preparation then uses the same loaded configuration
+the normal account/service workflow with a backup first; preflight does not perform
+that migration or rebuild. Preparation then uses the same loaded configuration
 to fetch and validate discovery and keys, without re-reading a potentially changed file.
 
 This is a **declared-prerequisites preflight**, not a live deployment certification:
@@ -415,7 +415,7 @@ OIDC activation.
 
 The protocol engine now verifies back-channel logout tokens using only the same
 prepared, filtered provider RSA keys as ID tokens. There is no public back-channel
-endpoint or session-revocation action yet. The bounded compact JWT must use RS256
+endpoint; durable internal revocation is described below. The bounded compact JWT must use RS256
 and explicit `typ: logout+jwt`; unknown/ambiguous key IDs fail closed. Embedded key
 URLs/keys cannot expand trust or trigger network requests. Unsupported `crit`/`b64`
 header semantics are rejected. Diagnostics are fixed and never echo token/claim values.
@@ -431,24 +431,69 @@ The 64 KiB token ceiling, mandatory explicit type, single audience, event restri
 and short lifetime are deliberately strict compatibility policies, not a claim that
 every otherwise conforming provider is supported.
 
-After full cryptographic/claim validation, a mutex-protected in-process replay guard
-records only a domain-separated digest of issuer/client/token ID and its expiry.
-It permits one concurrent acceptance, retains active entries without eviction,
-prunes expired entries, and fails closed at 4096 entries. Rejected tokens do not
-poison the replay guard. Verified targets/digests have no Debug/serialization support.
-Run `cargo test backchannel` for independent RSA-signature, claim/algorithm/type/key
-substitution, target-bound, concurrency, replay, capacity, and expiry regressions.
+Verification is now pure: it returns a non-Debug/non-serializable verified target and
+domain-separated issuer/client/token-ID digest without reserving replay in memory.
+The prototype in-process guard was removed so a failed database transaction cannot
+poison provider retries. Run `cargo test backchannel` for independent signature,
+claim/algorithm/type/key substitution and target validation regressions.
 
-**This is not durable replay protection or implemented back-channel logout.** A
-restart clears this prototype guard and permits an otherwise valid token again.
-Before activation, replay recording and targeted session revocation must commit
-atomically in persistent state, so failures allow safe provider retries and restart
-cannot replay a token. Provider issuer/client/subject/session bindings must be stored
-with local session inventory, and login/logout races must fail closed. A `sid` miss
-must never be broadened to account-wide logout, and both subject/session claims must
-match when both are present. Local password sessions, unrelated providers/sessions,
-and local permissions must remain separate. No schema change, migration, or rebuild
-is introduced by this verifier-only increment.
+### Durable provider-session revocation (gated)
+
+State schema v11 adds `oidc_session_bindings` and `oidc_logout_events`. The binding
+is created atomically with pending local inventory after factor verification. It
+contains domain-separated provider/client, subject, and optional provider-session
+digests plus verified ID-token issue time. The optional signed `sid` is retained
+exactly in memory and must be printable ASCII, 1–1024 bytes; malformed/null values
+fail authentication. Session selectors and replay IDs are digest-only in these new
+tables; token bodies/hints and raw subject/session identifiers are not stored there.
+Digests are pseudonymous selectors, not encryption or a claim of anonymity.
+
+Internal `apply_logout` verifies the token and uses one SQLite writer transaction
+to prune expired tombstones, detect replay, record a new event, select matching
+inventory, delete its browser payloads, mark it revoked, and append fixed local
+session-revocation audit events. A still-valid duplicate returns a no-op success,
+including after process/database reopen. Failure rolls back the replay reservation,
+payload deletions, inventory changes, and audits together, permitting safe retry.
+Neither signature verification nor an unsuccessful transaction consumes a token.
+
+Selection requires the exact provider/client namespace. Subject-only events match
+that subject's OIDC sessions; session-only events match that exact provider session;
+both claims require both matches. A session-ID miss never falls back to subject-wide
+logout. Sessions with newer verified ID-token issue times than the event are not
+revoked. Local password sessions, other client/provider namespaces, independent PATs,
+passwords, MFA enrollment, credential generation, and local permissions are untouched.
+Session deletion cascades its provider binding through enforced foreign keys.
+
+Logout tombstones are retained for at least 20 minutes from processing, or through
+token expiry if later, covering the existing ID-token age and pending-candidate
+windows. Completion checks matching tombstones under the same writer lock before
+consuming factors or creating inventory. If logout arrives after inventory creation,
+it can revoke pending inventory too; final conditional binding cannot resurrect it.
+A fresh provider proof with a strictly later signed issue time can establish a new
+session. This avoids sleeps or trusting the browser's notion of logout order.
+
+The ledger fails closed at 4096 retained entries; expiry pruning happens on logout
+processing, without evicting active tombstones. Each event is bounded to 10,000
+matching inventory rows; exceeding the limit rolls back instead of partially logging
+out. These are initial compatibility/resource limits, not operator-tunable controls.
+Run `cargo test durable_logout` for restart/retry/concurrency, exact targeting,
+password/PAT isolation, capacity, race, optional-sid, and v10-to-v11 migration tests.
+
+Back up persistent state and its separate MFA keyring before upgrading. Normal
+service/account startup migrates earlier schemas to v11 while preserving existing
+accounts, sessions, links, tokens, MFA, permissions, and retained audit history.
+No raw-source refresh or disposable-index rebuild is required. Restart after replacing
+the executable; on this host:
+
+```sh
+systemctl restart agent-lens.service
+systemctl is-active agent-lens.service
+```
+
+Older binaries refuse schema v11. Rollback requires stopping the service and restoring
+the pre-upgrade state and matching keyring backup, not deleting or editing schema
+metadata. Production OIDC routing and context lifecycle remain disabled; this internal
+implementation does not certify a real provider/browser deployment.
 
 ### Remaining production activation work
 
@@ -465,9 +510,9 @@ TOTP/recovery and password-first passkey verification, and rotated session estab
 but production routing and pending-candidate handling remain unconnected. Provider
 MFA/role claims must not silently bypass local requirements. RP-initiated logout is
 implemented internally but needs production routing and secure context retention.
-The internal signed back-channel token verifier still needs durable replay recording,
-provider/session binding, targeted revocation, production routing, and end-to-end
-browser/provider regressions are still required. Configuration
+Signed back-channel verification and durable targeted revocation are implemented
+internally, but production routing, pending-candidate/logout-context lifecycle, and
+end-to-end browser/provider deployment regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 
 Standards: [Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html),

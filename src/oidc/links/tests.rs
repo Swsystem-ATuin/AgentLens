@@ -397,7 +397,7 @@ async fn v9_migration_preserves_credentials_mfa_public_keys_permissions_and_appe
         .fetch_one(&reopened.auth.pool)
         .await
         .unwrap(),
-        "10"
+        "11"
     );
     let ciphertext_after: String =
         sqlx::query_scalar("SELECT pending_secret FROM account_mfa WHERE account_id=?")
