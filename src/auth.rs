@@ -2014,7 +2014,8 @@ async fn load_preferences(
         date_time_format: row.2,
         appearance: row.3,
         font_scale: u16::try_from(row.4).unwrap_or_default(),
-        page_size: usize::try_from(row.5).unwrap_or_default(),
+        page_size: usize::try_from(row.5)
+            .unwrap_or_else(|_| crate::preferences::UserPreferences::default().page_size),
         live_interval_seconds: u64::try_from(row.6).unwrap_or_default(),
         live_paused: row.7,
         transcript_detail: row.8,
@@ -2366,6 +2367,19 @@ mod tests {
         assert_eq!(sanitized.appearance, "system");
         assert_eq!(sanitized.page_size, 50);
         assert_eq!(sanitized.timezone_name, "Europe/London");
+        sqlx::query("UPDATE account_preferences SET page_size=-1 WHERE account_id=?")
+            .bind(&alice_id)
+            .execute(&state.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_preferences(&state.auth.pool, &alice_id)
+                .await
+                .unwrap()
+                .page_size,
+            50,
+            "malformed negative settings must not silently opt into All"
+        );
     }
 
     #[test]

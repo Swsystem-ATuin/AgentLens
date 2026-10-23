@@ -5,7 +5,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-pub(crate) const PAGE_SIZES: [usize; 3] = [25, 50, 100];
+// Zero is the persisted/form sentinel for the explicitly selected "All" option.
+pub(crate) const PAGE_SIZES: [usize; 4] = [0, 25, 50, 100];
 pub(crate) const LIVE_INTERVALS: [u64; 4] = [5, 10, 30, 60];
 pub(crate) const FONT_SCALES: [u16; 4] = [90, 100, 110, 125];
 type TimezoneTransitions = Arc<Vec<(i64, String)>>;
@@ -45,6 +46,20 @@ impl Default for UserPreferences {
 }
 
 impl UserPreferences {
+    pub(crate) fn display_page_size(&self) -> usize {
+        if self.page_size == 0 {
+            // SQLite limits and offsets are signed integers. Leave room for the lookahead
+            // row, without allocating this amount: fetch/truncate only touch actual rows.
+            (isize::MAX - 1) as usize
+        } else {
+            self.page_size
+        }
+    }
+
+    pub(crate) fn display_page(&self, requested: u32) -> u32 {
+        if self.page_size == 0 { 1 } else { requested }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !matches!(self.timezone_mode.as_str(), "utc" | "browser" | "iana") {
             return Err("invalid timezone mode");
@@ -298,6 +313,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_rows_is_explicit_persistent_and_uses_safe_nonzero_display_arithmetic() {
+        let all = super::UserPreferences {
+            page_size: 0,
+            ..super::UserPreferences::default()
+        };
+        assert!(all.validate().is_ok());
+        assert_eq!(all.clone().sanitized().page_size, 0);
+        assert_eq!(all.display_page(u32::MAX), 1);
+        assert!(all.display_page_size() > 100);
+        assert!(i64::try_from(all.display_page_size() + 1).is_ok());
+        for size in [25, 50, 100] {
+            let prefs = super::UserPreferences {
+                page_size: size,
+                ..super::UserPreferences::default()
+            };
+            assert_eq!(prefs.display_page_size(), size);
+            assert_eq!(prefs.display_page(2), 2);
+        }
+    }
     use super::*;
 
     #[test]

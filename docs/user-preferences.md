@@ -10,7 +10,7 @@ State schema version 3 adds one typed `account_preferences` row per account. Col
 - ISO-style, long 24-hour, or long 12-hour timestamps;
 - system, light, dark, or high-contrast appearance;
 - 90%, 100%, 110%, or 125% font scale;
-- 25, 50, or 100 rows/events per page;
+- 25, 50, 100, or All rows/events per page;
 - a 5, 10, 30, or 60 second live-reader interval and its initial paused state;
 - compact, standard, or expanded transcript detail and code wrapping;
 - all, active, or archived as the default sessions view.
@@ -27,7 +27,9 @@ Browser-local mode uses a same-origin script to discover the browser's IANA time
 
 ## Bounded behavior
 
-The selected page size applies consistently to sessions, usage groups, transcript events, turn history, source health, and evidence links. List queries fetch at most the selected size plus one row for next-page detection; the allowed maximum is 100. Existing fixed diagnostic and recent-usage caps remain in force. Message and tool bodies retain their independent character limits. The synthetic 30-session regression verifies that a 25-row selection renders exactly 25 links, exposes continuation, and stays below the 256 KiB response ceiling.
+The selected page size applies consistently to sessions, usage groups, transcript events, turn history, source health, account/security history, token lists, administrative lists, and evidence links. The numbered choices fetch the selected size plus one row for next-page detection. **All** loads every matching authorized row/event on one page and suppresses continuation links; old page/section URLs resolve to that single page. Filters and source/capability restrictions still apply. Existing fixed diagnostic and recent-usage caps remain in force, and message/tool bodies keep their separate preview/detail character limits. All is an explicit opt-in and may use substantially more memory and take longer for large histories; the default remains 50. The preference is persisted as numeric `page_size=0` without a schema change; invalid or malformed values still fall back to 50 rather than accidentally enabling All.
+
+Synthetic rendered-HTML regressions cover more than 100 authorized rows/events, initial and resumed setup blocks staying collapsed, ordinary conversation preservation, filtering and forbidden sources, administrative rows, safe evidence/page arithmetic, and persistence after reopening state. The existing 30-session regression still verifies exactly 25 links and continuation for a bounded choice.
 
 Appearance is served as an authenticated same-origin stylesheet, so theme, contrast, font scale, and code wrapping work without JavaScript. The small authenticated preference script only supplies browser-local conversion and live-reader defaults. All responses retain `Cache-Control: no-store` and the existing restrictive content security policy.
 

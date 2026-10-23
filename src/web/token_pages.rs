@@ -40,7 +40,7 @@ pub(super) async fn list(
         &state,
         &user,
         &session,
-        bounded_page(query.page, "validate token page")?,
+        preference_page(&user.preferences, query.page, "validate token page")?,
         None,
         None,
     )
@@ -55,7 +55,7 @@ async fn render(
     new_token: Option<String>,
     error: Option<String>,
 ) -> Result<Response, WebError> {
-    let size = user.preferences.page_size;
+    let size = user.preferences.display_page_size();
     let mut tokens = crate::tokens::list(
         &state.auth.pool,
         &user.id,

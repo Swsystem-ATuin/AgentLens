@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Add an opt-in All choice to the account's rows/events-per-page preference, consistently covering paginated lists, transcript timelines, administrative/token/history pages, and evidence links. Preserve authorization, filters, collapsed setup, and independent body/diagnostic limits; handle old page URLs and malformed stored values safely without a schema migration. Include persistence and rendered-HTML regressions beyond the former 100-row maximum.
+
 - State schema v11 durably binds OIDC inventory to digest-only provider/client/subject/session selectors and commits logout replay records, exact session/payload revocation, and fixed audits atomically. Idempotent retry survives restart; retained tombstones block older pending sign-ins without revoking local password sessions or independent PATs. Migration, rollback/retry, targeting, capacity, and race regressions added; production OIDC routes remain disabled.
 
 - Gated back-channel logout-token verification using prepared RSA provider keys, explicit RS256/logout token typing, exact issuer/audience and bounded time/target/event checks, sanitized errors, and bounded concurrent in-process replay detection. Independent signatures cover substitutions, malformed claims, key ambiguity, and replay/capacity behavior. No revocation endpoint is enabled: durable replay and provider-session-specific revocation remain required.

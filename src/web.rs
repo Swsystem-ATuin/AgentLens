@@ -675,8 +675,12 @@ async fn account_access(
     if state.auth.is_local_mode() {
         return Ok(axum::response::Redirect::to("/account").into_response());
     }
-    let page = bounded_page(query.page, "validate effective access page")?;
-    let size = user.preferences.page_size;
+    let page = preference_page(
+        &user.preferences,
+        query.page,
+        "validate effective access page",
+    )?;
+    let size = user.preferences.display_page_size();
     let mut origins = crate::access::grant_origins(
         &state.auth.pool,
         &user.id,
@@ -970,9 +974,17 @@ async fn account_sessions(
     if state.auth.is_local_mode() {
         return Ok(Html("Local mode does not retain account sessions.".into()));
     }
-    let page = bounded_page(query.page, "validate account session page")?;
-    let events_page = bounded_page(query.events_page, "validate security event page")?;
-    let page_size = user.preferences.page_size;
+    let page = preference_page(
+        &user.preferences,
+        query.page,
+        "validate account session page",
+    )?;
+    let events_page = preference_page(
+        &user.preferences,
+        query.events_page,
+        "validate security event page",
+    )?;
+    let page_size = user.preferences.display_page_size();
     let current_id = crate::auth::current_inventory_id(&session)
         .await
         .map_err(|_| WebError::authentication("load current session inventory"))?
@@ -1180,13 +1192,13 @@ async fn usage(
     Query(mut query): Query<UsageQuery>,
 ) -> Result<Html<String>, WebError> {
     let preferences = effective_preferences(&user.preferences, query.browser_timezone.as_deref());
-    let page_size = user.preferences.page_size;
+    let page_size = user.preferences.display_page_size();
     let projects = state
         .projects
         .with_timezone(preferences.sql_timezone_modifier());
     query.normalize();
     query.validate()?;
-    let page = bounded_page(query.page, "validate usage page")?;
+    let page = preference_page(&user.preferences, query.page, "validate usage page")?;
     let show_origins = queries::show_origins(&state.pool)
         .await
         .map_err(|error| WebError::database("load source layout", error))?;
@@ -1303,7 +1315,7 @@ async fn diagnostics(
             queries::show_origins(&state.pool),
         )
         .map_err(|error| WebError::database("load diagnostics", error))?;
-    let page_size = user.preferences.page_size;
+    let page_size = user.preferences.display_page_size();
     let mut pressure = present_pressure(pressure, page_size);
     for row in &mut pressure {
         row.timestamp = format_timestamp_or(&user.preferences, &row.timestamp);
@@ -1346,8 +1358,8 @@ async fn health(
     {
         return Err(WebError::forbidden());
     }
-    let page = bounded_page(query.page, "validate health page")?;
-    let page_size = user.preferences.page_size;
+    let page = preference_page(&user.preferences, query.page, "validate health page")?;
+    let page_size = user.preferences.display_page_size();
     let (mut snapshot, show_origins) = tokio::try_join!(
         crate::health::snapshot(
             &state.pool,
@@ -1473,9 +1485,9 @@ async fn sessions(
         filters.archive = Some(user.preferences.default_sessions_view.clone());
     }
     filters.validate()?;
-    let page = filters.page_number()?;
+    let page = user.preferences.display_page(filters.page_number()?);
     let preferences = effective_preferences(&user.preferences, filters.browser_timezone.as_deref());
-    let page_size = user.preferences.page_size;
+    let page_size = user.preferences.display_page_size();
     let projects = state
         .projects
         .with_timezone(preferences.sql_timezone_modifier());
@@ -1718,8 +1730,12 @@ async fn session(
     Path(stable_id): Path<String>,
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Html<String>, WebError> {
-    let page_size = user.preferences.page_size;
-    let section = bounded_page(query.section, "validate transcript section")?;
+    let page_size = user.preferences.display_page_size();
+    let section = preference_page(
+        &user.preferences,
+        query.section,
+        "validate transcript section",
+    )?;
     let event_filter = query.event.as_deref().unwrap_or("all");
     if !matches!(
         event_filter,
@@ -2063,8 +2079,8 @@ async fn turn_history(
     Path(stable_id): Path<String>,
     Query(query): Query<TurnHistoryQuery>,
 ) -> Result<Html<String>, WebError> {
-    let page = bounded_page(query.page, "validate turn page")?;
-    let page_size = user.preferences.page_size;
+    let page = preference_page(&user.preferences, query.page, "validate turn page")?;
+    let page_size = user.preferences.display_page_size();
     let session = load_session(&state.pool, &stable_id, &state.projects, &user.access).await?;
     let mut rows = queries::session_turns(
         &state.pool,
@@ -2173,7 +2189,7 @@ async fn message(
     let preceding = queries::preceding_timeline_event_count(&state.pool, session.id, sequence, 0)
         .await
         .map_err(|error| WebError::database("locate message section", error))?;
-    let section = preceding / user.preferences.page_size as i64 + 1;
+    let section = preceding / user.preferences.display_page_size() as i64 + 1;
     let pagination = Pagination {
         page: part,
         previous_href: (part > 1).then(|| message_href(&stable_id, sequence, part - 1)),
@@ -2258,7 +2274,7 @@ async fn tool_detail(
     requested_part: Option<u32>,
     result: bool,
 ) -> Result<Html<String>, WebError> {
-    let page_size = preferences.page_size;
+    let page_size = preferences.display_page_size();
     let part = bounded_page(requested_part, "validate tool detail part")?;
     let session = load_session(&state.pool, &stable_id, &state.projects, &access).await?;
     let offset = i64::from(part - 1) * MESSAGE_CHUNK_CHARS;
@@ -2339,6 +2355,14 @@ async fn tool_detail(
         .render()
         .map_err(|error| WebError::template("render tool detail", error))?,
     ))
+}
+
+fn preference_page(
+    preferences: &crate::preferences::UserPreferences,
+    page: Option<u32>,
+    operation: &'static str,
+) -> Result<u32, WebError> {
+    bounded_page(page, operation).map(|page| preferences.display_page(page))
 }
 
 fn bounded_page(page: Option<u32>, operation: &'static str) -> Result<u32, WebError> {
@@ -2507,6 +2531,7 @@ impl IntoResponse for WebError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod all_rows;
 
     #[test]
     fn local_mode_accepts_only_numeric_loopback_bind_addresses() {

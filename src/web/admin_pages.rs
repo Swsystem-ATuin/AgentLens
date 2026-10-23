@@ -105,8 +105,8 @@ async fn render(
             Capability::AccountsAdminister
         },
     )?;
-    let page = bounded_page(page, "validate administrative page")?;
-    let size = user.preferences.page_size;
+    let page = preference_page(&user.preferences, page, "validate administrative page")?;
+    let size = user.preferences.display_page_size();
     let offset = i64::from(page - 1) * size as i64;
     let limit = size as i64 + 1;
     let mut view = AdminTemplate {
