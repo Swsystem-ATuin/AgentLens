@@ -492,10 +492,55 @@ systemctl is-active agent-lens.service
 
 Older binaries refuse schema v11. Rollback requires stopping the service and restoring
 the pre-upgrade state and matching keyring backup, not deleting or editing schema
-metadata. Production OIDC routing and context lifecycle remain disabled; this internal
+metadata. Production OIDC routing remains disabled; this internal
 implementation does not certify a real provider/browser deployment.
 
-### Remaining production activation work
+### Gated runtime context lifecycle
+
+The internal runtime now owns pending candidates and completed logout contexts in
+separate bounded in-process stores. OIDC-specific session payloads contain only
+random opaque handles; verified subjects, ID-token hints, password/factor inputs,
+and candidates are never serialized into them. Normal local account/session fields
+remain in the usual persistent authentication payload. Contexts have no Debug or
+serialization implementation and must not be logged.
+
+Handles are bound to the server-issued browser session ID, not a form/query/browser-
+supplied identity. Each store permits one active context per browser and at most
+1024 contexts globally. Replacing or cancelling a context invalidates already-held
+references too. Expiry is checked on access, and expired entries are pruned on store
+operations; no periodic background sweeper or secure RAM zeroization is claimed.
+Live entries are never evicted to make room for unrelated browsers. Starting another
+sign-in cancels that browser's pending candidate only after CSRF/origin validation.
+
+Candidate contexts expire at the candidate's five-minute deadline. Passkey challenge
+creation borrows the context under a per-entry asynchronous mutex, without holding
+the global store lock across password verification or database work. Replacement
+while an operation is in flight causes its result to be rejected. Factor completion
+atomically consumes the candidate before awaiting local authentication work; repeated
+or concurrent completion cannot create a second session. Existing link/generation,
+MFA, provider-logout tombstone, and rotated-inventory checks still decide authorization.
+
+Successful completion retains the verified logout context under the newly rotated
+browser ID, for at most twelve hours, and returns only local account/enrollment
+metadata to its caller. If required context retention or saving its opaque handle
+fails, the newly created local login is revoked instead of silently accepting a login
+that cannot retain its required provider-logout context.
+
+Logout consumes its matching context and uses the existing local-first provider
+handoff. After restart, context expiry, or loss/rotation of the browser binding,
+the runtime can instead revoke locally and return an explicit **local-only** outcome.
+It never fabricates an ID-token hint or claims that the provider signed out. The
+normal cookie/session database is not enough to resurrect pending proofs or hints
+after a process restart. A missing context does not become an authentication bypass.
+
+`cargo test runtime_` and `cargo test contexts_are_bound` cover resumed requests,
+one-use completion, cancellation, expiry, capacity, concurrent consumption, absence
+of persisted provider credentials, restart/local-logout fallback, and real signed
+passkey completion. No schema change, source refresh, or index rebuild is needed.
+These APIs remain gated: no production OIDC route, login button, or enable flag is
+introduced by this increment.
+
+### Remaining HTTP/deployment activation work
 
 Before sign-in can ship, runtime activation must verify HTTPS/Secure cookies,
 owner-only client secret handling, a usable local administrator, discovery with
@@ -507,11 +552,11 @@ provisioned identity resolution, but production HTTP routing/rendering and safe
 callback error handling/logging are not registered yet.
 The gated completion implements fresh enabled/link/generation/local-permission checks,
 TOTP/recovery and password-first passkey verification, and rotated session establishment,
-but production routing and pending-candidate handling remain unconnected. Provider
+but production routing remains unconnected. Provider
 MFA/role claims must not silently bypass local requirements. RP-initiated logout is
-implemented internally but needs production routing and secure context retention.
+implemented internally with bounded context retention but still needs production routing.
 Signed back-channel verification and durable targeted revocation are implemented
-internally, but production routing, pending-candidate/logout-context lifecycle, and
+internally, but production routing, activation prerequisites, and
 end-to-end browser/provider deployment regressions are still required. Configuration
 preflight success is not evidence of successful discovery or secure authentication.
 

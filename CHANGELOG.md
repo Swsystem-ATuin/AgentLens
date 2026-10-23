@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Gated OIDC runtime context lifecycle with bounded browser-bound in-memory candidate/logout stores, opaque session handles, expiry/replacement/cancellation, per-entry asynchronous passkey borrowing, one-use factor completion, fail-closed logout-context retention, and explicit local-only logout fallback after restart. Signed-provider/passkey and context concurrency/privacy regressions added; production OIDC routing remains disabled.
+
 - Enable non-authentication account preferences under `serve --local`, including appearance, timezone, All rows/events, transcript and live-reader settings. Save validated choices in a bounded browser-local display cookie independent of anonymous CSRF-session expiry; retain CSRF checks, hide profile/security controls, create no account/authentication records, and ignore this cookie in authenticated mode. Add browser-isolation, persistence, validation, and boundary regressions.
 
 - Add an opt-in All choice to the account's rows/events-per-page preference, consistently covering paginated lists, transcript timelines, administrative/token/history pages, and evidence links. Preserve authorization, filters, collapsed setup, and independent body/diagnostic limits; handle old page URLs and malformed stored values safely without a schema migration. Include persistence and rendered-HTML regressions beyond the former 100-row maximum.

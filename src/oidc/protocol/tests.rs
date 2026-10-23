@@ -21,6 +21,7 @@ const SUBJECT: &str = "synthetic-subject-PrivateMarker";
 
 mod backchannel;
 mod completion;
+mod runtime;
 
 async fn browser_fixture() -> (tempfile::TempDir, crate::auth::StateStore, String) {
     use crate::{auth, oidc::links};

@@ -20,6 +20,14 @@ mod backchannel;
     )
 )]
 mod browser;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime contexts remain gated pending production OIDC routing"
+    )
+)]
+mod context;
 mod deployment;
 mod discovery;
 pub(crate) mod links;
