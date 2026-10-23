@@ -19,7 +19,9 @@
 <p class="muted">Optional. Your username remains the account identifier.</p>
 <button type="submit">Save profile</button>
 </form>
+{% endif %}
 <h2>Preferences</h2>
+{% if local_mode %}<p class="muted">Local display preferences are saved only in this browser for up to one year. They are not an account or authentication credential; clearing cookies resets them.</p>{% endif %}
 {% if preferences_saved %}<p class="success">Preferences saved.</p>{% endif %}
 {% if preferences_failed %}<p class="error">{{ preferences_error }}</p>{% endif %}
 <form class="account-options preferences" method="post" action="/account/preferences">
@@ -39,6 +41,7 @@
 <label>Default sessions view<select name="default_sessions_view"><option value="all"{% if preferences.default_sessions_view == "all" %} selected{% endif %}>Active and archived</option><option value="active"{% if preferences.default_sessions_view == "active" %} selected{% endif %}>Active only</option><option value="archived"{% if preferences.default_sessions_view == "archived" %} selected{% endif %}>Archived only</option></select></label>
 <button type="submit">Save preferences</button>
 </form>
+{% if !local_mode %}
 <h2>Change password</h2>
 <p class="muted">{{ password_age }}</p>
 {% if password_changed %}<p class="success">Password changed. Other sessions for this account have been signed out.</p>{% endif %}

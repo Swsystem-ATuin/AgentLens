@@ -1511,6 +1511,7 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     if auth.local_mode {
+        let preferences = crate::local_preferences::read(request.headers());
         request.extensions_mut().insert(CurrentUser {
             id: "local".into(),
             credential_generation: 0,
@@ -1518,7 +1519,7 @@ pub async fn require_auth(
             display_name: None,
             password_changed_at: "Unavailable".into(),
             access: AccessScope::all(),
-            preferences: crate::preferences::UserPreferences::default(),
+            preferences,
         });
         return next.run(request).await;
     }

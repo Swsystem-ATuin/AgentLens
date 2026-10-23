@@ -881,9 +881,6 @@ async fn change_preferences(
     session: tower_sessions::Session,
     Form(form): Form<PreferencesForm>,
 ) -> Result<Response, WebError> {
-    if state.auth.is_local_mode() {
-        return Ok(axum::response::Redirect::to("/account").into_response());
-    }
     if !crate::auth::verify_csrf(&session, &form.csrf_token)
         .await
         .map_err(|_| WebError::authentication("verify preferences request"))?
@@ -918,6 +915,16 @@ async fn change_preferences(
             .await?,
         )
             .into_response());
+    }
+    if state.auth.is_local_mode() {
+        let mut response =
+            axum::response::Redirect::to("/account?preferences_saved=1").into_response();
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            crate::local_preferences::set(&preferences)
+                .map_err(|_| WebError::authentication("save local display preferences"))?,
+        );
+        return Ok(response);
     }
     crate::auth::update_preferences(&state.auth, &user.id, &preferences)
         .await
@@ -2532,6 +2539,7 @@ impl IntoResponse for WebError {
 mod tests {
     use super::*;
     mod all_rows;
+    mod local_preferences;
 
     #[test]
     fn local_mode_accepts_only_numeric_loopback_bind_addresses() {

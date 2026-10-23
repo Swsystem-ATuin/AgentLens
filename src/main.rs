@@ -7,6 +7,7 @@ mod fingerprint;
 mod health;
 mod identity;
 mod ingest;
+mod local_preferences;
 mod metrics;
 mod mfa;
 mod oidc;

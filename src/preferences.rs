@@ -12,7 +12,8 @@ pub(crate) const FONT_SCALES: [u16; 4] = [90, 100, 110, 125];
 type TimezoneTransitions = Arc<Vec<(i64, String)>>;
 type TimezoneCache = Mutex<HashMap<String, TimezoneTransitions>>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct UserPreferences {
     pub(crate) timezone_mode: String,
     pub(crate) timezone_name: String,

@@ -97,6 +97,10 @@ For personal use on the same machine, start without creating an account:
 cargo run -- serve --local
 ```
 
+In this mode, `/account` still offers display and browsing preferences, saved only
+in the current browser (including All rows/events). Authentication, identity, and
+security-management controls remain unavailable; see [local-mode preferences](docs/user-preferences.md#local-mode-preferences).
+
 Open <http://127.0.0.1:3001/sessions> to review activities, usage, diagnostics, and reports. Local mode accepts only a numeric loopback `--bind` address (`127.0.0.1` or `::1`), and anyone who can reach that port can read the indexed content. It creates the owner-only application state database but requires no account or password. No index rebuild is required when switching between modes.
 
 For authenticated access, create the first application account. Put the password in an owner-only temporary file so it does not appear in shell history or process arguments:
