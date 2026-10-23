@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Repair the local refresh schedule with an opt-in persistent quarter-hour calendar timer that clears stale/inherited monotonic triggers, and align the local refresh executable with the current web-service debug build instead of an older release binary. Add calendar regression coverage and deployment/verification instructions; generic package and cron defaults remain unchanged.
+
 - Hermes cron run documents containing only scheduler metadata are now hidden from the sessions browser by default, while cron artifacts and canonical cron sessions with assistant or tool output remain visible. An “All cron runs” filter restores the complete audit history without deleting indexed evidence or blocking direct transcript URLs; parser version 3 classifies existing artifacts on the next refresh.
 
 - Gemini CLI session and hook context now render as collapsed internal evidence without opening turns or becoming fallback titles. Current `functionCall` and `functionResponse` content parts import as paired tool activity instead of disappearing or producing empty user messages, thought-marked text remains hidden, main sessions recover best-effort workspace attribution from structured session context when metadata omits directories, and parser version 2 repairs existing disposable indexes on refresh.

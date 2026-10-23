@@ -57,7 +57,9 @@ sudo systemctl enable --now agent-lens.service agent-lens-refresh.timer
 
 The timer starts one minute after boot and schedules refresh once per minute.
 systemd does not start a second instance while its one-shot refresh service is
-still active. `Persistent=true` triggers a missed run after downtime. Inspect the
+still active. These are monotonic boot/service-relative triggers: `Persistent=true`
+does not provide missed-run catch-up for them (it applies to calendar timers).
+Inspect the
 schedule and logs with:
 
 ```bash
@@ -110,9 +112,46 @@ rebuild using the same environment, then restart it.
 
 ## Changing the interval or paths
 
-For systemd, copy the timer interval into an override rather than editing the
-shipped unit. For example, `sudo systemctl edit agent-lens-refresh.timer` can set
-another `OnUnitActiveSec`; run `daemon-reload` and restart the timer afterward.
+For systemd, use an override rather than editing the shipped unit. This host uses
+the supplied quarter-hour calendar override: `:00`, `:15`, `:30`, and `:45`, with
+up to ten seconds of scheduling tolerance. Calendar scheduling provides persistent
+missed-run catch-up and avoids dependence on previous service-start timestamps.
+The override explicitly clears inherited monotonic and calendar triggers so they
+do not remain active alongside the new schedule:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system/agent-lens-refresh.timer.d
+sudo install -m 0644 packaging/systemd/agent-lens-refresh-quarter-hour.conf \
+  /etc/systemd/system/agent-lens-refresh.timer.d/quarter-hour.conf
+sudo systemctl daemon-reload
+sudo systemctl enable agent-lens-refresh.timer
+sudo systemctl restart agent-lens-refresh.timer
+systemctl list-timers agent-lens-refresh.timer
+```
+
+The generic package timer and SysV cron example retain their one-minute defaults;
+install this opt-in drop-in where a fifteen-minute schedule is wanted. A calendar
+tick will not launch a second copy of an already-running oneshot refresh service.
+
+On the repository development host, both web and refresh services must use the
+current `/opt/Docker-Data/AgentLens/target/debug/agent-lens` build, not an older
+`target/release/agent-lens`. The local refresh service's binary override is:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/opt/Docker-Data/AgentLens/target/debug/agent-lens refresh --data data
+```
+
+Install that as `/etc/systemd/system/agent-lens-refresh.service.d/local-binary.conf`
+on this host, then run `daemon-reload`. Preserve the existing working directory,
+read-only raw-data protection, and other sandboxing. Do not use this host-specific
+path for installed production packages. After any schedule/path change, run
+`systemctl start agent-lens-refresh.service` and check `systemctl show
+agent-lens-refresh.service -p Result -p ExecMainStatus`; inspect `list-timers` for
+an actual future run, not merely an `active (elapsed)` timer. No source-format,
+schema migration, or index rebuild is needed for this configuration change.
+
 For cron, change the schedule in `/etc/cron.d/agent-lens-refresh`.
 
 Keep the database, data, and bind settings in the shared environment file. CLI

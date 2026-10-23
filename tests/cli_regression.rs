@@ -3,6 +3,70 @@ use std::{
     process::{Command, Output},
 };
 
+#[test]
+fn quarter_hour_timer_override_replaces_inherited_triggers_and_schedules_real_quarter_hours() {
+    let config = include_str!("../packaging/systemd/agent-lens-refresh-quarter-hour.conf");
+    let lines: Vec<_> = config.lines().map(str::trim).collect();
+    for reset in [
+        "OnActiveSec=",
+        "OnBootSec=",
+        "OnStartupSec=",
+        "OnUnitActiveSec=",
+        "OnUnitInactiveSec=",
+        "OnCalendar=",
+    ] {
+        assert!(
+            lines.contains(&reset),
+            "quarter-hour override must clear inherited trigger {reset}"
+        );
+    }
+    assert!(
+        lines.contains(&"Persistent=true"),
+        "calendar timer must catch up after downtime"
+    );
+    let schedules: Vec<_> = lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("OnCalendar="))
+        .filter(|value| !value.is_empty())
+        .collect();
+    assert_eq!(
+        schedules,
+        vec!["*-*-* *:00/15:00"],
+        "use one calendar schedule, not a boot-relative or service-start-relative timer"
+    );
+    let output = match Command::new("systemd-analyze")
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .args([
+            "calendar",
+            "--iterations=3",
+            "--base-time=2026-01-01 00:01:00 UTC",
+            schedules[0],
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("could not validate timer calendar: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "systemd rejected the calendar: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let schedule = String::from_utf8(output.stdout).expect("systemd calendar output is UTF-8");
+    for expected in [
+        "2026-01-01 00:15:00 UTC",
+        "2026-01-01 00:30:00 UTC",
+        "2026-01-01 00:45:00 UTC",
+    ] {
+        assert!(
+            schedule.contains(expected),
+            "actual systemd calendar must include {expected}: {schedule}"
+        );
+    }
+}
+
 fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_agent-lens"))
         .current_dir(root)

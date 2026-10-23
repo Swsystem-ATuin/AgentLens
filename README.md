@@ -152,6 +152,10 @@ Production examples are included for both major Linux init styles:
 - SysV init uses an `/etc/init.d/agent-lens` service, while cron invokes a
   lock-protected refresh wrapper every minute so refreshes never overlap.
 
+This repository's local host instead uses the optional fifteen-minute calendar
+timer override (`:00`, `:15`, `:30`, `:45`) and the current debug build for refresh;
+see [changing the interval or paths](docs/service-management.md#changing-the-interval-or-paths).
+
 Both use one `/etc/agent-lens/agent-lens.env` file for database, copied-source,
 bind, authentication-mode, cookie, and optional project settings. The shipped
 configuration binds to loopback and keeps mutable state beneath
