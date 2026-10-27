@@ -39,14 +39,23 @@ struct ImportedRollout {
     malformed_lines: usize,
 }
 
+#[cfg(test)]
 pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestReport> {
+    ingest_with_policy(pool, root, &crate::redaction::Policy::default()).await
+}
+
+pub(crate) async fn ingest_with_policy(
+    pool: &SqlitePool,
+    root: &Path,
+    policy: &crate::redaction::Policy,
+) -> Result<IngestReport> {
     let run =
         sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running','unknown')")
             .execute(pool)
             .await
             .context("start ingest health record")?
             .last_insert_rowid();
-    match ingest_data_root_run(pool, root, run).await {
+    match ingest_data_root_run(pool, root, run, policy).await {
         Ok(report) => Ok(report),
         Err(error) => {
             let reason = classify_run_failure(&format!("{error:#}"));
@@ -71,9 +80,15 @@ pub async fn ingest_data_root(pool: &SqlitePool, root: &Path) -> Result<IngestRe
     }
 }
 
-async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Result<IngestReport> {
+async fn ingest_data_root_run(
+    pool: &SqlitePool,
+    root: &Path,
+    run: i64,
+    policy: &crate::redaction::Policy,
+) -> Result<IngestReport> {
     let discovered = sources::discover(root)?;
     let mut transaction = pool.begin().await?;
+    policy.validate_connection(&mut transaction).await?;
     let previous_layout: Option<String> = sqlx::query_scalar(
         "SELECT source_layout FROM ingest_runs WHERE status='complete' ORDER BY id DESC LIMIT 1",
     )
@@ -91,9 +106,20 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
         .bind(run)
         .execute(&mut *transaction)
         .await?;
+    sqlx::query("INSERT INTO index_metadata(key,value) VALUES('redaction_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(&policy.fingerprint).execute(&mut *transaction).await?;
     let mut report = IngestReport::default();
     for home in discovered.homes {
         let adapter = home.adapter;
+        let key = crate::identity::source_id(
+            adapter.kind(),
+            &home.host,
+            &home.user,
+            &home.path.to_string_lossy(),
+        );
+        let sanitizer = policy.for_source(&key);
+        for locator in [&home.host, &home.user, home.path.to_string_lossy().as_ref()] {
+            sanitizer.check_locator(locator)?;
+        }
         let (instance, source_key) = ensure_instance(
             &mut transaction,
             adapter.kind(),
@@ -121,6 +147,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
             Adapter::Hermes => {
                 for path in hermes::state_databases(&home.path)? {
                     report.files_seen += 1;
+                    sanitizer.check_locator(&path.to_string_lossy())?;
                     let mut file_transaction = transaction.begin().await?;
                     match ingest_hermes_state(
                         &mut file_transaction,
@@ -129,6 +156,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                         &source_key,
                         &home.path,
                         &path,
+                        &sanitizer,
                     )
                     .await
                     {
@@ -151,7 +179,11 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                                 instance,
                                 &path,
                                 "state",
-                                &format!("{error:#}"),
+                                &if sanitizer.active() {
+                                    "source_import_failed".to_owned()
+                                } else {
+                                    format!("{error:#}")
+                                },
                             )
                             .await?;
                         }
@@ -195,6 +227,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                 {
                     report.files_seen += 1;
                     let mut file_transaction = transaction.begin().await?;
+                    sanitizer.check_locator(&entry.path().to_string_lossy())?;
                     match ingest_source(
                         &mut file_transaction,
                         adapter,
@@ -203,6 +236,7 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                         &source_key,
                         entry.path(),
                         area,
+                        &sanitizer,
                     )
                     .await
                     {
@@ -229,7 +263,11 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
                                 instance,
                                 entry.path(),
                                 area,
-                                &format!("{error:#}"),
+                                &if sanitizer.active() {
+                                    "source_import_failed".to_owned()
+                                } else {
+                                    format!("{error:#}")
+                                },
                             )
                             .await?;
                         }
@@ -238,7 +276,11 @@ async fn ingest_data_root_run(pool: &SqlitePool, root: &Path, run: i64) -> Resul
             }
         }
         if adapter == Adapter::Codex {
-            apply_codex_titles(&mut transaction, instance, &home.path).await?;
+            apply_codex_titles(&mut transaction, instance, &home.path, &sanitizer).await?;
+        }
+        for (rule, count) in sanitizer.counts() {
+            sqlx::query("INSERT INTO redaction_audit(ingest_run_id,source_key,policy_version,rule_id,replacement_count) VALUES(?,?,?,?,?)")
+                .bind(run).bind(&source_key).bind(&policy.fingerprint).bind(rule).bind(count.min(i64::MAX as u64) as i64).execute(&mut *transaction).await?;
         }
     }
     (report.removed_sessions, report.removed_files) =
@@ -390,6 +432,7 @@ async fn ensure_instance(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ingest_source(
     connection: &mut SqliteConnection,
     adapter: Adapter,
@@ -398,7 +441,9 @@ async fn ingest_source(
     source_key: &str,
     path: &Path,
     kind: &str,
+    sanitizer: &crate::redaction::Sanitizer,
 ) -> Result<Option<ImportedRollout>> {
+    sanitizer.check_locator(&path.to_string_lossy())?;
     let previous: Option<SourceCheckpoint> = sqlx::query_as(
         "SELECT content_hash,parser_version,parse_status,EXISTS(SELECT 1 FROM sessions WHERE source_file_id=source_files.id) AS has_session FROM source_files WHERE path=?")
         .bind(path.to_string_lossy().as_ref()).fetch_optional(&mut *connection).await?;
@@ -416,11 +461,26 @@ async fn ingest_source(
             .context("record unchanged source observation")?;
         return Ok(None);
     }
-    let summary = match adapter {
+    let mut summary = match adapter {
         Adapter::Codex => codex::scan_rollout(path)?,
         Adapter::Gemini => gemini::scan_session(path)?,
         Adapter::Hermes => hermes::scan_session(path)?,
     };
+    sanitizer.check_locator(&summary.external_id)?;
+    let secrets = sanitizer.secrets(&summary.raw_metadata);
+    summary.cwd = sanitizer.optional(summary.cwd, &secrets);
+    summary.model = sanitizer.optional(summary.model, &secrets);
+    summary.derived_title = if sanitizer.active() {
+        None
+    } else {
+        summary.derived_title
+    };
+    summary.started_at = sanitizer.optional(summary.started_at, &secrets);
+    summary.ended_at = sanitizer.optional(summary.ended_at, &secrets);
+    summary.raw_metadata = sanitizer.text(&summary.raw_metadata, &secrets);
+    if sanitizer.active() && summary.parse_error.is_some() {
+        summary.parse_error = Some("partial_source".into());
+    }
     if previous.as_ref().is_some_and(|row| row.has_session) {
         ensure!(
             summary.malformed_lines == 0,
@@ -475,8 +535,15 @@ async fn ingest_source(
                 .await?;
         }
     }
-    let (messages, tools, second_pass_malformed) =
-        import_source_records(connection, adapter, path, &summary.metadata, session_id).await?;
+    let (messages, tools, second_pass_malformed) = import_source_records(
+        connection,
+        adapter,
+        path,
+        &summary.metadata,
+        session_id,
+        sanitizer,
+    )
+    .await?;
     ensure!(
         second_pass_malformed == summary.malformed_lines,
         "source changed between parsing passes; retry refresh"
@@ -509,7 +576,9 @@ async fn ingest_hermes_state(
     source_key: &str,
     home: &Path,
     path: &Path,
+    sanitizer: &crate::redaction::Sanitizer,
 ) -> Result<Option<ImportedRollout>> {
+    sanitizer.check_locator(&path.to_string_lossy())?;
     let previous: Option<SourceCheckpoint> = sqlx::query_as(
         "SELECT content_hash,parser_version,parse_status,EXISTS(SELECT 1 FROM sessions WHERE source_file_id=source_files.id) AS has_session FROM source_files WHERE path=?",
     )
@@ -566,7 +635,19 @@ async fn ingest_hermes_state(
     let mut message_count = 0usize;
     let mut tool_count = 0usize;
     let session_count = scan.sessions.len();
-    for session in scan.sessions {
+    for mut session in scan.sessions {
+        sanitizer.check_locator(&session.external_id)?;
+        let secrets = sanitizer.secrets(&session.raw_metadata);
+        session.cwd = sanitizer.optional(session.cwd, &secrets);
+        session.model = sanitizer.optional(session.model, &secrets);
+        session.title = if sanitizer.active() {
+            None
+        } else {
+            session.title
+        };
+        session.started_at = sanitizer.optional(session.started_at, &secrets);
+        session.ended_at = sanitizer.optional(session.ended_at, &secrets);
+        session.raw_metadata = sanitizer.text(&session.raw_metadata, &secrets);
         let stable_id = crate::identity::session_id(source_key, &session.external_id);
         let title = session.title.as_deref().unwrap_or(&session.external_id);
         let session_id: i64 = sqlx::query_scalar(
@@ -601,7 +682,8 @@ async fn ingest_hermes_state(
         }
         let records = reader.records(&session).await?;
         let mut records = SourceRecords::HermesState(records);
-        let (messages, tools, _) = import_records(connection, session_id, &mut records).await?;
+        let (messages, tools, _) =
+            import_records(connection, session_id, &mut records, sanitizer).await?;
         message_count = message_count
             .checked_add(messages)
             .context("Hermes message count exceeds supported range")?;
@@ -640,6 +722,7 @@ async fn apply_codex_titles(
     connection: &mut SqliteConnection,
     instance: i64,
     home: &Path,
+    sanitizer: &crate::redaction::Sanitizer,
 ) -> Result<()> {
     sqlx::query(
         "UPDATE sessions SET title=coalesce(derived_title,external_id) WHERE instance_id=? AND title IS NOT coalesce(derived_title,external_id)",
@@ -648,10 +731,14 @@ async fn apply_codex_titles(
     .execute(&mut *connection)
     .await
     .context("reset session titles to indexed fallbacks")?;
+    if sanitizer.active() {
+        return Ok(());
+    }
     let Some(mut advisory_titles) = codex::AdvisoryTitles::open(home) else {
         return Ok(());
     };
     while let Some((external_id, title)) = advisory_titles.next_title() {
+        let title = sanitizer.text(&title, &[]);
         sqlx::query(
             "UPDATE sessions SET title=? WHERE instance_id=? AND external_id=? AND title IS NOT ?",
         )
@@ -698,25 +785,135 @@ async fn import_source_records(
     path: &Path,
     metadata: &Metadata,
     session_id: i64,
+    sanitizer: &crate::redaction::Sanitizer,
 ) -> Result<(usize, usize, usize)> {
     let mut records = match adapter {
         Adapter::Codex => SourceRecords::Codex(codex::RolloutRecords::open(path, metadata)?),
         Adapter::Gemini => SourceRecords::Gemini(gemini::SessionRecords::open(path, metadata)?),
         Adapter::Hermes => SourceRecords::Hermes(hermes::SessionRecords::open(path, metadata)?),
     };
-    import_records(connection, session_id, &mut records).await
+    import_records(connection, session_id, &mut records, sanitizer).await
+}
+
+fn sanitize_record(
+    mut record: NormalizedRecord,
+    sanitizer: &crate::redaction::Sanitizer,
+) -> Result<NormalizedRecord> {
+    if !sanitizer.active() {
+        return Ok(record);
+    }
+    let raw = match &record {
+        NormalizedRecord::Message { raw_json, .. }
+        | NormalizedRecord::ToolCall { raw_json, .. }
+        | NormalizedRecord::ToolOutput { raw_json, .. }
+        | NormalizedRecord::Usage { raw_json, .. }
+        | NormalizedRecord::TurnEvent { raw_json, .. } => raw_json,
+    };
+    let secrets = sanitizer.secrets(raw);
+    let text = |s: &mut String| {
+        *s = sanitizer.text(s, &secrets);
+    };
+    let optional = |s: &mut Option<String>| {
+        *s = sanitizer.optional(s.take(), &secrets);
+    };
+    match &mut record {
+        NormalizedRecord::Message {
+            timestamp,
+            role,
+            content,
+            raw_json,
+            ..
+        } => {
+            optional(timestamp);
+            text(role);
+            text(content);
+            text(raw_json);
+        }
+        NormalizedRecord::ToolCall {
+            timestamp,
+            call_id,
+            tool_name,
+            arguments,
+            raw_json,
+            ..
+        } => {
+            optional(timestamp);
+            if let Some(id) = call_id.as_ref() {
+                ensure!(
+                    sanitizer.text(id, &secrets) == *id,
+                    "redaction matches a tool identity; source omitted"
+                );
+            }
+            optional(tool_name);
+            optional(arguments);
+            text(raw_json);
+        }
+        NormalizedRecord::ToolOutput {
+            timestamp,
+            call_id,
+            output,
+            raw_json,
+            ..
+        } => {
+            optional(timestamp);
+            if let Some(id) = call_id.as_ref() {
+                ensure!(
+                    sanitizer.text(id, &secrets) == *id,
+                    "redaction matches a tool identity; source omitted"
+                );
+            }
+            optional(output);
+            text(raw_json);
+        }
+        NormalizedRecord::Usage {
+            timestamp,
+            pressure,
+            raw_json,
+            ..
+        } => {
+            optional(timestamp);
+            optional(&mut pressure.rate_limit_id);
+            optional(&mut pressure.rate_limit_name);
+            optional(&mut pressure.plan_type);
+            optional(&mut pressure.rate_limit_reached_type);
+            text(raw_json);
+        }
+        NormalizedRecord::TurnEvent {
+            timestamp,
+            turn_id,
+            requested_model,
+            served_model,
+            raw_json,
+            ..
+        } => {
+            optional(timestamp);
+            if let Some(id) = turn_id.as_ref() {
+                ensure!(
+                    sanitizer.text(id, &secrets) == *id,
+                    "redaction matches a turn identity; source omitted"
+                );
+            }
+            optional(requested_model);
+            optional(served_model);
+            text(raw_json);
+        }
+    }
+    Ok(record)
 }
 
 async fn import_records(
     connection: &mut SqliteConnection,
     session_id: i64,
     records: &mut SourceRecords<'_>,
+    sanitizer: &crate::redaction::Sanitizer,
 ) -> Result<(usize, usize, usize)> {
+    let mut safe_title = None;
     let mut messages = 0usize;
     let mut tools = 0usize;
     let mut usage_accounting = crate::usage::UsageAccounting::default();
     let mut turn_tracker = crate::turns::TurnTracker::default();
     while let Some((sequence, record)) = records.next_record()? {
+        let record = sanitize_record(record, sanitizer)?;
         match record {
             NormalizedRecord::Message {
                 timestamp,
@@ -725,6 +922,13 @@ async fn import_records(
                 opens_turn,
                 raw_json,
             } => {
+                if sanitizer.active() && opens_turn && role == "user" && safe_title.is_none() {
+                    safe_title = content
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(|line| line.chars().take(80).collect::<String>());
+                }
                 if opens_turn {
                     let update = turn_tracker.observe(
                         sequence,
@@ -888,6 +1092,14 @@ async fn import_records(
                 .await?;
             }
         }
+    }
+    if sanitizer.active() {
+        sqlx::query("UPDATE sessions SET derived_title=?,title=coalesce(?,external_id) WHERE id=?")
+            .bind(&safe_title)
+            .bind(&safe_title)
+            .bind(session_id)
+            .execute(&mut *connection)
+            .await?;
     }
     if let Some(turn) = turn_tracker.finish() {
         insert_turn(connection, session_id, turn).await?;

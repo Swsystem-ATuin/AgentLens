@@ -15,6 +15,7 @@ mod passkeys;
 mod postmortem;
 mod preferences;
 mod projects;
+mod redaction;
 mod search;
 mod sources;
 mod tokens;
@@ -41,6 +42,9 @@ struct Cli {
     /// Owner-only MFA encryption keyring; defaults beside the persistent state database.
     #[arg(long, env = "AGENT_LENS_MFA_KEY_FILE")]
     mfa_key_file: Option<PathBuf>,
+    /// Import masking policy, stored outside copied agent homes.
+    #[arg(long, env = "AGENT_LENS_REDACTION_FILE")]
+    redaction_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -286,8 +290,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Rebuild { data } => {
+            let policy = redaction::Policy::load(cli.redaction_file.as_deref())?;
             let rebuild = db::begin_rebuild(&cli.database).await?;
-            let report = match ingest::ingest_data_root(rebuild.pool(), &data).await {
+            let report = match ingest::ingest_with_policy(rebuild.pool(), &data, &policy).await {
                 Ok(report) => report,
                 Err(error) => {
                     if let Err(discard_error) = rebuild.discard().await {
@@ -310,8 +315,9 @@ async fn main() -> Result<()> {
             );
         }
         Command::Refresh { data } => {
+            let policy = redaction::Policy::load(cli.redaction_file.as_deref())?;
             let pool = db::open(&cli.database).await?;
-            let report = ingest::ingest_data_root(&pool, &data).await?;
+            let report = ingest::ingest_with_policy(&pool, &data, &policy).await?;
             println!(
                 "indexed {} sessions, {} messages, {} tool calls; skipped {} unchanged files; {} errors; partial files: {}; malformed lines: {}; {} files seen; removed {} sessions and {} source files",
                 report.sessions,
@@ -560,6 +566,8 @@ async fn main() -> Result<()> {
                 state.require_active_account().await?;
             }
             let pool = db::open(&cli.database).await?;
+            let policy = redaction::Policy::load(cli.redaction_file.as_deref())?;
+            policy.validate_index(&pool).await?;
             web::serve(pool, &bind, state, projects, secure_cookies).await?;
         }
     }

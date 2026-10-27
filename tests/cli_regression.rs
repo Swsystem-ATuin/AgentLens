@@ -75,6 +75,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env_remove("AGENT_LENS_MFA_KEY_FILE")
         .env_remove("AGENT_LENS_SECURE_COOKIES")
         .env_remove("AGENT_LENS_PROJECTS_FILE")
+        .env_remove("AGENT_LENS_REDACTION_FILE")
         .env_remove("AGENT_LENS_DATA")
         .env_remove("AGENT_LENS_BIND")
         .env_remove("AGENT_LENS_LOCAL")
@@ -1368,4 +1369,90 @@ async fn refresh_upgrades_legacy_database_and_skips_unchanged_files_without_auth
         std::fs::read(source.join("rollout.jsonl")).unwrap(),
         fixture
     );
+}
+
+#[tokio::test]
+async fn cli_masking_environment_rebuild_and_policy_change_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".codex");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::write(home.join("sessions/source.jsonl"), concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"mask-cli\"}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"ordinary cli-private\"}]}}\n"
+    )).unwrap();
+    let policy = dir.path().join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"global":[{"id":"cli","type":"exact","value":"cli-private"}]}"#,
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_agent-lens"))
+        .current_dir(dir.path())
+        .env("AGENT_LENS_REDACTION_FILE", &policy)
+        .env_remove("AGENT_LENS_DB")
+        .args(["rebuild", "--data", ".codex"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let database = format!("sqlite:{}", dir.path().join("agent-lens.sqlite").display());
+    let pool = sqlx::SqlitePool::connect(&database).await.unwrap();
+    let content: String = sqlx::query_scalar("SELECT content FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(content, "ordinary [REDACTED]");
+    let matches: i64 = sqlx::query_scalar("SELECT sum(replacement_count) FROM redaction_audit")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(matches > 0);
+    pool.close().await;
+    let omitted = run(dir.path(), &["refresh", "--data", ".codex"]);
+    assert!(!omitted.status.success());
+    assert!(String::from_utf8_lossy(&omitted.stderr).contains("redaction policy changed"));
+    std::fs::write(
+        &policy,
+        r#"{"global":[{"id":"cli","type":"exact","value":"ordinary"}]}"#,
+    )
+    .unwrap();
+    let changed = run(
+        dir.path(),
+        &[
+            "--redaction-file",
+            "policy.json",
+            "refresh",
+            "--data",
+            ".codex",
+        ],
+    );
+    assert!(!changed.status.success());
+    let rebuilt = run(
+        dir.path(),
+        &[
+            "--redaction-file",
+            "policy.json",
+            "rebuild",
+            "--data",
+            ".codex",
+        ],
+    );
+    assert!(
+        rebuilt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+    let pool = sqlx::SqlitePool::connect(&database).await.unwrap();
+    let content: String = sqlx::query_scalar("SELECT content FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        content, "[REDACTED] cli-private",
+        "rebuild must apply the new policy to unchanged raw source bytes"
+    );
+    pool.close().await;
 }

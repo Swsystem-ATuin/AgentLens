@@ -2620,3 +2620,99 @@ async fn refresh_relative_directory_links_reject_cycles_and_file_links() {
     }
     assert_eq!(ingest_data_root(&pool, &root).await.unwrap().skipped, 1);
 }
+
+#[tokio::test]
+async fn masking_applies_to_gemini_hermes_snapshots_and_canonical_state() {
+    let dir = tempfile::tempdir().unwrap();
+    write_gemini_fixture(dir.path());
+    write_hermes_fixture(dir.path());
+    write_hermes_state_fixture(dir.path()).await;
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let policy = crate::redaction::Policy::parse(
+        br#"{"global":[{"id":"synthetic-text","type":"exact","value":"Synthetic"}]}"#,
+    )
+    .unwrap();
+    let report = ingest_with_policy(&pool, dir.path(), &policy)
+        .await
+        .unwrap();
+    assert_eq!(report.errors, 0);
+    assert!(report.sessions >= 4);
+    for query in [
+        "SELECT content || raw_json FROM messages",
+        "SELECT title || coalesce(derived_title,'') || raw_metadata FROM sessions",
+        "SELECT coalesce(arguments,'') || coalesce(output,'') || raw_json FROM tool_calls",
+    ] {
+        let rows: Vec<String> = sqlx::query_scalar(query).fetch_all(&pool).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|row| !row.contains("Synthetic")),
+            "unmasked text in {query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn masking_refuses_sensitive_locators_without_recording_them() {
+    let dir = tempfile::tempdir().unwrap();
+    write_source(
+        dir.path(),
+        "sessions",
+        "sensitive-locator.jsonl",
+        &[json!({"type":"session_meta","payload":{"id":"safe-id"}})],
+    );
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let policy = crate::redaction::Policy::parse(
+        br#"{"global":[{"id":"locator","type":"exact","value":"sensitive-locator"}]}"#,
+    )
+    .unwrap();
+    let error = ingest_with_policy(&pool, dir.path(), &policy)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("sensitive-locator"));
+    let files: i64 = sqlx::query_scalar("SELECT count(*) FROM source_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        files, 0,
+        "a failed locator check must not write an error checkpoint containing that path"
+    );
+}
+
+#[tokio::test]
+async fn masking_happens_before_title_truncation_and_partial_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "private-long-value".repeat(12);
+    let path = write_source(
+        dir.path(),
+        "sessions",
+        "safe.jsonl",
+        &[
+            json!({"type":"session_meta","payload":{"id":"safe-id"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":format!("ordinary {secret}")}]}}),
+        ],
+    );
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "\n{{invalid-private-json").unwrap();
+    let policy = crate::redaction::Policy::parse(
+        json!({"global":[{"id":"long","type":"exact","value":secret}]})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let pool = crate::db::open(&dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let report = ingest_with_policy(&pool, dir.path(), &policy)
+        .await
+        .unwrap();
+    assert_eq!(report.partial_files, 1);
+    let (title, error): (String, String) = sqlx::query_as("SELECT s.title,sf.parse_error FROM sessions s JOIN source_files sf ON sf.id=s.source_file_id").fetch_one(&pool).await.unwrap();
+    assert_eq!(title, "ordinary [REDACTED]");
+    assert_eq!(error, "partial_source");
+}

@@ -29,3 +29,5 @@ CREATE INDEX IF NOT EXISTS idx_tool_results_call ON tool_results(tool_call_id, s
 CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_turn_events_session ON turn_events(session_id, source_sequence);
+
+CREATE TABLE IF NOT EXISTS redaction_audit (ingest_run_id INTEGER NOT NULL REFERENCES ingest_runs(id), source_key TEXT NOT NULL, policy_version TEXT NOT NULL, rule_id TEXT NOT NULL, replacement_count INTEGER NOT NULL);

@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Add opt-in pre-persistence import masking with global and explicit source-scoped user policies, exact/regex/JSON-field rules, sanitized nested JSON and titles, safe audit counts, and policy-fingerprint checks requiring a staged rebuild after changes. Cover all adapters, initial/resumed HTML, search, raw-source immutability, and SQLite secret absence with synthetic regressions.
+
 - Gated OIDC runtime context lifecycle with bounded browser-bound in-memory candidate/logout stores, opaque session handles, expiry/replacement/cancellation, per-entry asynchronous passkey borrowing, one-use factor completion, fail-closed logout-context retention, and explicit local-only logout fallback after restart. Signed-provider/passkey and context concurrency/privacy regressions added; production OIDC routing remains disabled.
 
 - Enable non-authentication account preferences under `serve --local`, including appearance, timezone, All rows/events, transcript and live-reader settings. Save validated choices in a bounded browser-local display cookie independent of anonymous CSRF-session expiry; retain CSRF checks, hide profile/security controls, create no account/authentication records, and ignore this cookie in authenticated mode. Add browser-isolation, persistence, validation, and boundary regressions.

@@ -2534,3 +2534,103 @@ async fn auto_review_models_are_hidden_from_lists_filters_and_direct_urls() {
         "visibility must not remove indexed data"
     );
 }
+
+#[tokio::test]
+async fn import_masking_protects_storage_search_and_rendered_initial_and_resumed_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("sources/.codex");
+    let path = home.join("sessions/masked.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let database = dir.path().join("masked.sqlite");
+    let pool = crate::db::open(&database).await.unwrap();
+    let policy = crate::redaction::Policy::parse(br#"{"global":[{"id":"literal","type":"exact","value":"synthetic-private"},{"id":"field","type":"field","value":"password"}]}"#).unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(&auth, r#"{"username":"synthetic","password":"password"}"#).unwrap();
+    let app = router(pool.clone(), crate::auth::Credentials::load(&auth).unwrap());
+    for resumed in [false, true] {
+        let mut records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":"masked-session","cwd":"/workspace/synthetic-private","unknown":{"password":"field-private"}}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"ordinary conversation synthetic-private"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"test_tool","arguments":"{\"password\":\"field-private\",\"ordinary\":true}"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"synthetic-private ordinary result"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+        ];
+        if resumed {
+            records.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"ordinary resumed synthetic-private"}]}}));
+        }
+        let input = records
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, &input).unwrap();
+        let report = crate::ingest::ingest_with_policy(&pool, &home, &policy)
+            .await
+            .unwrap();
+        assert_eq!((report.sessions, report.errors), (1, 0));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            input,
+            "raw sources must remain immutable"
+        );
+        for query in [
+            "SELECT coalesce(cwd,'') || title || coalesce(raw_metadata,'') FROM sessions",
+            "SELECT content || raw_json FROM messages",
+            "SELECT coalesce(arguments,'') || coalesce(output,'') || raw_json FROM tool_calls",
+            "SELECT coalesce(output,'') || raw_json FROM tool_results",
+            "SELECT raw_json FROM turn_events",
+        ] {
+            let rows: Vec<String> = sqlx::query_scalar(query).fetch_all(&pool).await.unwrap();
+            assert!(!rows.is_empty(), "expected indexed evidence for {query}");
+            assert!(
+                rows.iter()
+                    .all(|r| !r.contains("synthetic-private") && !r.contains("field-private")),
+                "sensitive text survived in {query}"
+            );
+        }
+        let matches: i64 = sqlx::query_scalar("SELECT count(*) FROM message_search WHERE message_search MATCH '\"synthetic-private\"'").fetch_one(&pool).await.unwrap();
+        assert_eq!(matches, 0, "search must never index the original secret");
+        let stable: String = sqlx::query_scalar("SELECT stable_id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (status, html) = get(&app, &format!("/sessions/{stable}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("ordinary conversation"));
+        assert!(html.contains("REDACTED"));
+        assert!(!html.contains("synthetic-private") && !html.contains("field-private"));
+        if resumed {
+            assert!(html.contains("ordinary resumed"));
+        }
+        let skipped = crate::ingest::ingest_with_policy(&pool, &home, &policy)
+            .await
+            .unwrap();
+        assert_eq!(skipped.skipped, 1);
+    }
+    let changes = crate::redaction::Policy::parse(
+        br#"{"global":[{"id":"new","type":"exact","value":"ordinary"}]}"#,
+    )
+    .unwrap();
+    assert!(
+        crate::ingest::ingest_with_policy(&pool, &home, &changes)
+            .await
+            .is_err(),
+        "policy changes must require a clean rebuild even when source bytes are unchanged"
+    );
+    assert!(
+        crate::redaction::Policy::default()
+            .validate_index(&pool)
+            .await
+            .is_err(),
+        "omitting the policy must not disable masking on an existing index"
+    );
+    assert!(policy.validate_index(&pool).await.is_ok());
+    pool.close().await;
+    let bytes = std::fs::read(&database).unwrap();
+    for secret in [b"synthetic-private".as_slice(), b"field-private"] {
+        assert!(
+            !bytes.windows(secret.len()).any(|window| window == secret),
+            "secret reached SQLite pages"
+        );
+    }
+}
