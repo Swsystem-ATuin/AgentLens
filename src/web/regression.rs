@@ -254,7 +254,7 @@ async fn cron_filter_app() -> (tempfile::TempDir, Router) {
         INSERT INTO messages(session_id,sequence,role,content) VALUES
           (1,0,'user','Synthetic ordinary request'),
           (2,0,'assistant','Synthetic cron artifact output'),
-          (3,0,'assistant','Synthetic scheduler metadata only'),
+          (3,0,'assistant','Script gate returned wakeAgent=false — agent skipped.'),
           (4,0,'user','Synthetic scheduled prompt'),
           (5,0,'user','Synthetic scheduled prompt'),
           (5,1,'assistant','Synthetic scheduled output');
@@ -813,10 +813,9 @@ async fn cron_runs_without_output_are_hidden_by_default_and_can_be_requested() {
         get(&app, "/sessions?cron=invalid").await.0,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        get(&app, "/sessions/cron-without-output").await.0,
-        StatusCode::OK
-    );
+    let (status, transcript) = get(&app, "/sessions/cron-without-output").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(transcript.contains("Script gate returned wakeAgent=false — agent skipped."));
 }
 
 #[tokio::test]

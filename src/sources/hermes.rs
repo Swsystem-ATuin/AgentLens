@@ -15,7 +15,7 @@ use std::{
 
 pub(crate) const KIND: &str = "hermes";
 pub(crate) const DISPLAY_NAME: &str = "Hermes Agent";
-pub(crate) const PARSER_VERSION: i64 = 3;
+pub(crate) const PARSER_VERSION: i64 = 4;
 pub(crate) const SOURCE_AREAS: [&str; 3] = ["state", "cron", "sessions"];
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-hermes-home";
@@ -750,14 +750,14 @@ fn cron_output_has_output(content: &str) -> bool {
         return false;
     };
     if !title.trim_start().starts_with("# ") {
-        return !content.trim().is_empty();
+        return content.lines().any(cron_line_has_output);
     }
     let mut saw_metadata = false;
     let mut body_started = false;
     for line in lines {
         let line = line.trim();
         if body_started {
-            if !line.is_empty() {
+            if cron_line_has_output(line) {
                 return true;
             }
             continue;
@@ -775,6 +775,11 @@ fn cron_output_has_output(content: &str) -> bool {
         return true;
     }
     false
+}
+
+fn cron_line_has_output(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && line != "Script gate returned wakeAgent=false — agent skipped."
 }
 
 fn cron_output_timestamp(path: &Path) -> Option<String> {
@@ -1134,6 +1139,34 @@ mod tests {
         assert!(cron_output_has_output(
             "# Synthetic legacy output\n\nSynthetic agent output"
         ));
+    }
+
+    #[test]
+    fn cron_script_gate_skip_is_empty_only_when_it_is_the_entire_body() {
+        let notice = "Script gate returned wakeAgent=false — agent skipped.";
+        let header =
+            "# Cron Job: synthetic\n\n**Job ID:** synthetic\n**Unknown field:** tolerated\n\n";
+        for body in [notice.to_owned(), format!("  {notice}\n\n{notice}  ")] {
+            assert!(
+                !cron_output_has_output(&format!("{header}{body}")),
+                "skip-only cron must be empty"
+            );
+            assert!(
+                !cron_output_has_output(&body),
+                "plain skip-only cron must be empty"
+            );
+        }
+        for body in [
+            format!("{notice}\nSynthetic result"),
+            format!("Synthetic result\n{notice}"),
+            "Script gate returned wakeAgent=true — agent skipped.".into(),
+            "Script gate returned wakeAgent=false".into(),
+        ] {
+            assert!(
+                cron_output_has_output(&format!("{header}{body}")),
+                "other output must remain visible"
+            );
+        }
     }
 
     #[test]
