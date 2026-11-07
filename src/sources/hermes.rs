@@ -15,7 +15,7 @@ use std::{
 
 pub(crate) const KIND: &str = "hermes";
 pub(crate) const DISPLAY_NAME: &str = "Hermes Agent";
-pub(crate) const PARSER_VERSION: i64 = 4;
+pub(crate) const PARSER_VERSION: i64 = 5;
 pub(crate) const SOURCE_AREAS: [&str; 3] = ["state", "cron", "sessions"];
 const HOST_USER_LAYOUT: &str = "host-user";
 const DIRECT_HOME_LAYOUT: &str = "direct-hermes-home";
@@ -779,7 +779,12 @@ fn cron_output_has_output(content: &str) -> bool {
 
 fn cron_line_has_output(line: &str) -> bool {
     let line = line.trim();
-    !line.is_empty() && line != "Script gate returned wakeAgent=false — agent skipped."
+    !line.is_empty()
+        && !matches!(
+            line,
+            "Script gate returned wakeAgent=false — agent skipped."
+                | "Script gate returned `wakeAgent=false` — agent skipped."
+        )
 }
 
 fn cron_output_timestamp(path: &Path) -> Option<String> {
@@ -1146,7 +1151,11 @@ mod tests {
         let notice = "Script gate returned wakeAgent=false — agent skipped.";
         let header =
             "# Cron Job: synthetic\n\n**Job ID:** synthetic\n**Unknown field:** tolerated\n\n";
-        for body in [notice.to_owned(), format!("  {notice}\n\n{notice}  ")] {
+        for body in [
+            notice.to_owned(),
+            format!("  {notice}\n\n{notice}  "),
+            "Script gate returned `wakeAgent=false` — agent skipped.".into(),
+        ] {
             assert!(
                 !cron_output_has_output(&format!("{header}{body}")),
                 "skip-only cron must be empty"

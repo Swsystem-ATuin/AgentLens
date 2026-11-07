@@ -159,7 +159,7 @@ async fn hermes_state_imports_interactive_and_cron_sessions() {
             .parent()
             .unwrap()
             .join("2026-01-03_10-01-00.md"),
-        "# Cron Job: synthetic\n\n**Job ID:** synthetic-job\n**Run Time:** 2026-01-03 10:01:00\n**Mode:** no_agent (script)\n**Status:** silent (empty output)\n\nScript gate returned wakeAgent=false — agent skipped.\n",
+        "# Cron Job: synthetic\n\n**Job ID:** synthetic-job\n**Run Time:** 2026-01-03 10:01:00\n**Mode:** no_agent (script)\n**Status:** silent (empty output)\n\nScript gate returned `wakeAgent=false` — agent skipped.\n",
     )
     .unwrap();
     let pool = crate::db::open(&dir.path().join("index.sqlite"))
