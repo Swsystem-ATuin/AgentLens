@@ -474,6 +474,7 @@ fn app_routes(
         .route("/favicon.ico", get(favicon))
         .route("/assets/favicon-32.png", get(favicon_png))
         .route("/assets/agent-lens-logo.png", get(application_logo))
+        .route("/assets/session-filters.js", get(session_filters_script))
         .route("/assets/live-reader.js", get(live_reader_script))
         .route("/assets/preferences.js", get(preferences_script))
         .route("/assets/preferences.css", get(preferences_stylesheet))
@@ -2003,6 +2004,16 @@ async fn load_generated_image_aliases(
         &arguments,
     )
     .map_err(|_| WebError::filesystem("resolve generated image aliases"))
+}
+
+async fn session_filters_script() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../assets/session-filters.js"),
+    )
 }
 
 async fn live_reader_script() -> impl IntoResponse {

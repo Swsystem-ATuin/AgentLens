@@ -797,16 +797,15 @@ async fn cron_runs_without_output_are_hidden_by_default_and_can_be_requested() {
     }
     assert!(default.contains("<option value=\"\">Cron runs with output</option>"));
 
-    for select in default.split("<select ").skip(1) {
-        assert!(
-            select
-                .split('>')
-                .next()
-                .unwrap()
-                .contains("onchange=\"this.form.requestSubmit()\""),
-            "session dropdown must submit on change"
-        );
-    }
+    assert!(
+        !default.contains("onchange="),
+        "inline change handlers are blocked by the response CSP"
+    );
+    assert!(default.contains("<script src=\"/assets/session-filters.js\" defer></script>"));
+    assert!(default.contains("data-session-filters"));
+    let (status, script) = get(&app, "/assets/session-filters.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(script.contains("requestSubmit()"));
     let (status, hidden) = get(&app, "/sessions?cron=hide").await;
     assert_eq!(status, StatusCode::OK);
     assert!(hidden.contains("/sessions/ordinary-session"));
