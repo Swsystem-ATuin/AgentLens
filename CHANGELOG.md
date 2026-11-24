@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Add “Hide all cron jobs” to the Sessions cron filter and apply session dropdown filters immediately on change. No index rebuild is required.
+
 - Remove the compatibility-only `TODO.md`; `ROADMAP.md` is now the sole backlog for planned work.
 
 ### Fixed

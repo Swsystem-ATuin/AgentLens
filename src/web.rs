@@ -227,6 +227,7 @@ struct SessionsTemplate {
     to: Option<String>,
     timezone: String,
     cron_all: bool,
+    cron_hide: bool,
     empty_message: &'static str,
 }
 
@@ -1571,6 +1572,7 @@ async fn sessions(
             to: filters.to.clone(),
             timezone: user.preferences.timezone_label().to_owned(),
             cron_all: filters.cron.as_deref() == Some("all"),
+            cron_hide: filters.cron.as_deref() == Some("hide"),
             empty_message: if page > 1 {
                 "No sessions on this page."
             } else if filters.has_active() {
@@ -1610,7 +1612,11 @@ impl Filters {
     }
 
     fn validate(&self) -> Result<(), WebError> {
-        if self.cron.as_deref().is_some_and(|value| value != "all") {
+        if self
+            .cron
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "all" | "hide"))
+        {
             return Err(WebError::invalid_filters());
         }
         if self
@@ -4994,6 +5000,7 @@ mod tests {
             to: None,
             timezone: "+00:00".into(),
             cron_all: false,
+            cron_hide: false,
             empty_message: "No sessions have been indexed.",
         }
         .render()

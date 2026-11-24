@@ -797,6 +797,32 @@ async fn cron_runs_without_output_are_hidden_by_default_and_can_be_requested() {
     }
     assert!(default.contains("<option value=\"\">Cron runs with output</option>"));
 
+    for select in default.split("<select ").skip(1) {
+        assert!(
+            select
+                .split('>')
+                .next()
+                .unwrap()
+                .contains("onchange=\"this.form.requestSubmit()\""),
+            "session dropdown must submit on change"
+        );
+    }
+    let (status, hidden) = get(&app, "/sessions?cron=hide").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(hidden.contains("/sessions/ordinary-session"));
+    for cron in [
+        "cron-with-output",
+        "cron-without-output",
+        "state-cron-with-output",
+        "state-cron-without-output",
+    ] {
+        assert!(
+            !hidden.contains(&format!("/sessions/{cron}")),
+            "cron session must be hidden: {cron}"
+        );
+    }
+    assert!(hidden.contains("<option value=\"hide\" selected>Hide all cron jobs</option>"));
+
     let (status, all) = get(&app, "/sessions?cron=all").await;
     assert_eq!(status, StatusCode::OK);
     for visible in [

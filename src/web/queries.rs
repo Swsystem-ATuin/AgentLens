@@ -326,7 +326,12 @@ pub(super) async fn sessions(
     push_optional_equality(&mut query, "s.model", filters.model);
     push_optional_equality(&mut query, "s.status", filters.status);
     push_optional_equality(&mut query, "a.kind", filters.agent);
-    if filters.cron != Some("all") {
+    if filters.cron == Some("hide") {
+        query
+            .push(" AND NOT (a.kind=")
+            .push_bind(crate::sources::hermes::KIND)
+            .push(" AND (COALESCE(json_extract(s.raw_metadata,'$.type'),'')='hermes_cron_output' OR (COALESCE(json_extract(s.raw_metadata,'$.type'),'')='hermes_state_session' AND COALESCE(json_extract(s.raw_metadata,'$.source'),'')='cron')))");
+    } else if filters.cron != Some("all") {
         query
             .push(" AND NOT (a.kind=")
             .push_bind(crate::sources::hermes::KIND)
