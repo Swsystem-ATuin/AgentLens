@@ -4,7 +4,7 @@ Agent Lens releases are cut from `develop` only after the intended roadmap scope
 
 ## Prepare a release
 
-1. Confirm `develop` is clean, synchronized with `origin/develop`, and contains only the intended release changes.
+1. Confirm `develop` is clean, synchronized with both `origin/develop` and `s4w/develop`, and contains only the intended release changes.
 2. Confirm the version in `Cargo.toml` and `Cargo.lock` matches the intended tag without the leading `v`.
 3. Move the accumulated changelog entries from `Unreleased` beneath a dated version heading, leaving a new empty `Unreleased` section for later work.
 4. Review the upgrade notes below and update them whenever schema, parser, authentication, or deployment behavior changes.
@@ -26,12 +26,21 @@ After reviewing the prepared commit, fast-forward `main`, create an annotated ta
 ```bash
 git switch main
 git merge --ff-only develop
-git tag -a v0.1.0 -m "Agent Lens 0.1.0"
-git push --atomic origin main v0.1.0
+git tag -a v0.2.0 -m "Agent Lens 0.2.0"
+git push --atomic origin develop main v0.2.0
+git push --atomic s4w develop main v0.2.0
 git switch develop
 ```
 
-Replace `0.1.0` with the version being released. Verify that `main`, the tag, and the reviewed commit resolve to the same object. Do not move or reuse a published release tag. Release artifacts, if added later, must be built from that tag and accompanied by checksums.
+Replace `0.2.0` with the version being released. Verify that `develop`, `main`, the peeled tag, and the reviewed commit resolve to the same commit on both remotes. Do not move or reuse a published release tag. Release artifacts, if added later, must be built from that tag and accompanied by checksums.
+
+## Upgrade to 0.2.0
+
+1. Stop the server and back up the persistent state database as described in [application authentication](application-authentication.md). Keep copied raw sources unchanged.
+2. Build the tagged source with `cargo build --release --locked` and retain the existing state database and deployment configuration.
+3. Run one `refresh` to apply automatic schema upgrades and reimport sources affected by parser-version changes, including Hermes cron output classification and Gemini context handling. Routine upgrades do not require a full index rebuild.
+4. If enabling or changing pre-persistence masking policies, follow the staged rebuild requirements in [import masking](import-masking.md). Switching source layouts or adapters also requires a full rebuild.
+5. Restart the server and verify login, source access, Sessions dropdown filtering, and representative transcripts. OIDC production routes remain disabled in this release; existing local account authentication continues to apply.
 
 ## Upgrade to 0.1.0
 

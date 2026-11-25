@@ -258,7 +258,7 @@ During initial MVP development, changes are committed directly to `develop`:
 
 Record user-visible changes in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`. Releases follow semantic versioning where practical.
 
-The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.1.0 upgrade checklist.
+The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.2.0 upgrade checklist. The current release is `v0.2.0`.
 
 The primary public repository is <https://github.com/Swsystem-ATuin/AgentLens> (`origin`). The secondary private repository is <https://git.s4w.uk/infrastructure/agent-lens.git> (`s4w`). Push every commit to both remotes in the same task and verify the updated branch tips match:
 

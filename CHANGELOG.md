@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
 ### Changed
 
 - Make GitHub the primary public repository (`origin`) and S4W GitLab the secondary private repository (`s4w`); update package, container, and service repository links.
