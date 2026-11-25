@@ -3,7 +3,7 @@ name = "agent-lens"
 version = "0.1.0"
 edition = "2024"
 description = "Local, self-hosted observability for coding-agent activity"
-repository = "https://git.s4w.uk/infrastructure/agent-lens.git"
+repository = "https://github.com/Swsystem-ATuin/AgentLens"
 license = "GPL-3.0-or-later"
 
 [dependencies]

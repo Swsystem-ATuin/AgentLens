@@ -1,6 +1,6 @@
 [Unit]
 Description=Agent Lens web application
-Documentation=https://git.s4w.uk/infrastructure/agent-lens
+Documentation=https://github.com/Swsystem-ATuin/AgentLens
 After=network.target
 
 [Service]

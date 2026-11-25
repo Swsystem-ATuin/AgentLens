@@ -260,14 +260,14 @@ Record user-visible changes in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`. 
 
 The [release procedure](docs/releasing.md) defines package verification, the `develop` to `main` fast-forward, annotated tags, and the 0.1.0 upgrade checklist.
 
-The canonical repository is <https://git.s4w.uk/infrastructure/agent-lens.git> (`origin`), with a synchronized GitHub repository at <https://github.com/Swsystem-ATuin/AgentLens> (`github`). Push every commit to both remotes in the same task and verify the updated branch tips match:
+The primary public repository is <https://github.com/Swsystem-ATuin/AgentLens> (`origin`). The secondary private repository is <https://git.s4w.uk/infrastructure/agent-lens.git> (`s4w`). Push every commit to both remotes in the same task and verify the updated branch tips match:
 
 ```sh
 git push origin develop
-git push github develop
+git push s4w develop
 git rev-parse develop
 git ls-remote origin refs/heads/develop
-git ls-remote github refs/heads/develop
+git ls-remote s4w refs/heads/develop
 ```
 
 ## License

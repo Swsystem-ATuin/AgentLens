@@ -1,6 +1,6 @@
 [Unit]
 Description=Refresh Agent Lens every minute
-Documentation=https://git.s4w.uk/infrastructure/agent-lens
+Documentation=https://github.com/Swsystem-ATuin/AgentLens
 
 [Timer]
 OnBootSec=1min

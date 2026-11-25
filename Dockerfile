@@ -19,7 +19,7 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim AS runtime
 
-LABEL org.opencontainers.image.source="https://git.s4w.uk/infrastructure/agent-lens.git"
+LABEL org.opencontainers.image.source="https://github.com/Swsystem-ATuin/AgentLens"
 LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 # hadolint ignore=DL3008

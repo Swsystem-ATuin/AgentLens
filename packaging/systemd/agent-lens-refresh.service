@@ -1,6 +1,6 @@
 [Unit]
 Description=Refresh the Agent Lens disposable index
-Documentation=https://git.s4w.uk/infrastructure/agent-lens
+Documentation=https://github.com/Swsystem-ATuin/AgentLens
 After=local-fs.target
 
 [Service]
