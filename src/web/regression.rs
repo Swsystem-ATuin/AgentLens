@@ -57,7 +57,7 @@ async fn seeded_app() -> (tempfile::TempDir, Router) {
           (2,2,'session-b','2','Session B','2026-01-02','model-b','aborted','/synthetic/b'),
           (3,1,'session-c','3','Session C','2026-01-03','model-b','unknown','/synthetic/c');
         INSERT INTO messages(session_id,sequence,role,content) VALUES
-          (1,3,'assistant','second reply'),
+          (1,3,'assistant','second reply [access file](/srv/synthetic/access-password) [Compose stack](/srv/synthetic/compose.yml) [web](https://example.invalid/setup)'),
           (1,0,'developer','<multi_agent_role>ordinarymatch setup</multi_agent_role>'),
           (1,4,'user','**bold** <script>needle & unsafe</script> [bad](javascript:alert(1)) ![remote](https://example.invalid/pixel.png)
 
@@ -1699,6 +1699,17 @@ async fn transcript_route_orders_groups_collapses_and_escapes_stored_messages() 
     );
     assert!(!message_html.contains("example.invalid/pixel.png"));
     assert!(!message_html.contains("href=\"javascript:"));
+    for path in ["/sessions/1", "/sessions/1/messages/3"] {
+        let (status, rendered) = get(&app, path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(rendered.contains("access file"));
+        assert!(rendered.contains("Compose stack"));
+        assert!(!rendered.contains("href=\"/srv/synthetic/"), "{path}");
+        assert!(
+            rendered.contains("href=\"https://example.invalid/setup\""),
+            "{path}"
+        );
+    }
     assert_eq!(get(&app, "/sessions/999").await.0, StatusCode::NOT_FOUND);
     assert_eq!(
         get(&app, "/sessions/invalid").await.0,

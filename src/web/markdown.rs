@@ -50,7 +50,8 @@ fn render_with_image_fallback(
             title,
             id,
         }) => {
-            let safe = safe_link(&dest_url);
+            let safe = safe_link(&dest_url)
+                || (image_fallback.is_some() && relative_image_link(&dest_url));
             if !safe {
                 link_stack.push(LinkRender::Unsafe);
                 return None;
@@ -147,7 +148,11 @@ fn generated_image_previews(
 }
 
 fn relative_image_link(destination: &str) -> bool {
-    if destination.starts_with(['/', '#', '?']) || destination.contains(':') {
+    if destination.starts_with(['/', '#', '?'])
+        || destination.contains(':')
+        || destination.chars().any(char::is_control)
+        || destination.trim() != destination
+    {
         return false;
     }
     let path = destination.split(['?', '#']).next().unwrap_or(destination);
@@ -184,13 +189,13 @@ fn safe_link(destination: &str) -> bool {
         return false;
     }
     let Some(colon) = destination.find(':') else {
-        return true;
+        return false;
     };
     if destination[..colon]
         .bytes()
         .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'-' | b'.'))
     {
-        return true;
+        return false;
     }
     matches!(
         destination[..colon].to_ascii_lowercase().as_str(),
@@ -216,6 +221,35 @@ fn escape_html(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_host_files_keep_labels_without_links() {
+        let source = "[access file](/srv/synthetic/access-password) [Compose stack](/srv/synthetic/compose.yml) [relative](docs/setup.md) [parent](../setup.md) [file](file:///tmp/setup.md) [Windows](C:/synthetic/setup.md) [web](https://example.invalid/setup)";
+        for rendered in [
+            render(source),
+            render_with_generated_images(source, "synthetic", &HashMap::new()),
+        ] {
+            assert_eq!(
+                rendered.matches("<a ").count(),
+                1,
+                "local files must not become browser links: {rendered}"
+            );
+            for label in [
+                "access file",
+                "Compose stack",
+                "relative",
+                "parent",
+                "file",
+                "Windows",
+            ] {
+                assert!(
+                    rendered.contains(label),
+                    "file label must remain readable: {rendered}"
+                );
+            }
+            assert!(rendered.contains("href=\"https://example.invalid/setup\""));
+        }
+    }
 
     #[test]
     fn renders_gfm_code_and_tables() {
@@ -254,11 +288,8 @@ mod tests {
     }
 
     #[test]
-    fn link_policy_allows_only_relative_and_explicit_safe_schemes() {
+    fn link_policy_allows_only_explicit_web_and_mail_schemes() {
         for destination in [
-            "relative/path",
-            "/absolute/path",
-            "#fragment",
             "HTTPS://example.invalid",
             "http://example.invalid",
             "mailto:test@example.invalid",
@@ -266,6 +297,10 @@ mod tests {
             assert!(safe_link(destination), "{destination}");
         }
         for destination in [
+            "relative/path",
+            "/absolute/path",
+            "#fragment",
+            "//example.invalid/path",
             "javascript:alert(1)",
             "data:text/html,x",
             "file:///private/path",
@@ -287,7 +322,8 @@ mod tests {
         assert!(
             rendered.contains("href=\"/sessions/stable-session/generated-images\">preview</a>")
         );
-        assert!(rendered.contains("href=\"docs/readme.md\">document</a>"));
+        assert!(!rendered.contains("href=\"docs/readme.md\""));
+        assert!(rendered.contains("document"));
         assert!(rendered.contains("href=\"https://example.invalid/image.png\">remote</a>"));
     }
 

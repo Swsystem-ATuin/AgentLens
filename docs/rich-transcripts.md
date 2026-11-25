@@ -10,7 +10,7 @@ Stored transcript content is untrusted. Rendering applies these rules before gen
 
 - Raw block and inline HTML are emitted as escaped visible text, never interpreted as elements.
 - Markdown image elements are replaced with readable `Image: alt text`; no `<img>` tag or source URL is emitted.
-- Relative links and `http`, `https`, and `mailto` links are retained. Other explicit schemes, including `javascript`, `data`, and `file`, lose the anchor while retaining their readable label.
+- Explicit `http`, `https`, and `mailto` links are retained. Agent-host absolute and relative file paths, fragment-only references, and other schemes (including `javascript`, `data`, and `file`) lose the anchor while retaining their readable label. Relative generated-image references remain supported through the session’s authenticated image gallery and known image aliases; original filesystem paths are never served as browser destinations.
 - Heading attributes and raw metadata extensions are disabled, so transcript text cannot supply arbitrary HTML attributes.
 - Only the Markdown renderer's fixed element set reaches the template. All raw text and attribute values are escaped by the renderer.
 
