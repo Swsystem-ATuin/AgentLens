@@ -57,6 +57,28 @@ Transcript setup blocks are labeled and collapsed even after a session resumes, 
 
 Fixture data and generated SQLite indexes are intentionally excluded from Git.
 
+## Personal usage quick start (Linux/macOS)
+
+With Rust/Cargo and the native build dependencies above installed:
+
+```bash
+git clone https://github.com/Swsystem-ATuin/AgentLens.git
+cd AgentLens
+bash scripts/local.sh
+```
+
+The launcher discovers your current user's `~/.codex`, `~/.gemini`, and
+`~/.hermes` directories, builds AgentLens, rebuilds a separate personal index,
+and starts an account-free server at <http://127.0.0.1:3001/usage>. Use the Usage
+page's date range and agent grouping to review activity for a reporting period. Ctrl-C
+stops the server; rerun the same command to include new activity. It reads agent
+homes without changing or copying them and does not upload usage or transcripts.
+
+Use `bash scripts/local.sh --port 3002` if the default port is occupied, or
+`bash scripts/local.sh --index-only` to rebuild without serving. Custom homes,
+storage paths, dependency setup, reporting guidance, and current platform limits
+are documented in the [personal launcher guide](docs/personal-launcher.md).
+
 ## Run locally
 
 Create or refresh the index from raw data:

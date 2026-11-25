@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- Add `bash scripts/local.sh` for Linux/macOS personal usage review: discover the current user's supported agent homes, build, rebuild an isolated index, and start the loopback-only account-free web UI. Includes custom-home/storage overrides, index-only operation, launcher locking, child-server shutdown, and synthetic end-to-end regression coverage.
+
 ### Fixed
 
 - Render agent-host file references as readable labels instead of broken transcript links. Preserve explicit web/email links and session-generated-image navigation; no index rebuild is required.
