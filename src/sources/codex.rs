@@ -799,6 +799,10 @@ pub(crate) fn classify_message(
             .iter()
             .find_map(|(prefix, title)| trimmed.starts_with(prefix).then_some(*title))
             .or_else(|| {
+                (role == "developer" && trimmed.starts_with("You are Codex,"))
+                    .then_some("Codex instructions")
+            })
+            .or_else(|| {
                 (before_conversation && trimmed.starts_with("You are "))
                     .then_some("Initial agent configuration")
             })
@@ -876,6 +880,24 @@ mod tests {
                 assert!(!presentation.initially_open, "{}", fixture.prefix);
             }
         }
+    }
+
+    #[test]
+    fn codex_developer_instructions_collapse_after_resume_without_hiding_conversation() {
+        for before_conversation in [false, true] {
+            let presentation = classify_message(
+                "developer",
+                "  You are Codex, a synthetic test agent.",
+                before_conversation,
+            )
+            .expect("Codex developer instructions must be recognized");
+            assert_eq!(presentation.title, "Codex instructions");
+            assert!(!presentation.initially_open);
+        }
+        for role in ["user", "assistant"] {
+            assert!(classify_message(role, "You are Codex, a synthetic example.", false).is_none());
+        }
+        assert!(classify_message("developer", "Ordinary synthetic guidance", false).is_none());
     }
 
     #[test]

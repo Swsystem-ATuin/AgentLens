@@ -40,3 +40,5 @@ These raw-format and presentation rules are implemented only in the [Codex sourc
 Gemini CLI uses a separate, upstream-pinned [raw format and capability contract](gemini-adapter.md) with its own tiny synthetic fixture.
 
 Hermes Agent uses a separate [sanitised adapter contract](hermes-adapter.md). Tests construct tiny temporary canonical databases and cron outputs and use one checked-in request-snapshot fixture. The snapshot contains credential sentinels only in fields that must be excluded from SQLite; none of these fixtures contains observed private values.
+
+Codex developer messages beginning `You are Codex,` are prose-style internal instructions. They are labelled “Codex instructions” and collapsed in both initial and resumed transcripts. This role-specific presentation rule preserves ordinary user and assistant prose. It applies when rendering existing indexes; no refresh, rebuild, or schema migration is required.

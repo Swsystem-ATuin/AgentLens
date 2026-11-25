@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+
+- Collapse Codex developer instructions beginning `You are Codex,` in initial and resumed transcripts. Preserve their full content and ordinary conversation; existing indexes need no refresh or rebuild.
+
 ## [0.2.0] - 2026-11-25
 
 ### Changed

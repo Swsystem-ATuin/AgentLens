@@ -4801,6 +4801,74 @@ mod tests {
     }
 
     #[test]
+    fn codex_developer_instructions_are_collapsed_in_rendered_initial_and_resumed_transcripts() {
+        for resumed in [false, true] {
+            let mut messages = Vec::new();
+            if resumed {
+                messages.push(message(0, "user", "synthetic request"));
+                messages.push(message(1, "assistant", "synthetic reply"));
+            }
+            messages.push(message(
+                2,
+                "developer",
+                "  You are Codex, a synthetic test agent.",
+            ));
+            messages.push(message(
+                3,
+                "user",
+                "Explain You are Codex, a synthetic user example.",
+            ));
+            messages.push(message(
+                4,
+                "assistant",
+                "You are Codex, a synthetic assistant example.",
+            ));
+            let html = SessionTemplate {
+                session: SessionRow {
+                    id: 1,
+                    stable_id: "stable-session".into(),
+                    agent_kind: "codex".into(),
+                    external_id: "synthetic-session".into(),
+                    title: "Synthetic title".into(),
+                    started_at: None,
+                    last_activity: None,
+                    model: None,
+                    status: None,
+                    cwd: None,
+                    project: None,
+                    archive_state: "unknown".into(),
+                    hostname: "synthetic-host".into(),
+                    os_user: "synthetic-user".into(),
+                    message_count: messages.len() as i64,
+                    match_sequence: None,
+                    match_snippet: None,
+                },
+                segments: group_transcript(messages),
+                generated_images: vec![],
+                event_options: vec![],
+                show_origin: true,
+                pagination: no_pagination(),
+                live: test_live_status(),
+            }
+            .render()
+            .expect("transcript should render");
+            assert!(
+                html.contains("<details class=\"message developer\"><summary><strong>Codex instructions</strong>"),
+                "setup must render collapsed with a descriptive title (resumed={resumed})"
+            );
+            assert!(
+                html.contains("synthetic test agent"),
+                "setup content must remain available"
+            );
+            assert_eq!(html.matches(" open>").count(), if resumed { 4 } else { 2 });
+            assert!(html.contains("synthetic user example"));
+            assert!(html.contains("synthetic assistant example"));
+            assert!(html.contains("<details class=\"message user\" open>"));
+            assert!(html.contains("<details class=\"message assistant\" open>"));
+        }
+    }
+
+    #[test]
     fn initialization_markers_after_user_input_are_not_minimized() {
         let segments = group_transcript(vec![
             message(0, "user", "actual request"),
