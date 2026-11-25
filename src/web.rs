@@ -3301,6 +3301,34 @@ mod tests {
             .unwrap();
         let app = session_router(pool.clone(), state.clone());
         let cookie = login_cookie(&app, "alice", "Synthetic1-password").await;
+        let script = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/session-filters.js")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            script.status(),
+            StatusCode::OK,
+            "signed-in users must be authorized to load the Sessions dropdown handler"
+        );
+        assert_eq!(
+            script.headers()[header::CONTENT_TYPE],
+            "application/javascript; charset=utf-8"
+        );
+        let script = String::from_utf8(
+            to_bytes(script.into_body(), 16 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(script.contains("requestSubmit()"));
         let account = account_response(&app, &cookie).await;
         let html = String::from_utf8(
             to_bytes(account.into_body(), 64 * 1024)

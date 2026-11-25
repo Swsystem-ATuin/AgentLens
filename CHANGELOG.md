@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Authorize the Sessions dropdown script for accounts with session-reading access. Signed-in browsers previously received HTTP 403 for the script, preventing immediate filtering; regression coverage now uses real account authentication.
+
 - Bind Sessions dropdown changes from a same-origin script so the content security policy permits immediate filtering, including host changes.
 
 - Treat Hermes cron bodies containing only `Script gate returned wakeAgent=false — agent skipped.` as empty output. Preserve other output and the complete audit artifact; parser version 5 reclassifies existing artifacts on refresh, including the scheduler variant with Markdown backticks around the gate result.

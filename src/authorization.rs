@@ -117,7 +117,9 @@ pub(crate) fn required_capability(method: &Method, path: &str) -> Option<Capabil
             "/admin/audit" => return Some(Capability::AuditRead),
             "/account/tokens" => return Some(Capability::TokensManage),
             "/" => return Some(Capability::AccountSelfManage),
-            "/sessions" | "/assets/live-reader.js" => return Some(Capability::ContentRead),
+            "/sessions" | "/assets/live-reader.js" | "/assets/session-filters.js" => {
+                return Some(Capability::ContentRead);
+            }
             "/usage" | "/diagnostics" => return Some(Capability::ReportsRead),
             "/health" | "/metrics" => return Some(Capability::OperationsRead),
             "/account"
@@ -238,6 +240,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn session_filter_script_requires_the_same_access_as_sessions() {
+        for method in [Method::GET, Method::HEAD] {
+            let required = required_capability(&method, "/assets/session-filters.js");
+            assert_eq!(required, Some(Capability::ContentRead));
+            assert_eq!(required, required_capability(&method, "/sessions"));
+        }
+        assert_eq!(
+            required_capability(&Method::POST, "/assets/session-filters.js"),
+            None
+        );
     }
 
     #[test]
