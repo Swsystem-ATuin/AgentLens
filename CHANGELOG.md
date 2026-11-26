@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Add GitHub community guidance: code of conduct, contribution guide, security policy, accessibility statement, privacy-aware issue forms, and a pull request template; enable GitHub private vulnerability reporting.
+
 - Add `bash scripts/local.sh` for Linux/macOS personal usage review: discover the current user's supported agent homes, build, rebuild an isolated index, and start the loopback-only account-free web UI. Includes custom-home/storage overrides, index-only operation, launcher locking, child-server shutdown, and synthetic end-to-end regression coverage.
 
 ### Fixed

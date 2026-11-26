@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a workflow, reporting, or usability improvement.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/Swsystem-ATuin/AgentLens/blob/develop/ROADMAP.md) and existing issues first.
+        Use the agent-support form for a new adapter. Keep examples synthetic; issues are public.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: Who needs this, and what is difficult with the current behavior?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired behavior
+      description: Describe the observable result and how someone could tell it works.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and scope
+      description: Workarounds, other approaches considered, affected agents/platforms, and any limits worth keeping.
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Testing or contribution interest
+      description: Optional. Tell us if you can help test, document, or implement this; no commitment is required.

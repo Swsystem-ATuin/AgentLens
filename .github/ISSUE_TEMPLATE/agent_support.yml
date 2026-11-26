@@ -1,0 +1,38 @@
+name: Agent support
+description: Help expand support to another agent or recording format.
+title: "[Agent]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AgentLens aims to cover agents and multi-agent workflows beyond the current adapters.
+        Never upload a real agent home, transcript, database, credential, or private source code. Tiny synthetic or fully redacted format examples are welcome but not required.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and version
+      description: Product/project name, version, and public project link if available.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow and platforms
+      description: Describe single-agent or multi-agent use, operating systems, and what you want to observe.
+    validations:
+      required: true
+  - type: textarea
+    id: format
+    attributes:
+      label: Recording format and discovery
+      description: Public documentation, generic default directory layout, file format, session identity, and any available usage/tool evidence. Omit identifying values; unknown details are fine.
+  - type: textarea
+    id: sample
+    attributes:
+      label: Optional synthetic format sample
+      description: A few invented records demonstrating the shape. Do not paste production content, even when a field seems harmless.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Testing availability
+      description: Optional. Which agent versions or platforms could you test? Can you help verify unknown fields, malformed lines, and partial sessions?

@@ -1,0 +1,31 @@
+name: Accessibility barrier
+description: Report a barrier in the interface, docs, CLI, or contribution process.
+title: "[Accessibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See our [accessibility statement](https://github.com/Swsystem-ATuin/AgentLens/blob/develop/ACCESSIBILITY.md).
+        Medical or disability information is never required. Issues are public: use synthetic examples and redact screenshots. If this form is inaccessible, a blank issue is welcome.
+  - type: textarea
+    id: task
+    attributes:
+      label: Task and barrier
+      description: What were you trying to do, where did the barrier occur, and what happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior or suggested improvement
+      description: Optional. Describe what would make the task usable for you.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Optional. Use a generic page name and synthetic content instead of a private session URL or transcript.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Browser, OS, and assistive technology
+      description: Optional. Share versions, zoom settings, keyboard setup, or assistive technology only if comfortable. No personal health information is needed.

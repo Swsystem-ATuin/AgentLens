@@ -292,6 +292,15 @@ git ls-remote origin refs/heads/develop
 git ls-remote s4w refs/heads/develop
 ```
 
+## Community
+
+Contributions and testing across additional agents and operating systems are welcome.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) and use the
+[issue forms](https://github.com/Swsystem-ATuin/AgentLens/issues/new/choose) for
+bugs, features, agent support, or accessibility barriers. See our
+[code of conduct](CODE_OF_CONDUCT.md), [security reporting policy](SECURITY.md),
+and [accessibility goals and current testing gaps](ACCESSIBILITY.md).
+
 ## License
 
 Copyright (C) 2026 Agent Lens contributors.

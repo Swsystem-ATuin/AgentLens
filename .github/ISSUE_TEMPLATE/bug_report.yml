@@ -1,0 +1,42 @@
+name: Bug report
+description: Report incorrect behavior with a small, private-data-free reproduction.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For vulnerabilities, use [private security reporting](https://github.com/Swsystem-ATuin/AgentLens/blob/develop/SECURITY.md).
+        Issues are public. Do not attach real transcripts, copied agent homes, databases, credentials, private source code, or identifying paths. Use synthetic or fully redacted examples.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: What were you trying to do, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include a minimal synthetic example or safe commands. For transcript issues, mention initial or resumed sessions.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description: AgentLens release or commit, OS, agent/version, and browser if relevant. Say whether you use the personal launcher, authenticated server, or another deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional redacted evidence
+      description: Only include small synthetic records, sanitized error messages, or carefully redacted screenshots. A missing fixture is fine; explain what cannot be shared.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked this report for private content and searched existing issues.
+          required: true
