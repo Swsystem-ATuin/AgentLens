@@ -99,6 +99,11 @@ $env:AGENT_LENS_CODEX_HOME = "$env:USERPROFILE\custom-codex"
 .\scripts\local.ps1 -Port 3002
 ```
 
+Codex discovery reads plain `.jsonl` and compressed `.jsonl.zst` recordings from
+`sessions` and `archived_sessions`. Local Work activity appears when the desktop
+app writes a supported recording in the discovered home. ChatGPT account history
+and cloud-only Work conversations require a separate import feature.
+
 Windows stores its disposable index and local state under
 `%LOCALAPPDATA%\AgentLens`. `AGENT_LENS_LOCAL_DIR` can select another dedicated
 directory. The launcher passes the source directories to the rebuild command

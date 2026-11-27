@@ -53,11 +53,12 @@ fn native_launcher_rebuilds_and_serves_usage_and_releases_its_port_and_lock() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("Synthetic user");
     let appdata = dir.path().join("Local AppData");
-    let codex = ".codex/sessions/rollout.jsonl";
+    let codex = ".codex/sessions/rollout.jsonl.zst";
     let gemini = ".gemini/tmp/test/chats/session.jsonl";
     let hermes = ".hermes/cron/output/synthetic-job/2026-01-01_12-00-00.md";
     let cron = b"# Synthetic run\n\nSynthetic Hermes output\n";
-    fixture(&home, codex, CODEX);
+    let compressed = zstd::stream::encode_all(CODEX, 1).unwrap();
+    fixture(&home, codex, &compressed);
     fixture(&home, gemini, GEMINI);
     fixture(&home, hermes, cron);
 
@@ -129,9 +130,36 @@ fn native_launcher_rebuilds_and_serves_usage_and_releases_its_port_and_lock() {
         String::from_utf8_lossy(&rebuild.stderr)
     );
     assert!(String::from_utf8_lossy(&rebuild.stdout).contains("indexed 3 sessions"));
-    assert_eq!(fs::read(home.join(codex)).unwrap(), CODEX);
+    assert_eq!(fs::read(home.join(codex)).unwrap(), compressed);
     assert_eq!(fs::read(home.join(gemini)).unwrap(), GEMINI);
     assert_eq!(fs::read(home.join(hermes)).unwrap(), cron);
+}
+
+#[test]
+fn native_launcher_imports_archived_compressed_codex_beside_a_corrupt_rollout() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("Synthetic user");
+    let appdata = dir.path().join("Local AppData");
+    let archive = ".codex/archived_sessions/rollout.jsonl.zst";
+    let corrupt = ".codex/sessions/broken.jsonl.zst";
+    let ignored = ".codex/sessions/unrelated.zst";
+    let mut frames = zstd::stream::encode_all(&CODEX[..CODEX.len() / 2], 1).unwrap();
+    frames.extend(zstd::stream::encode_all(&CODEX[CODEX.len() / 2..], 1).unwrap());
+    fixture(&home, archive, &frames);
+    fixture(&home, corrupt, b"not a Zstandard frame");
+    fixture(&home, ignored, b"unrelated");
+
+    let output = personal(&home, &appdata).arg("--index-only").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(summary.contains("indexed 1 sessions"), "{summary}");
+    assert!(summary.contains("; 1 errors;"), "{summary}");
+    assert_eq!(fs::read(home.join(archive)).unwrap(), frames);
+    assert_eq!(fs::read(home.join(corrupt)).unwrap(), b"not a Zstandard frame");
 }
 
 #[test]

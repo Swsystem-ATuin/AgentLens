@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     fs::{File, Metadata},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -260,7 +260,7 @@ const MAX_PARSE_DIAGNOSTICS: usize = 20;
 pub(crate) struct RolloutRecords<'a> {
     path: &'a Path,
     metadata: &'a Metadata,
-    reader: BufReader<File>,
+    reader: Box<dyn BufRead + Send>,
     sequence: i64,
     malformed_lines: usize,
     finished: bool,
@@ -315,7 +315,7 @@ impl<'a> RolloutRecords<'a> {
         Ok(Self {
             path,
             metadata,
-            reader: BufReader::new(file),
+            reader: rollout_reader(path, file)?,
             sequence: 0,
             malformed_lines: 0,
             finished: false,
@@ -464,10 +464,37 @@ pub(crate) fn optional_directory(path: &Path) -> Result<bool> {
     }
 }
 
+pub(crate) fn is_rollout(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "jsonl") || is_compressed_rollout(path)
+}
+
+fn is_compressed_rollout(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "zst")
+        && path
+            .file_stem()
+            .and_then(|stem| Path::new(stem).extension())
+            .is_some_and(|extension| extension == "jsonl")
+}
+
+fn rollout_reader<'a>(
+    path: &Path,
+    bytes: impl Read + Send + 'a,
+) -> Result<Box<dyn BufRead + Send + 'a>> {
+    let bytes = BufReader::new(bytes);
+    if is_compressed_rollout(path) {
+        let decoder =
+            zstd::stream::read::Decoder::with_buffer(bytes).context("open compressed Codex rollout")?;
+        Ok(Box::new(BufReader::new(decoder)))
+    } else {
+        Ok(Box::new(bytes))
+    }
+}
+
 pub(crate) fn scan_rollout(path: &Path) -> Result<SessionSummary> {
     let file = File::open(path).context("open rollout")?;
     let metadata = file.metadata().context("inspect rollout")?;
-    let mut reader = BufReader::new(HashingReader::new(file));
+    let mut bytes = HashingReader::new(file);
+    let mut reader = rollout_reader(path, &mut bytes)?;
     let mut session_metadata = None;
     let mut model = None;
     let mut saw_turn_context = false;
@@ -528,7 +555,8 @@ pub(crate) fn scan_rollout(path: &Path) -> Result<SessionSummary> {
         }
     }
     ensure_unchanged(path, &metadata)?;
-    let content_hash = reader.get_ref().fingerprint();
+    drop(reader);
+    let content_hash = bytes.fingerprint();
     let meta = session_metadata.context("missing session_meta")?;
     let payload = &meta["payload"];
     let external_id = payload["id"]

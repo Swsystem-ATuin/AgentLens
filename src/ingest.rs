@@ -237,7 +237,7 @@ async fn ingest_data_root_run(
                 );
                 if entry.file_type().is_file()
                     && match adapter {
-                        Adapter::Codex => entry.path().extension().is_some_and(|x| x == "jsonl"),
+                        Adapter::Codex => codex::is_rollout(entry.path()),
                         Adapter::Gemini => gemini::is_session_file(entry.path()),
                         Adapter::Hermes => {
                             (area == "sessions" && hermes::is_session_file(entry.path()))

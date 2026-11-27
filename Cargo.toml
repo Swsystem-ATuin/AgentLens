@@ -48,6 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 webauthn-rs = "0.5.5"
 uuid = { version = "1", features = ["v5"] }
+zstd = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
