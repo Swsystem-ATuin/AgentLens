@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -107,7 +106,23 @@ fn col(columns: &HashSet<String>, choices: &[&str]) -> String {
 
 impl History {
     pub(crate) async fn open(homes: &[PathBuf]) -> Result<Self> {
-        let scratch = tempfile::tempdir().context("create private Codex SQLite snapshot directory")?;
+        let temp_root = std::env::temp_dir();
+        let root = temp_root
+            .canonicalize()
+            .context("locate Codex SQLite snapshot directory")?
+            .to_string_lossy()
+            .to_lowercase();
+        for home in homes {
+            let home = home.canonicalize()?;
+            let source = home.to_string_lossy().to_lowercase();
+            ensure!(
+                !root.strip_prefix(source.trim_end_matches('\\'))
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\')),
+                "temporary SQLite snapshot directory must be outside Codex history"
+            );
+        }
+        let scratch = tempfile::tempdir_in(temp_root)
+            .context("create private Codex SQLite snapshot directory")?;
         let mut history = Self {
             catalogs: Vec::new(),
             threads: BTreeMap::new(),

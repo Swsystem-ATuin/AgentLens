@@ -237,6 +237,26 @@ fn native_launcher_imports_archived_compressed_codex_beside_a_corrupt_rollout() 
 }
 
 #[test]
+fn personal_refresh_preserves_existing_rollout_if_the_new_tail_is_incomplete() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("profile");
+    let appdata = directory.path().join("local data");
+    let path = ".codex/sessions/growing.jsonl";
+    fixture(&home, path, CODEX);
+    let initial = personal(&home, &appdata).arg("--index-only").output().unwrap();
+    assert!(initial.status.success(), "{}", String::from_utf8_lossy(&initial.stderr));
+    let mut truncated = CODEX.to_vec();
+    truncated.extend_from_slice(b"\n{\"type\":\"response_item\"");
+    fixture(&home, path, &truncated);
+    let refreshed = personal(&home, &appdata).args(["--refresh", "--index-only"]).output().unwrap();
+    assert!(refreshed.status.success(), "{}", String::from_utf8_lossy(&refreshed.stderr));
+    let output = String::from_utf8_lossy(&refreshed.stdout);
+    assert!(output.contains("1 errors"), "{output}");
+    assert!(output.contains("history indexed (1 sessions"), "{output}");
+    assert_eq!(fs::read(home.join(path)).unwrap(), truncated);
+}
+
+#[test]
 fn native_launcher_rejects_missing_sources_and_storage_inside_a_home() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("Synthetic user");

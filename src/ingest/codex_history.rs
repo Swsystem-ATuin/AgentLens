@@ -38,6 +38,7 @@ pub(super) async fn import(
         status(path, state, sanitizer, diagnostics);
     }
     let mut indexed = 0;
+    let mut overlaps = 0;
     for (external, thread) in std::mem::take(&mut history.threads) {
         let mut tx = index.begin().await?;
         let prior: Option<(i64, String, String, String)> = sqlx::query_as(
@@ -61,6 +62,7 @@ pub(super) async fn import(
                 .bind(metadata.to_string()).bind(title.as_deref()).bind(title.as_deref())
                 .execute(&mut *tx).await?;
             tx.commit().await?;
+            overlaps += 1;
             continue;
         }
         let (records, item_path, malformed) = match history.records(&external).await {
@@ -138,6 +140,9 @@ pub(super) async fn import(
     history.close().await?;
     if indexed != 0 && diagnostics {
         println!("Codex SQLite: history indexed ({indexed} sessions updated).");
+    }
+    if overlaps != 0 && diagnostics {
+        println!("Codex SQLite: {overlaps} threads already covered by rollouts; catalog metadata was checked, and rollout transcripts were retained.");
     }
     Ok(())
 }
