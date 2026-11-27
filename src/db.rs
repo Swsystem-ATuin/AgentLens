@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use sqlx::{
-    SqlitePool,
+    Connection, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use std::{
@@ -447,16 +447,20 @@ async fn prepare_target_for_replacement(path: &Path) -> Result<()> {
             .filename(path)
             .create_if_missing(false)
             .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
+        let mut connection = SqliteConnection::connect_with(&options)
             .await
             .with_context(|| format!("open existing SQLite index {}", path.display()))?;
+        // SQLite's checkpoint API only acts on an initialized WAL connection.
+        // Read the schema first so SQLite sees any sidecars left by the prior owner.
+        sqlx::query("PRAGMA schema_version")
+            .fetch_one(&mut connection)
+            .await
+            .context("load existing SQLite index schema before checkpoint")?;
         let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
-            .fetch_one(&pool)
+            .fetch_one(&mut connection)
             .await
             .context("checkpoint existing SQLite index before replacement")?;
-        pool.close().await;
+        connection.close().await.context("close checkpoint connection")?;
         ensure!(
             checkpoint.0 == 0,
             "existing SQLite index is busy; stop the web server and retry rebuild"
