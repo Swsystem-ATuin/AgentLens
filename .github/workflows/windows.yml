@@ -98,6 +98,8 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt
           cargo +stable test --locked --all-targets --all-features
           cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+          cargo +stable build --locked
+          sudo install -m 0755 target/debug/agent-lens /usr/local/bin/agent-lens
           bash scripts/verify-packaging.sh
           cargo +stable package --locked
           git diff --check
