@@ -1034,7 +1034,10 @@ async fn repeated_cli_rebuilds_reproduce_index_without_changing_sources_or_needi
         );
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_with(
-                sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("index.sqlite")),
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(dir.path().join("index.sqlite"))
+                    .read_only(true)
+                    .immutable(true),
             )
             .await
             .unwrap();
@@ -1398,8 +1401,11 @@ async fn cli_masking_environment_rebuild_and_policy_change_gate() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let database = format!("sqlite:{}", dir.path().join("agent-lens.sqlite").display());
-    let pool = sqlx::SqlitePool::connect(&database).await.unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.path().join("agent-lens.sqlite"))
+        .read_only(true)
+        .immutable(true);
+    let pool = sqlx::SqlitePool::connect_with(options.clone()).await.unwrap();
     let content: String = sqlx::query_scalar("SELECT content FROM messages")
         .fetch_one(&pool)
         .await
@@ -1445,7 +1451,7 @@ async fn cli_masking_environment_rebuild_and_policy_change_gate() {
         "{}",
         String::from_utf8_lossy(&rebuilt.stderr)
     );
-    let pool = sqlx::SqlitePool::connect(&database).await.unwrap();
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
     let content: String = sqlx::query_scalar("SELECT content FROM messages")
         .fetch_one(&pool)
         .await

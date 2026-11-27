@@ -62,10 +62,14 @@ async fn personal_launcher_combines_homes_and_rebuilds_without_changing_sources(
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let pool = sqlx::SqlitePool::connect(&format!(
-            "sqlite://{}",
-            storage.join("index.sqlite").display()
-        ))
+        // Inspect the completed snapshot without opening live WAL handles
+        // before the next launcher process replaces it.
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(storage.join("index.sqlite"))
+                .read_only(true)
+                .immutable(true),
+        )
         .await
         .unwrap();
         let kinds: Vec<String> = sqlx::query_scalar("SELECT agents.kind FROM agent_instances JOIN agents ON agents.id=agent_instances.agent_id ORDER BY agents.kind").fetch_all(&pool).await.unwrap();
