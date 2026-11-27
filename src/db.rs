@@ -333,7 +333,7 @@ pub async fn begin_rebuild(path: &Path) -> Result<Rebuild> {
     let pool = match open(&staged_path).await {
         Ok(pool) => pool,
         Err(error) => {
-            let _ = remove_database_files(&staged_path);
+            let _ = remove_database_files(&staged_path).await;
             return Err(error).context("initialize staged rebuild");
         }
     };
@@ -343,7 +343,7 @@ pub async fn begin_rebuild(path: &Path) -> Result<Rebuild> {
         .context("prepare staged transcript search rebuild")
     {
         pool.close().await;
-        let _ = remove_database_files(&staged_path);
+        let _ = remove_database_files(&staged_path).await;
         return Err(error);
     }
     Ok(Rebuild {
@@ -362,7 +362,7 @@ impl Rebuild {
         let result = self.publish_inner().await;
         if result.is_err() {
             self.pool.close().await;
-            let _ = remove_database_files(&self.staged_path);
+            let _ = remove_database_files(&self.staged_path).await;
         }
         result
     }
@@ -370,6 +370,7 @@ impl Rebuild {
     pub async fn discard(self) -> Result<()> {
         self.pool.close().await;
         remove_database_files(&self.staged_path)
+            .await
             .with_context(|| format!("discard staged rebuild {}", self.staged_path.display()))
     }
 
@@ -410,26 +411,31 @@ impl Rebuild {
             "staged SQLite index has an unfinished ingest run"
         );
 
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(pool)
+        let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(pool)
             .await
             .context("checkpoint staged SQLite index")?;
+        ensure!(checkpoint.0 == 0, "staged SQLite index is busy");
         self.pool.close().await;
-        remove_sidecars(&self.staged_path).with_context(|| {
-            format!(
-                "remove staged SQLite sidecars {}",
-                self.staged_path.display()
-            )
-        })?;
+        remove_sidecars(&self.staged_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "remove staged SQLite sidecars {}",
+                    self.staged_path.display()
+                )
+            })?;
 
         prepare_target_for_replacement(&self.target_path).await?;
-        std::fs::rename(&self.staged_path, &self.target_path).with_context(|| {
-            format!(
-                "publish staged SQLite index {} as {}",
-                self.staged_path.display(),
-                self.target_path.display()
-            )
-        })?;
+        retry_after_close(|| std::fs::rename(&self.staged_path, &self.target_path))
+            .await
+            .with_context(|| {
+                format!(
+                    "publish staged SQLite index {} as {}; stop the web server if the index is open",
+                    self.staged_path.display(),
+                    self.target_path.display()
+                )
+            })?;
         Ok(())
     }
 }
@@ -457,12 +463,19 @@ async fn prepare_target_for_replacement(path: &Path) -> Result<()> {
         );
     } else {
         remove_sidecars(path)
+            .await
             .with_context(|| format!("remove orphaned SQLite sidecars for {}", path.display()))?;
     }
-    ensure!(
-        !sidecar_path(path, "-wal").exists() && !sidecar_path(path, "-shm").exists(),
-        "existing SQLite index is still open; stop the web server and retry rebuild"
-    );
+    let wal = sidecar_path(path, "-wal");
+    let shm = sidecar_path(path, "-shm");
+    retry_after_close(|| {
+        if wal.try_exists()? || shm.try_exists()? {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        Ok(())
+    })
+    .await
+    .context("existing SQLite index may still be open; stop the web server and retry rebuild")?;
     Ok(())
 }
 
@@ -474,10 +487,10 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     ))
 }
 
-fn remove_sidecars(path: &Path) -> Result<()> {
+async fn remove_sidecars(path: &Path) -> Result<()> {
     for suffix in ["-wal", "-shm"] {
         let sidecar = sidecar_path(path, suffix);
-        match std::fs::remove_file(&sidecar) {
+        match retry_after_close(|| std::fs::remove_file(&sidecar)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -488,15 +501,38 @@ fn remove_sidecars(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_database_files(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
+async fn remove_database_files(path: &Path) -> Result<()> {
+    match retry_after_close(|| std::fs::remove_file(path)).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error).with_context(|| format!("remove {}", path.display()));
         }
     }
-    remove_sidecars(path)
+    remove_sidecars(path).await
+}
+
+async fn retry_after_close<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    #[cfg(windows)]
+    {
+        // Windows can briefly report SQLite files as busy while its worker
+        // finishes closing handles. Never delete or replace a file still held
+        // open after the bounded wait.
+        for _ in 0..40 {
+            match operation() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || matches!(error.raw_os_error(), Some(5 | 32 | 33)) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+    operation()
 }
 
 #[cfg(test)]

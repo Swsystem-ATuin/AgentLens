@@ -73,6 +73,14 @@ fn native_launcher_rebuilds_and_serves_usage_and_releases_its_port_and_lock() {
     drop(reserved);
     assert!(!appdata.join("AgentLens/index.sqlite").exists());
 
+    let first = personal(&home, &appdata).arg("--index-only").output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(String::from_utf8_lossy(&first.stdout).contains("indexed 3 sessions"));
+
     let mut server = Server(
         personal(&home, &appdata)
             .args(["--no-browser", "--port", &port])
