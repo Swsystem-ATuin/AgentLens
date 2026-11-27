@@ -21,7 +21,15 @@ Agent Lens releases are cut from `develop` only after the intended roadmap scope
 
 ## Publish a release
 
-After reviewing the prepared commit, fast-forward `main`, create an annotated tag on that exact commit, and publish both references atomically:
+After reviewing the prepared commit, fast-forward `main`. A commit with the
+subject `Release AgentLens vMAJOR.MINOR.PATCH` explicitly requests publication
+when pushed to `main` on GitHub. The version must match the manifest. Once the
+release checks pass, the workflow creates the annotated tag at that commit
+and publishes the Windows ZIP and checksum. Fetch the tag from GitHub before
+publishing the same refs to the private mirror.
+
+For a manually tagged release, create the annotated tag locally and push the
+refs together:
 
 ```bash
 git switch main
@@ -48,6 +56,14 @@ the executable extracted from the ZIP. After those checks pass, it creates the
 GitHub Release with `AgentLens-windows-x64.zip` and its SHA-256 checksum. Leave
 release creation to the workflow for those tags. Retain the matching tag as the
 source for the package. The private mirror does not participate in this workflow.
+
+## Upgrade to 0.3.0
+
+- On Windows x64, extract the release ZIP and run **Start AgentLens.cmd**. The
+  launcher rebuilds the personal index and opens the local Usage dashboard.
+  Stop any previous launcher before updating. Personal storage is retained.
+- Rerun the personal launcher or run a deployment refresh to discover compressed
+  Codex rollouts. Existing deployment indexes can be kept.
 
 ## Upgrade to 0.2.0
 

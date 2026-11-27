@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-27
+
 ### Added
 
 - Add native Windows personal mode and a Windows x64 release ZIP with a double-click launcher. GitHub Actions builds and verifies the package on the standard Windows runner before publishing it with a tagged release.
