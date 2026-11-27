@@ -1,0 +1,25 @@
+AgentLens for Windows x64
+
+Extract the entire ZIP to a folder you can write to. Double-click Start
+AgentLens.cmd in that folder. The first rebuild can take a while if you
+have a lot of agent activity. When the index is ready, the launcher opens
+http://127.0.0.1:3001/usage in your default browser.
+
+Press Ctrl-C in the AgentLens window to stop the server. Open AgentLens
+again to include new activity. For another port, open a terminal in the
+extracted folder and run:
+
+    .\agent-lens.exe personal --port 3002
+
+The launcher uses your Codex, Gemini CLI, and Hermes directories and
+stores an index under %LOCALAPPDATA%\AgentLens. Only use personal mode
+on a machine where you trust other local users. Anyone who can reach
+the loopback port can read the index. No agent content is uploaded.
+
+Managed PCs may require IT approval to run downloaded applications.
+See the project guide for custom homes and troubleshooting:
+https://github.com/Swsystem-ATuin/AgentLens/blob/main/docs/personal-launcher.md
+
+AgentLens is licensed under GPL-3.0-or-later. The corresponding project
+source for this package is linked in its GitHub release:
+https://github.com/Swsystem-ATuin/AgentLens/releases

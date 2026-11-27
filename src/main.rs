@@ -12,6 +12,8 @@ mod metrics;
 mod mfa;
 mod oidc;
 mod passkeys;
+#[cfg(windows)]
+mod personal;
 mod postmortem;
 mod preferences;
 mod projects;
@@ -28,7 +30,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "agent-lens", about = "Local observability for coding agents")]
+#[command(name = "agent-lens", version, about = "Local observability for coding agents")]
 struct Cli {
     #[arg(long, env = "AGENT_LENS_DB", default_value = "agent-lens.sqlite")]
     database: PathBuf,
@@ -51,6 +53,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Rebuild and open your personal Usage dashboard on Windows.
+    #[cfg(windows)]
+    Personal {
+        #[arg(long, default_value_t = 3001, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        /// Rebuild the index without starting a server.
+        #[arg(long)]
+        index_only: bool,
+        /// Serve and print the URL without opening the browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Validate OIDC configuration without enabling sign-in; optionally check provider discovery.
     OidcCheck {
         #[arg(long)]
@@ -73,8 +87,21 @@ enum Command {
     },
     /// Safely rebuild the disposable index from raw agent homes.
     Rebuild {
-        #[arg(long, env = "AGENT_LENS_DATA", default_value = "data")]
-        data: PathBuf,
+        /// Source tree, defaulting to AGENT_LENS_DATA or data/.
+        #[arg(
+            long,
+            conflicts_with_all = ["codex_home", "gemini_home", "hermes_home"]
+        )]
+        data: Option<PathBuf>,
+        /// Read a personal Codex home in place.
+        #[arg(long)]
+        codex_home: Option<PathBuf>,
+        /// Read a personal Gemini CLI home in place.
+        #[arg(long)]
+        gemini_home: Option<PathBuf>,
+        /// Read a personal Hermes home in place.
+        #[arg(long)]
+        hermes_home: Option<PathBuf>,
     },
     /// Import new or changed sources, preserving the existing index.
     Refresh {
@@ -289,30 +316,36 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Rebuild { data } => {
-            let policy = redaction::Policy::load(cli.redaction_file.as_deref())?;
-            let rebuild = db::begin_rebuild(&cli.database).await?;
-            let report = match ingest::ingest_with_policy(rebuild.pool(), &data, &policy).await {
-                Ok(report) => report,
-                Err(error) => {
-                    if let Err(discard_error) = rebuild.discard().await {
-                        return Err(error.context(format!(
-                            "discard staged rebuild after failure: {discard_error:#}"
-                        )));
-                    }
-                    return Err(error);
-                }
+        #[cfg(windows)]
+        Command::Personal {
+            port,
+            index_only,
+            no_browser,
+        } => personal::run(port, index_only, no_browser, cli.redaction_file.as_deref()).await?,
+        Command::Rebuild {
+            data,
+            codex_home,
+            gemini_home,
+            hermes_home,
+        } => {
+            let homes = [
+                (sources::Adapter::Codex, codex_home),
+                (sources::Adapter::Gemini, gemini_home),
+                (sources::Adapter::Hermes, hermes_home),
+            ];
+            let homes: Vec<_> = homes
+                .into_iter()
+                .filter_map(|(adapter, path)| path.map(|path| (adapter, path)))
+                .collect();
+            let data = data
+                .or_else(|| std::env::var_os("AGENT_LENS_DATA").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("data"));
+            let input = if homes.is_empty() {
+                ingest::SourceInput::Tree(&data)
+            } else {
+                ingest::SourceInput::Personal(&homes)
             };
-            rebuild.publish().await?;
-            println!(
-                "indexed {} sessions, {} messages, {} tool calls; {} errors; partial files: {}; malformed lines: {}",
-                report.sessions,
-                report.messages,
-                report.tool_calls,
-                report.errors,
-                report.partial_files,
-                report.malformed_lines
-            );
+            rebuild_index(&cli.database, input, cli.redaction_file.as_deref()).await?;
         }
         Command::Refresh { data } => {
             let policy = redaction::Policy::load(cli.redaction_file.as_deref())?;
@@ -571,5 +604,36 @@ async fn main() -> Result<()> {
             web::serve(pool, &bind, state, projects, secure_cookies).await?;
         }
     }
+    Ok(())
+}
+
+async fn rebuild_index(
+    database: &std::path::Path,
+    input: ingest::SourceInput<'_>,
+    redaction_file: Option<&std::path::Path>,
+) -> Result<()> {
+    let policy = redaction::Policy::load(redaction_file)?;
+    let rebuild = db::begin_rebuild(database).await?;
+    let report = match ingest::ingest_sources(rebuild.pool(), input, &policy).await {
+        Ok(report) => report,
+        Err(error) => {
+            if let Err(discard_error) = rebuild.discard().await {
+                return Err(error.context(format!(
+                    "discard staged rebuild after failure: {discard_error:#}"
+                )));
+            }
+            return Err(error);
+        }
+    };
+    rebuild.publish().await?;
+    println!(
+        "indexed {} sessions, {} messages, {} tool calls; {} errors; partial files: {}; malformed lines: {}",
+        report.sessions,
+        report.messages,
+        report.tool_calls,
+        report.errors,
+        report.partial_files,
+        report.malformed_lines
+    );
     Ok(())
 }

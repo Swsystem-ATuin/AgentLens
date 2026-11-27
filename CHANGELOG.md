@@ -6,9 +6,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Add native Windows personal mode and a Windows x64 release ZIP with a double-click launcher. GitHub Actions builds and verifies the package on the standard Windows runner before publishing it with a tagged release.
+
 - Add GitHub community guidance: code of conduct, contribution guide, security policy, accessibility statement, privacy-aware issue forms, and a pull request template; enable GitHub private vulnerability reporting.
 
 - Add `bash scripts/local.sh` for Linux/macOS personal usage review: discover the current user's supported agent homes, build, rebuild an isolated index, and start the loopback-only account-free web UI. Includes custom-home/storage overrides, index-only operation, launcher locking, child-server shutdown, and synthetic end-to-end regression coverage.
+
+- Add `scripts/local.ps1` for Windows personal usage review. It discovers local agent homes, builds or uses a supplied executable, and rebuilds an isolated index without directory links. It can serve the account-free Usage page on loopback or rebuild the index only.
 
 ### Fixed
 

@@ -1,0 +1,101 @@
+name: Windows package
+
+on:
+  push:
+    branches: [develop]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: '-C target-feature=+crt-static'
+      OPENSSL_STATIC: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install the stable Rust target and static OpenSSL
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup target add --toolchain stable x86_64-pc-windows-msvc
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows-static
+          "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static" >> $env:GITHUB_ENV
+
+      - name: Build and test Windows personal mode
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo +stable test --locked --release --target x86_64-pc-windows-msvc --test personal_windows
+          cargo +stable build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Package and verify the downloadable ZIP
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $binary = 'target\x86_64-pc-windows-msvc\release\agent-lens.exe'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              $expected = 'agent-lens ' + $env:GITHUB_REF_NAME.Substring(1)
+              if ((& $binary --version) -ne $expected) {
+                  throw "Release tag does not match the AgentLens build: expected '$expected'."
+              }
+          }
+          .\scripts\package-windows.ps1 -Binary $binary -Output dist
+          $smoke = Join-Path $env:RUNNER_TEMP 'AgentLens Windows smoke test'
+          Expand-Archive -LiteralPath dist\AgentLens-windows-x64.zip -DestinationPath $smoke
+          $env:USERPROFILE = Join-Path $smoke 'Smoke user'
+          $env:LOCALAPPDATA = Join-Path $env:USERPROFILE 'AppData\Local'
+          $sessions = Join-Path $env:USERPROFILE '.codex\sessions'
+          [void] [IO.Directory]::CreateDirectory($sessions)
+          Copy-Item -LiteralPath tests\fixtures\codex\rollout.jsonl -Destination $sessions
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Push-Location (Join-Path $smoke 'AgentLens')
+          try {
+              .\agent-lens.exe personal --index-only
+              if (-not (Test-Path -LiteralPath "$env:LOCALAPPDATA\AgentLens\index.sqlite")) {
+                  throw 'The packaged executable did not create the personal index.'
+              }
+          } finally {
+              Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: AgentLens-windows-x64
+          path: |
+            dist/AgentLens-windows-x64.zip
+            dist/AgentLens-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.repository == 'Swsystem-ATuin/AgentLens' && github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: AgentLens-windows-x64
+          path: dist
+
+      - name: Publish the tested ZIP and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          sha256sum --check AgentLens-windows-x64.zip.sha256
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            AgentLens-windows-x64.zip AgentLens-windows-x64.zip.sha256

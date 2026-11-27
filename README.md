@@ -79,6 +79,17 @@ Use `bash scripts/local.sh --port 3002` if the default port is occupied, or
 storage paths, dependency setup, reporting guidance, and current platform limits
 are documented in the [personal launcher guide](docs/personal-launcher.md).
 
+### Personal usage quick start (Windows x64)
+
+Download `AgentLens-windows-x64.zip` from the
+[GitHub release](https://github.com/Swsystem-ATuin/AgentLens/releases) that includes
+it, extract it, and double-click **Start AgentLens.cmd**. The dashboard opens at
+<http://127.0.0.1:3001/usage> after the index rebuild. Press Ctrl-C in the launcher
+window to stop it. Start AgentLens again to include new activity.
+
+See the [Windows setup guide](docs/personal-launcher.md#windows) for custom
+homes, port changes, troubleshooting, and building from a checkout.
+
 ## Run locally
 
 Create or refresh the index from raw data:

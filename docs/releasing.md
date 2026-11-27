@@ -32,7 +32,22 @@ git push --atomic s4w develop main v0.2.0
 git switch develop
 ```
 
-Replace `0.2.0` with the version being released. Verify that `develop`, `main`, the peeled tag, and the reviewed commit resolve to the same commit on both remotes. Do not move or reuse a published release tag. Release artifacts, if added later, must be built from that tag and accompanied by checksums.
+Replace `0.2.0` with the version being released. Verify that `develop`, `main`, the peeled tag, and the reviewed commit resolve to the same commit on both remotes. Do not move or reuse a published release tag.
+
+The **Windows package** workflow runs on the standard GitHub-hosted Windows x64
+runner. Runs on `develop` and manual runs produce a preview ZIP and checksum
+under Actions. Download the ZIP from a successful preview and smoke-test it on a
+Windows machine without developer tools before creating the first public Windows
+release. Check that the double-click launcher opens the dashboard and Ctrl-C
+stops it.
+
+Pushing a `vMAJOR.MINOR.PATCH` tag to the public GitHub repository starts the
+release build. The workflow checks that the executable version matches the tag,
+runs the native Windows regression tests, and rebuilds a synthetic index with
+the executable extracted from the ZIP. After those checks pass, it creates the
+GitHub Release with `AgentLens-windows-x64.zip` and its SHA-256 checksum. Leave
+release creation to the workflow for those tags. Retain the matching tag as the
+source for the package. The private mirror does not participate in this workflow.
 
 ## Upgrade to 0.2.0
 

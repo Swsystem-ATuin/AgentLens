@@ -4,7 +4,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use sqlx::{Acquire, SqliteConnection, SqlitePool};
-use std::{collections::HashSet, fs::Metadata, path::Path};
+use std::{
+    collections::HashSet,
+    fs::Metadata,
+    path::{Path, PathBuf},
+};
 use walkdir::WalkDir;
 
 #[cfg(test)]
@@ -49,13 +53,26 @@ pub(crate) async fn ingest_with_policy(
     root: &Path,
     policy: &crate::redaction::Policy,
 ) -> Result<IngestReport> {
+    ingest_sources(pool, SourceInput::Tree(root), policy).await
+}
+
+pub(crate) enum SourceInput<'a> {
+    Tree(&'a Path),
+    Personal(&'a [(Adapter, PathBuf)]),
+}
+
+pub(crate) async fn ingest_sources(
+    pool: &SqlitePool,
+    input: SourceInput<'_>,
+    policy: &crate::redaction::Policy,
+) -> Result<IngestReport> {
     let run =
         sqlx::query("INSERT INTO ingest_runs(status,source_layout) VALUES('running','unknown')")
             .execute(pool)
             .await
             .context("start ingest health record")?
             .last_insert_rowid();
-    match ingest_data_root_run(pool, root, run, policy).await {
+    match ingest_data_root_run(pool, input, run, policy).await {
         Ok(report) => Ok(report),
         Err(error) => {
             let reason = classify_run_failure(&format!("{error:#}"));
@@ -82,11 +99,14 @@ pub(crate) async fn ingest_with_policy(
 
 async fn ingest_data_root_run(
     pool: &SqlitePool,
-    root: &Path,
+    input: SourceInput<'_>,
     run: i64,
     policy: &crate::redaction::Policy,
 ) -> Result<IngestReport> {
-    let discovered = sources::discover(root)?;
+    let discovered = match input {
+        SourceInput::Tree(root) => sources::discover(root)?,
+        SourceInput::Personal(homes) => sources::discover_personal(homes)?,
+    };
     let mut transaction = pool.begin().await?;
     policy.validate_connection(&mut transaction).await?;
     let previous_layout: Option<String> = sqlx::query_scalar(
@@ -283,8 +303,10 @@ async fn ingest_data_root_run(
                 .bind(run).bind(&source_key).bind(&policy.fingerprint).bind(rule).bind(count.min(i64::MAX as u64) as i64).execute(&mut *transaction).await?;
         }
     }
-    (report.removed_sessions, report.removed_files) =
-        prune_missing_sources(&mut transaction, root, discovered.layout).await?;
+    if let SourceInput::Tree(root) = input {
+        (report.removed_sessions, report.removed_files) =
+            prune_missing_sources(&mut transaction, root, discovered.layout).await?;
+    }
     sqlx::query("UPDATE ingest_runs SET finished_at=CURRENT_TIMESTAMP,status='complete',files_seen=?,errors=? WHERE id=?")
         .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;

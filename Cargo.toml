@@ -48,6 +48,14 @@ walkdir = "2"
 webauthn-rs = "0.5.5"
 uuid = { version = "1", features = ["v5"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 openssl = "0.10"
 sha2 = "0.10"

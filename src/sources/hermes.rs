@@ -26,6 +26,8 @@ pub(crate) struct StateReader {
     session_columns: HashSet<String>,
     message_columns: HashSet<String>,
     scope: String,
+    #[cfg(windows)]
+    _snapshot_guard: File,
 }
 
 pub(crate) struct StateScan {
@@ -92,12 +94,16 @@ impl SessionRecords {
 
 impl StateReader {
     pub(crate) async fn open(path: &Path, home: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        let snapshot_guard = open_windows_snapshot(path)?;
         let metadata = std::fs::metadata(path).context("inspect Hermes state database")?;
         ensure!(metadata.is_file(), "Hermes state database is not a file");
         let options = SqliteConnectOptions::new()
             .filename(path)
             .read_only(true)
             .create_if_missing(false);
+        #[cfg(windows)]
+        let options = options.immutable(true);
         let mut connection = SqliteConnection::connect_with(&options)
             .await
             .context("open Hermes state database")?;
@@ -142,6 +148,8 @@ impl StateReader {
             session_columns,
             message_columns,
             scope,
+            #[cfg(windows)]
+            _snapshot_guard: snapshot_guard,
         })
     }
 
@@ -319,6 +327,32 @@ impl StateReader {
             display_kind = optional_column(&self.message_columns, "display_kind", "NULL"),
         )
     }
+}
+
+#[cfg(windows)]
+fn open_windows_snapshot(path: &Path) -> Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Windows SQLite can create or modify a WAL shared-memory file even in
+    // read-only mode. Prevent writes to the database while using immutable mode,
+    // and refuse a nonempty WAL because immutable mode can ignore its changes.
+    const FILE_SHARE_READ: u32 = 1;
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .context("lock Hermes state for a read-only snapshot; close Hermes and retry")?;
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    match std::fs::metadata(wal) {
+        Ok(metadata) => ensure!(
+            metadata.is_file() && metadata.len() == 0,
+            "Hermes state has an uncheckpointed WAL; close Hermes cleanly and retry"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect Hermes state WAL"),
+    }
+    Ok(guard)
 }
 
 pub(crate) fn state_databases(home: &Path) -> Result<Vec<PathBuf>> {
@@ -1065,6 +1099,23 @@ pub(crate) fn classify_message(role: &str) -> Option<MessagePresentation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_snapshot_refuses_open_writers_and_nonempty_wal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let writer = File::create(&path).unwrap();
+        assert!(open_windows_snapshot(&path).is_err());
+        drop(writer);
+
+        let wal = dir.path().join("state.db-wal");
+        std::fs::write(&wal, b"synthetic WAL").unwrap();
+        let error = open_windows_snapshot(&path).unwrap_err();
+        assert!(error.to_string().contains("uncheckpointed WAL"));
+        assert_eq!(std::fs::read(&wal).unwrap(), b"synthetic WAL");
+        assert!(!dir.path().join("state.db-shm").exists());
+    }
 
     #[tokio::test]
     async fn state_reader_tolerates_minimal_profile_schema() {

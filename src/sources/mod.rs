@@ -112,6 +112,28 @@ pub(crate) fn discover(root: &Path) -> Result<DiscoveredSources> {
     Ok(codex)
 }
 
+pub(crate) fn discover_personal(homes: &[(Adapter, PathBuf)]) -> Result<DiscoveredSources> {
+    let mut discovered = Vec::new();
+    for (adapter, path) in homes {
+        ensure!(
+            path.is_absolute() && codex::optional_directory(path)?,
+            "discover {} personal home: expected an existing absolute directory",
+            adapter.kind(),
+        );
+        discovered.push(DiscoveredHome {
+            adapter: *adapter,
+            host: "local".into(),
+            user: "current".into(),
+            path: path.clone(),
+        });
+    }
+    Ok(DiscoveredSources {
+        layout: SourceLayout::HostUser,
+        database_layout: "personal-homes",
+        homes: discovered,
+    })
+}
+
 pub(crate) fn home_belongs_to_root(
     adapter: Adapter,
     home: &Path,

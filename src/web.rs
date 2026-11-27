@@ -528,6 +528,20 @@ pub async fn serve(
     projects: crate::projects::ProjectConfig,
     secure_cookies: bool,
 ) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind {bind}"))?;
+    tracing::info!(%bind, "Agent Lens listening");
+    serve_on(pool, listener, state_store, projects, secure_cookies).await
+}
+
+pub async fn serve_on(
+    pool: SqlitePool,
+    listener: tokio::net::TcpListener,
+    state_store: crate::auth::StateStore,
+    projects: crate::projects::ProjectConfig,
+    secure_cookies: bool,
+) -> Result<()> {
     use tower_sessions::{Expiry, SessionManagerLayer, cookie::time::Duration};
     let session_layer = SessionManagerLayer::new(state_store.sessions)
         .with_name("agent_lens_session")
@@ -539,10 +553,6 @@ pub async fn serve(
         )))
         .with_always_save(true);
     let app = app_routes(pool, state_store.auth, projects).layer(session_layer);
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("bind {bind}"))?;
-    tracing::info!(%bind, "Agent Lens listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
