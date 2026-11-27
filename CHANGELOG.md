@@ -20,6 +20,8 @@ All notable changes to this project will be documented in this file. The format 
 
 - Index Zstandard-compressed Codex rollouts (`.jsonl.zst`) in both active and archived session directories. Rerun the personal launcher or refresh an existing index after updating.
 
+- Wait for SQLite file handles to close before publishing a rebuilt index. If another process is still using the index, leave the current index in place and report the problem.
+
 - Render agent-host file references as readable labels instead of broken transcript links. Preserve explicit web/email links and session-generated-image navigation; no index rebuild is required.
 
 - Collapse Codex developer instructions beginning `You are Codex,` in initial and resumed transcripts. Preserve their full content and ordinary conversation; existing indexes need no refresh or rebuild.

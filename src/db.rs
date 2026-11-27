@@ -515,21 +515,17 @@ async fn remove_database_files(path: &Path) -> Result<()> {
 async fn retry_after_close<T>(
     mut operation: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    #[cfg(windows)]
-    {
-        // Windows can briefly report SQLite files as busy while its worker
-        // finishes closing handles. Never delete or replace a file still held
-        // open after the bounded wait.
-        for _ in 0..40 {
-            match operation() {
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        || matches!(error.raw_os_error(), Some(5 | 32 | 33)) =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                result => return result,
+    // A SQLite worker may still be finishing file cleanup. Retry briefly
+    // before reporting that the index is held open.
+    for _ in 0..40 {
+        match operation() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33)) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
+            result => return result,
         }
     }
     operation()
