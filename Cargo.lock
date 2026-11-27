@@ -27,6 +27,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "futures-util",
+ "libsqlite3-sys",
  "openidconnect",
  "openssl",
  "password-hash",

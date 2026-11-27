@@ -13,6 +13,8 @@ use walkdir::WalkDir;
 
 #[cfg(test)]
 mod regression;
+#[cfg(windows)]
+mod codex_history;
 
 #[derive(sqlx::FromRow)]
 struct SourceCheckpoint {
@@ -128,13 +130,19 @@ async fn ingest_data_root_run(
         .await?;
     sqlx::query("INSERT INTO index_metadata(key,value) VALUES('redaction_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(&policy.fingerprint).execute(&mut *transaction).await?;
     let mut report = IngestReport::default();
-    for home in discovered.homes {
+    let personal = matches!(input, SourceInput::Personal(_));
+    let primary_codex = discovered.homes.iter().find(|home| home.adapter == Adapter::Codex);
+    #[cfg(windows)]
+    let mut histories = std::collections::BTreeMap::<i64, (String, Vec<PathBuf>)>::new();
+    for home in &discovered.homes {
         let adapter = home.adapter;
+        let merge_codex = cfg!(windows) && personal && adapter == Adapter::Codex;
+        let origin = if merge_codex { primary_codex.unwrap_or(home) } else { home };
         let key = crate::identity::source_id(
             adapter.kind(),
-            &home.host,
-            &home.user,
-            &home.path.to_string_lossy(),
+            &origin.host,
+            &origin.user,
+            &origin.path.to_string_lossy(),
         );
         let sanitizer = policy.for_source(&key);
         for locator in [&home.host, &home.user, home.path.to_string_lossy().as_ref()] {
@@ -144,9 +152,9 @@ async fn ingest_data_root_run(
             &mut transaction,
             adapter.kind(),
             adapter.display_name(),
-            &home.host,
-            &home.user,
-            &home.path,
+            &origin.host,
+            &origin.user,
+            &origin.path,
         )
         .await?;
         let mut roots: Vec<(std::path::PathBuf, &'static str)> = Vec::new();
@@ -154,8 +162,14 @@ async fn ingest_data_root_run(
             Adapter::Codex => {
                 for area in codex::SOURCE_AREAS {
                     let path = home.path.join(area);
-                    if codex::optional_directory(&path)? {
-                        roots.push((path, area));
+                    match codex::optional_directory(&path) {
+                        Ok(true) => roots.push((path, area)),
+                        Ok(false) => {}
+                        Err(_) if merge_codex => {
+                            report.errors += 1;
+                            codex_history_path_status(&path, &sanitizer);
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -223,14 +237,25 @@ async fn ingest_data_root_run(
                 .sort_by_file_name()
                 .into_iter()
             {
-                let entry = entry.map_err(|error| {
-                    anyhow::anyhow!(
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if merge_codex => {
+                        report.errors += 1;
+                        codex_history_path_status(error.path().unwrap_or(&dir), &sanitizer);
+                        continue;
+                    }
+                    Err(error) => return Err(anyhow::anyhow!(
                         "source traversal failed: {}",
                         error
                             .io_error()
                             .map_or(std::io::ErrorKind::Other, std::io::Error::kind)
-                    )
-                })?;
+                    )),
+                };
+                if merge_codex && entry.path_is_symlink() && !entry.file_type().is_dir() {
+                    report.errors += 1;
+                    codex_history_path_status(entry.path(), &sanitizer);
+                    continue;
+                }
                 ensure!(
                     !entry.path_is_symlink() || entry.file_type().is_dir(),
                     "source traversal encountered an unsupported file symbolic link"
@@ -257,6 +282,7 @@ async fn ingest_data_root_run(
                         entry.path(),
                         area,
                         &sanitizer,
+                        merge_codex,
                     )
                     .await
                     {
@@ -296,11 +322,27 @@ async fn ingest_data_root_run(
             }
         }
         if adapter == Adapter::Codex {
-            apply_codex_titles(&mut transaction, instance, &home.path, &sanitizer).await?;
+            apply_codex_titles(
+                &mut transaction, instance, &home.path, &sanitizer, !merge_codex || home.path == origin.path,
+            ).await?;
+            #[cfg(windows)]
+            histories.entry(instance).or_insert_with(|| (source_key.clone(), Vec::new())).1
+                .push(home.path.clone());
         }
         for (rule, count) in sanitizer.counts() {
             sqlx::query("INSERT INTO redaction_audit(ingest_run_id,source_key,policy_version,rule_id,replacement_count) VALUES(?,?,?,?,?)")
                 .bind(run).bind(&source_key).bind(&policy.fingerprint).bind(rule).bind(count.min(i64::MAX as u64) as i64).execute(&mut *transaction).await?;
+        }
+    }
+    #[cfg(windows)]
+    for (instance, (key, homes)) in histories {
+        let sanitizer = policy.for_source(&key);
+        codex_history::import(
+            &mut transaction, run, instance, &key, &homes, &sanitizer, &mut report, personal,
+        ).await?;
+        for (rule, count) in sanitizer.counts() {
+            sqlx::query("INSERT INTO redaction_audit(ingest_run_id,source_key,policy_version,rule_id,replacement_count) VALUES(?,?,?,?,?)")
+                .bind(run).bind(&key).bind(&policy.fingerprint).bind(rule).bind(count.min(i64::MAX as u64) as i64).execute(&mut *transaction).await?;
         }
     }
     if let SourceInput::Tree(root) = input {
@@ -311,6 +353,14 @@ async fn ingest_data_root_run(
         .bind(report.files_seen as i64).bind(report.errors as i64).bind(run).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(report)
+}
+
+fn codex_history_path_status(path: &Path, sanitizer: &crate::redaction::Sanitizer) {
+    if sanitizer.active() {
+        println!("Codex rollout: access failed");
+    } else {
+        println!("Codex rollout: access failed — {}", path.display());
+    }
 }
 
 fn classify_run_failure(detail: &str) -> &'static str {
@@ -464,6 +514,7 @@ async fn ingest_source(
     path: &Path,
     kind: &str,
     sanitizer: &crate::redaction::Sanitizer,
+    merge_duplicates: bool,
 ) -> Result<Option<ImportedRollout>> {
     sanitizer.check_locator(&path.to_string_lossy())?;
     let previous: Option<SourceCheckpoint> = sqlx::query_as(
@@ -518,6 +569,13 @@ async fn ingest_source(
         );
     }
     if let Some((_, old_path, old_kind)) = &existing {
+        if merge_duplicates
+            && Path::new(old_path) != path
+            && Path::new(old_path).try_exists()?
+            && !source_precedes(adapter, kind, path, old_kind, Path::new(old_path))
+        {
+            return Ok(None);
+        }
         ensure!(
             Path::new(old_path) == path
                 || !Path::new(old_path)
@@ -703,7 +761,7 @@ async fn ingest_hermes_state(
                 .await?;
         }
         let records = reader.records(&session).await?;
-        let mut records = SourceRecords::HermesState(records);
+        let mut records = SourceRecords::Buffered(records);
         let (messages, tools, _) =
             import_records(connection, session_id, &mut records, sanitizer).await?;
         message_count = message_count
@@ -745,14 +803,17 @@ async fn apply_codex_titles(
     instance: i64,
     home: &Path,
     sanitizer: &crate::redaction::Sanitizer,
+    primary: bool,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE sessions SET title=coalesce(derived_title,external_id) WHERE instance_id=? AND title IS NOT coalesce(derived_title,external_id)",
-    )
-    .bind(instance)
-    .execute(&mut *connection)
-    .await
-    .context("reset session titles to indexed fallbacks")?;
+    if primary {
+        sqlx::query(
+            "UPDATE sessions SET title=coalesce(derived_title,external_id) WHERE instance_id=? AND title IS NOT coalesce(derived_title,external_id)",
+        )
+        .bind(instance)
+        .execute(&mut *connection)
+        .await
+        .context("reset session titles to indexed fallbacks")?;
+    }
     if sanitizer.active() {
         return Ok(());
     }
@@ -762,12 +823,13 @@ async fn apply_codex_titles(
     while let Some((external_id, title)) = advisory_titles.next_title() {
         let title = sanitizer.text(&title, &[]);
         sqlx::query(
-            "UPDATE sessions SET title=? WHERE instance_id=? AND external_id=? AND title IS NOT ?",
+            "UPDATE sessions SET title=? WHERE instance_id=? AND external_id=? AND title IS NOT ? AND (? OR title IS coalesce(derived_title,external_id))",
         )
         .bind(&title)
         .bind(instance)
         .bind(&external_id)
         .bind(&title)
+        .bind(primary)
         .execute(&mut *connection)
         .await
         .context("apply advisory session title")?;
@@ -779,7 +841,7 @@ enum SourceRecords<'a> {
     Codex(codex::RolloutRecords<'a>),
     Gemini(gemini::SessionRecords),
     Hermes(hermes::SessionRecords),
-    HermesState(std::collections::VecDeque<(i64, NormalizedRecord)>),
+    Buffered(std::collections::VecDeque<(i64, NormalizedRecord)>),
 }
 
 impl SourceRecords<'_> {
@@ -788,7 +850,7 @@ impl SourceRecords<'_> {
             Self::Codex(records) => records.next_record(),
             Self::Gemini(records) => Ok(records.next_record()),
             Self::Hermes(records) => Ok(records.next_record()),
-            Self::HermesState(records) => Ok(records.pop_front()),
+            Self::Buffered(records) => Ok(records.pop_front()),
         }
     }
 
@@ -796,7 +858,7 @@ impl SourceRecords<'_> {
         match self {
             Self::Codex(records) => records.malformed_lines(),
             Self::Gemini(records) => records.malformed_lines(),
-            Self::Hermes(_) | Self::HermesState(_) => 0,
+            Self::Hermes(_) | Self::Buffered(_) => 0,
         }
     }
 }

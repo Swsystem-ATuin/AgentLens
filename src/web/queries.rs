@@ -313,7 +313,7 @@ pub(super) async fn sessions(
     );
     push_project_case(&mut query, projects);
     query.push(
-        " project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE (a.kind<>",
+        " project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind='codex_history' THEN CASE json_extract(s.raw_metadata,'$.codex_history.archived') WHEN 1 THEN 'archived' WHEN 0 THEN 'active' ELSE 'unknown' END WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE (a.kind<>",
     );
     query
         .push_bind(model_exclusion.source_kind)
@@ -348,7 +348,7 @@ pub(super) async fn sessions(
         .push_bind(filters.archive)
         .push(" IS NULL OR ")
         .push_bind(filters.archive)
-        .push("='all' OR CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END=")
+        .push("='all' OR CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind='codex_history' THEN CASE json_extract(s.raw_metadata,'$.codex_history.archived') WHEN 1 THEN 'archived' WHEN 0 THEN 'active' ELSE 'unknown' END WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END=")
         .push_bind(filters.archive)
         .push(")");
     push_date_boundary(&mut query, filters.from, projects.timezone(), ">=");
@@ -471,7 +471,7 @@ pub(super) async fn filter_values(
         .fetch_all(pool)
         .await?;
     let mut archives = QueryBuilder::<Sqlite>::new(
-        "SELECT DISTINCT CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END FROM sessions s LEFT JOIN source_files sf ON sf.id=s.source_file_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>",
+        "SELECT DISTINCT CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind='codex_history' THEN CASE json_extract(s.raw_metadata,'$.codex_history.archived') WHEN 1 THEN 'archived' WHEN 0 THEN 'active' ELSE 'unknown' END WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END FROM sessions s LEFT JOIN source_files sf ON sf.id=s.source_file_id JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id WHERE (a.kind<>",
     );
     archives
         .push_bind(model_exclusion.source_kind)
@@ -795,7 +795,7 @@ pub(super) async fn session(
     );
     push_project_case(&mut query, projects);
     query
-        .push(" project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE s.stable_id=")
+        .push(" project,CASE WHEN sf.kind='archived_sessions' THEN 'archived' WHEN sf.kind='codex_history' THEN CASE json_extract(s.raw_metadata,'$.codex_history.archived') WHEN 1 THEN 'archived' WHEN 0 THEN 'active' ELSE 'unknown' END WHEN sf.kind IS NULL THEN 'unknown' ELSE 'active' END archive_state,h.name hostname,u.os_user,(SELECT count(*) FROM messages m WHERE m.session_id=s.id) message_count,NULL match_sequence,NULL match_snippet FROM sessions s JOIN agent_instances i ON i.id=s.instance_id JOIN agents a ON a.id=i.agent_id JOIN users u ON u.id=i.user_id JOIN hosts h ON h.id=u.host_id LEFT JOIN source_files sf ON sf.id=s.source_file_id WHERE s.stable_id=")
         .push_bind(stable_id)
         .push(" AND (a.kind<>")
         .push_bind(model_exclusion.source_kind)

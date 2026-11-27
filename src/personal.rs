@@ -20,17 +20,47 @@ use windows_sys::Win32::{
     UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
 
+mod profiles;
+
 pub(crate) async fn run(
     port: u16,
     index_only: bool,
     no_browser: bool,
+    refresh: bool,
     redaction_file: Option<&Path>,
 ) -> Result<()> {
-    let homes = discover()?;
+    let profile = PathBuf::from(env::var_os("USERPROFILE").context("USERPROFILE is missing")?);
     let app_data = env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is missing")?;
+    let mask_paths = redaction_file.is_some();
+    let locations = profiles::discover(&profile, Path::new(&app_data), mask_paths);
+    let mut homes = discover(&profile)?;
+    let mut roots: Vec<_> = homes.iter().map(|(_, path)| directory_location(path)).collect::<Result<_>>()?;
+    if override_path(&["AGENT_LENS_CODEX_HOME", "CODEX_HOME"]).is_none() {
+        for candidate in locations.codex {
+            match directory_location(&candidate) {
+                Ok(path) if !roots.iter().any(|root| root.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())) => {
+                    roots.push(path);
+                    homes.push((Adapter::Codex, candidate));
+                }
+                Ok(_) => {}
+                Err(_) => profiles::report("Codex", "access failed", &candidate, mask_paths),
+            }
+        }
+    }
+    ensure!(
+        !homes.is_empty(),
+        "No supported agent homes found in USERPROFILE or app profiles; record activity or set a home override"
+    );
     let storage = override_path(&["AGENT_LENS_LOCAL_DIR"])
         .unwrap_or_else(|| PathBuf::from(app_data).join("AgentLens"));
     let storage_location = directory_location(&storage)?;
+    for profile in locations.browser_profiles {
+        let location = directory_location(&profile)?;
+        ensure!(
+            !overlaps(&storage_location, &location),
+            "Personal storage and ChatGPT browser storage must be separate directories"
+        );
+    }
     for (_, home) in &homes {
         let home = directory_location(home)?;
         ensure!(
@@ -66,18 +96,36 @@ pub(crate) async fn run(
                 .with_context(|| format!("cannot bind 127.0.0.1:{port}; try --port 3002"))?,
         )
     };
-    for (adapter, _) in &homes {
+    for (adapter, path) in &homes {
         println!("Found {}", adapter.display_name());
+        profiles::report(adapter.display_name(), "history location detected; checking recordings", path, mask_paths);
     }
-    println!("Rebuilding the personal usage index...");
     let database = storage.join("index.sqlite");
-    crate::rebuild_index(
-        &database,
-        ingest::SourceInput::Personal(&homes),
-        redaction_file,
-    )
-    .await?;
+    if refresh && database.is_file() {
+        let policy = redaction::Policy::load(redaction_file)?;
+        let pool = db::open(&database).await?;
+        let report = ingest::ingest_sources(&pool, ingest::SourceInput::Personal(&homes), &policy).await;
+        pool.close().await;
+        let report = report?;
+        println!("Personal refresh: {} sessions updated; {} sources unchanged; {} errors.",
+            report.sessions, report.skipped, report.errors);
+    } else {
+        println!("Rebuilding the personal usage index...");
+        crate::rebuild_index(&database, ingest::SourceInput::Personal(&homes), redaction_file).await?;
+    }
+    let pool = db::open(&database).await?;
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT a.display_name,count(s.id) FROM agents a LEFT JOIN agent_instances i ON i.agent_id=a.id LEFT JOIN sessions s ON s.instance_id=i.id GROUP BY a.id ORDER BY a.kind",
+    ).fetch_all(&pool).await?;
+    for (agent, count) in counts {
+        if count == 0 {
+            println!("{agent}: no supported history indexed; see the discovery diagnostics above.");
+        } else {
+            println!("{agent}: history indexed ({count} sessions in the personal index).");
+        }
+    }
     let Some(listener) = listener else {
+        pool.close().await;
         println!("Personal index rebuilt.");
         return Ok(());
     };
@@ -88,7 +136,6 @@ pub(crate) async fn run(
     )
     .await?;
     state.enable_local_mode();
-    let pool = db::open(&database).await?;
     redaction::Policy::load(redaction_file)?
         .validate_index(&pool)
         .await?;
@@ -104,8 +151,7 @@ pub(crate) async fn run(
     web::serve_on(pool, listener, state, projects, false).await
 }
 
-fn discover() -> Result<Vec<(Adapter, PathBuf)>> {
-    let profile = PathBuf::from(env::var_os("USERPROFILE").context("USERPROFILE is missing")?);
+fn discover(profile: &Path) -> Result<Vec<(Adapter, PathBuf)>> {
     let candidates: [(Adapter, &str, &[&str]); 3] = [
         (Adapter::Codex, ".codex", &["AGENT_LENS_CODEX_HOME", "CODEX_HOME"]),
         (Adapter::Gemini, ".gemini", &["AGENT_LENS_GEMINI_HOME"]),
@@ -132,10 +178,6 @@ fn discover() -> Result<Vec<(Adapter, PathBuf)>> {
         locations.push(location);
         homes.push((adapter, path));
     }
-    ensure!(
-        !homes.is_empty(),
-        "No supported agent homes found in USERPROFILE; record activity or set a home override"
-    );
     Ok(homes)
 }
 

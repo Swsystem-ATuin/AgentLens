@@ -12,6 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+pub(crate) mod history;
+
 pub(crate) const GENERATED_IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

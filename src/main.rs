@@ -64,6 +64,9 @@ enum Command {
         /// Serve and print the URL without opening the browser.
         #[arg(long)]
         no_browser: bool,
+        /// Update the existing index, retaining previously indexed data if a source is unavailable.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Validate OIDC configuration without enabling sign-in; optionally check provider discovery.
     OidcCheck {
@@ -321,7 +324,8 @@ async fn main() -> Result<()> {
             port,
             index_only,
             no_browser,
-        } => personal::run(port, index_only, no_browser, cli.redaction_file.as_deref()).await?,
+            refresh,
+        } => personal::run(port, index_only, no_browser, refresh, cli.redaction_file.as_deref()).await?,
         Command::Rebuild {
             data,
             codex_home,

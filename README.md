@@ -90,6 +90,10 @@ window to stop it. Start AgentLens again to include new activity.
 See the [Windows setup guide](docs/personal-launcher.md#windows) for custom
 homes, port changes, troubleshooting, and building from a checkout.
 
+The native launcher discovers local desktop Codex and Work rollouts and
+supported Codex SQLite history. It reports packaged ChatGPT browser storage
+without importing it.
+
 ## Run locally
 
 Create or refresh the index from raw data:

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- Discover standard and packaged Windows Codex history, merge supported SQLite projections with personal rollout indexing, and report ChatGPT desktop browser storage as unsupported for transcript import.
+- Add `agent-lens personal --refresh` to update the Windows personal index.
+
 ## [0.3.0] - 2026-11-27
 
 ### Added

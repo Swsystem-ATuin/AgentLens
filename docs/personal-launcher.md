@@ -40,6 +40,10 @@ open a terminal in the extracted folder:
 ```
 
 Add `--no-browser` to print the address and serve without opening the browser.
+Use `personal --refresh --index-only` to update an existing personal index.
+On the first run this builds the index. A refresh retains previous records
+when a source is missing or a newer recording cannot be read. For a fresh
+inventory of the recordings currently available, run without `--refresh`.
 On a managed PC, IT may need to approve the downloaded executable or launcher.
 
 ### Build from source
@@ -100,9 +104,35 @@ $env:AGENT_LENS_CODEX_HOME = "$env:USERPROFILE\custom-codex"
 ```
 
 Codex discovery reads plain `.jsonl` and compressed `.jsonl.zst` recordings from
-`sessions` and `archived_sessions`. Local Work activity appears when the desktop
-app writes a supported recording in the discovered home. ChatGPT account history
-and cloud-only Work conversations require a separate import feature.
+`sessions` and `archived_sessions`. The native launcher checks the user profile,
+environment-provided app-data paths, and both Local and Roaming app data under
+the host profile. It checks installed package directory names beginning with
+`OpenAI.Codex_` or the ChatGPT desktop package identities. An explicit Codex
+home override selects only that Codex root.
+
+On Windows, the importer probes versioned `state_*.sqlite` and
+`thread_history_*.sqlite` databases and the optional Codex SQLite catalogs.
+It checks for supported `threads`, `thread_items`, and `thread_turns` schemas and
+imports the available fields, including originator and archive metadata.
+Rollouts supply the transcript where available. SQLite supplies missing
+transcripts and can enrich rollout metadata for the same thread. An old
+catalog reference ending in `.jsonl` still matches a discovered compressed
+rollout by thread ID. Paths from catalogs do not extend discovery outside the
+configured history roots. SQLite-only history supports ordinary text and
+recognized turn lifecycle records. Tool and reasoning content in those
+projections, token records without verified accounting, and unrecognized
+schemas are skipped.
+
+An active SQLite database is read through a consistent SQLite backup with
+read-only source access and existing WAL/SHM files. An inactive database
+can be copied with its journal into private temporary storage and recovered
+there. Each database is snapshotted separately. If a coherent view is unavailable,
+close Codex cleanly and rerun. No database sidecars are created in the source.
+
+ChatGPT IndexedDB, local storage, and browser session storage are detected by
+directory markers only. Browser session storage is site state. The launcher
+does not open those databases or inspect browser credentials, and it does not
+import ordinary ChatGPT chats or cloud-only Work conversations.
 
 Windows stores its disposable index and local state under
 `%LOCALAPPDATA%\AgentLens`. `AGENT_LENS_LOCAL_DIR` can select another dedicated

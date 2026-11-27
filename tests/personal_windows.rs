@@ -17,7 +17,8 @@ fn personal(home: &Path, appdata: &Path) -> Command {
     command
         .arg("personal")
         .env("USERPROFILE", home)
-        .env("LOCALAPPDATA", appdata);
+        .env("LOCALAPPDATA", appdata)
+        .env("APPDATA", home.join("AppData/Roaming"));
     for key in [
         "AGENT_LENS_LOCAL_DIR",
         "AGENT_LENS_CODEX_HOME",
@@ -37,6 +38,79 @@ fn fixture(home: &Path, relative: &str, bytes: &[u8]) {
     let path = home.join(relative);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn packaged_codex_history_is_discovered_and_reads_active_wal_without_duplicates() {
+    use sqlx::{Connection, SqliteConnection, sqlite::{SqliteConnectOptions, SqliteJournalMode}};
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("profile");
+    let redirected = directory.path().join("redirected local appdata");
+    let packages = home.join("AppData/Local/Packages");
+    let codex = packages.join("OpenAI.Codex_testpublisher/LocalCache/Roaming/Codex");
+    let chat = packages.join("OpenAI.ChatGPT-Desktop_otherpublisher/LocalCache/Roaming/ChatGPT");
+    fixture(&chat, "IndexedDB/placeholder.leveldb/marker", b"synthetic");
+    fixture(&chat, "Session Storage/marker", b"synthetic");
+    let database = codex.join("thread_history_17.sqlite");
+    fs::create_dir_all(&codex).unwrap();
+    let mut writer = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&database).create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal),
+    ).await.unwrap();
+    sqlx::raw_sql(
+        "PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE threads(id TEXT PRIMARY KEY, name TEXT, originator TEXT, created_at_ms INTEGER, archived INTEGER, rollout_path TEXT);
+         CREATE TABLE thread_items(thread_id TEXT, turn_id TEXT, item_id TEXT, item_type TEXT, item_json TEXT, ordinal INTEGER, updated_at_ordinal INTEGER);
+         INSERT INTO threads VALUES('sqlite-only', 'Saved Work thread', 'codex_work_desktop', 1767225600000, 1, NULL);
+         INSERT INTO thread_items VALUES('sqlite-only','turn-1','item-1','userMessage','{\"type\":\"userMessage\",\"content\":[{\"type\":\"text\",\"text\":\"First synthetic text\"}]}',1,1);
+         INSERT INTO thread_items VALUES('sqlite-only','turn-1','item-2','reasoning','{\"type\":\"reasoning\",\"text\":\"Private reasoning fixture\"}',2,2);",
+    ).execute(&mut writer).await.unwrap();
+
+    let line = std::str::from_utf8(CODEX).unwrap().lines().next().unwrap();
+    let meta: serde_json::Value = serde_json::from_str(line).unwrap();
+    let duplicate = meta["payload"]["id"].as_str().unwrap();
+    let compressed = zstd::stream::encode_all(CODEX, 1).unwrap();
+    fixture(&home, ".codex/sessions/example.jsonl.zst", &compressed);
+    sqlx::query("INSERT INTO threads VALUES(?, 'Catalog title', 'Codex Desktop', NULL, 0, ?)")
+        .bind(duplicate).bind(home.join(".codex/sessions/example.jsonl").to_string_lossy().as_ref())
+        .execute(&mut writer).await.unwrap();
+    sqlx::query("INSERT INTO thread_items VALUES(?,'t','replica','agentMessage','{\"type\":\"agentMessage\",\"text\":\"Replicated body\"}',1,1)")
+        .bind(duplicate).execute(&mut writer).await.unwrap();
+    let wal = codex.join("thread_history_17.sqlite-wal");
+    let before = fs::read(&wal).unwrap();
+    assert!(!before.is_empty());
+
+    let output = personal(&home, &redirected).arg("--index-only").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("storage detected but unsupported"), "{stdout}");
+    assert!(stdout.contains("browser session storage"), "{stdout}");
+    assert!(stdout.contains("indexed 2 sessions"), "{stdout}");
+    assert_eq!(fs::read(&wal).unwrap(), before);
+
+    sqlx::query("UPDATE thread_items SET item_json='{\"type\":\"userMessage\",\"text\":\"Updated synthetic text\"}',updated_at_ordinal=3 WHERE item_id='item-1'")
+        .execute(&mut writer).await.unwrap();
+    let output = personal(&home, &redirected).args(["--index-only", "--refresh"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mut index = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(redirected.join("AgentLens/index.sqlite"))
+            .read_only(true).immutable(true),
+    ).await.unwrap();
+    let histories: Vec<String> = sqlx::query_scalar(
+        "SELECT m.content FROM messages m JOIN sessions s ON s.id=m.session_id WHERE s.external_id='sqlite-only'",
+    ).fetch_all(&mut index).await.unwrap();
+    assert_eq!(histories, ["Updated synthetic text"]);
+    let origin: String = sqlx::query_scalar(
+        "SELECT json_extract(raw_metadata,'$.codex_history.originator') FROM sessions WHERE external_id='sqlite-only'",
+    ).fetch_one(&mut index).await.unwrap();
+    assert_eq!(origin, "codex_work_desktop");
+    let replicas: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE content='Replicated body'")
+        .fetch_one(&mut index).await.unwrap();
+    assert_eq!(replicas, 0);
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions").fetch_one(&mut index).await.unwrap();
+    assert_eq!(sessions, 2);
+    index.close().await.unwrap();
+    writer.close().await.unwrap();
 }
 
 struct Server(Child);
