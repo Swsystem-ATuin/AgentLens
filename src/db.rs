@@ -450,21 +450,17 @@ async fn prepare_target_for_replacement(path: &Path) -> Result<()> {
         let mut connection = SqliteConnection::connect_with(&options)
             .await
             .with_context(|| format!("open existing SQLite index {}", path.display()))?;
-        // SQLite's checkpoint API only acts on an initialized WAL connection.
-        // Read the schema first so SQLite sees any sidecars left by the prior owner.
-        sqlx::query("PRAGMA schema_version")
+        // Let SQLite recover and retire the WAL while holding its exclusive
+        // lock. A checkpoint alone can leave sidecars even if it succeeds.
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
             .fetch_one(&mut connection)
             .await
-            .context("load existing SQLite index schema before checkpoint")?;
-        let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
-            .fetch_one(&mut connection)
-            .await
-            .context("checkpoint existing SQLite index before replacement")?;
-        connection.close().await.context("close checkpoint connection")?;
+            .context("retire WAL for existing SQLite index; stop the web server and retry rebuild")?;
         ensure!(
-            checkpoint.0 == 0,
+            mode == "delete",
             "existing SQLite index is busy; stop the web server and retry rebuild"
         );
+        connection.close().await.context("close checkpoint connection")?;
     } else {
         remove_sidecars(path)
             .await
